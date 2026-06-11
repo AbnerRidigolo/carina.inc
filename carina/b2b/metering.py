@@ -66,8 +66,30 @@ def classify_work(agents: list[str]) -> WorkType:
     return WorkType.MULTI_AGENT_ANALYSIS
 
 
+#: Chaves de payload onde o valor movimentado de uma execução pode estar.
+_VALUE_KEYS = ("value_brl", "amount", "value", "valor")
+
+
+def extract_value_brl(payload: dict) -> float:
+    """Extrai o valor movimentado (BRL) do payload de uma execução.
+
+    Procura nas chaves convencionais (:data:`_VALUE_KEYS`); retorna ``0.0``
+    quando ausente ou não numérico — execução sem valor identificável cobra
+    apenas o preço base.
+    """
+    for key in _VALUE_KEYS:
+        raw = payload.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            return abs(float(raw))
+    return 0.0
+
+
 class UsageRecord(BaseModel):
-    """Registro imutável de uma resolução cobrável."""
+    """Registro imutável de uma resolução cobrável.
+
+    Para ``EXECUTION``, ``price_brl`` = preço base + ``fee_brl`` (fee sobre o
+    ``value_brl`` movimentado, conforme docs/B2B.md).
+    """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     tenant_id: str
@@ -75,6 +97,8 @@ class UsageRecord(BaseModel):
     work_type: WorkType
     agents: list[str] = Field(default_factory=list)
     price_brl: float
+    value_brl: float = 0.0
+    fee_brl: float = 0.0
     duration_ms: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -194,10 +218,14 @@ class MeteringService:
 
     Args:
         store: Persistência dos registros. Default: :class:`InMemoryMeteringStore`.
+        settings: Configuração (fee de execução). Default: :func:`get_settings`.
     """
 
-    def __init__(self, store: MeteringStore | None = None) -> None:
+    def __init__(
+        self, store: MeteringStore | None = None, settings: Settings | None = None
+    ) -> None:
         self._store = store or InMemoryMeteringStore()
+        self._settings = settings or get_settings()
 
     async def record_resolution(
         self,
@@ -207,6 +235,7 @@ class MeteringService:
         agents: list[str],
         duration_ms: int = 0,
         work_type: WorkType | None = None,
+        value_brl: float = 0.0,
     ) -> UsageRecord:
         """Registra uma resolução e retorna o registro com o preço aplicado.
 
@@ -217,14 +246,21 @@ class MeteringService:
             duration_ms: Duração da resolução.
             work_type: Força o tipo (ex.: ``EXECUTION``); default: classificado
                 a partir de ``agents``.
+            value_brl: Valor movimentado (só relevante em ``EXECUTION`` —
+                gera o fee sobre valor, somado ao preço base).
         """
         wt = work_type or classify_work(agents)
+        fee = 0.0
+        if wt is WorkType.EXECUTION and value_brl > 0:
+            fee = round(value_brl * self._settings.carina_execution_fee_pct / 100, 2)
         record = UsageRecord(
             tenant_id=tenant_id,
             client_id=client_id,
             work_type=wt,
             agents=agents,
-            price_brl=PRICE_BRL[wt],
+            price_brl=round(PRICE_BRL[wt] + fee, 2),
+            value_brl=value_brl,
+            fee_brl=fee,
             duration_ms=duration_ms,
         )
         await self._store.append(record)

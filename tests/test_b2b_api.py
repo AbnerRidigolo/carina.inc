@@ -159,7 +159,11 @@ def test_audit_registra_flags_de_compliance(client: TestClient, monkeypatch: pyt
 
 async def _seed_pending(inbox: InboxService, client_id: str) -> str:
     request = ApprovalRequest.create(
-        client_id=client_id, agent="executor", action="place_trade", risk=RiskClass.IRREVERSIBLE
+        client_id=client_id,
+        agent="Executor",
+        action="place_trade",
+        risk=RiskClass.IRREVERSIBLE,
+        payload={"ticker": "PETR4", "amount": 50_000.0},
     )
     await inbox.submit(request)
     return request.id
@@ -193,4 +197,34 @@ def test_inbox_e_isolada_por_tenant(client: TestClient):
         headers=_auth("sk-acme"),
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "rejected"
+    body = resp.json()
+    assert body["status"] == "rejected"
+    assert "usage" not in body  # rejeição não cobra
+
+
+def test_execucao_aprovada_cobra_base_mais_fee(client: TestClient):
+    from carina.api import routes
+
+    inbox = routes.get_inbox()
+
+    async def _executar(payload: dict) -> dict:
+        return {"ok": True}
+
+    inbox.register_executor("place_trade", _executar)
+    request_id = client.portal.call(_seed_pending, inbox, "acme__c1")
+
+    resp = client.post(
+        f"/api/inbox/{request_id}/decision",
+        json={"approved": True, "decided_by": "ops@acme"},
+        headers=_auth("sk-acme"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "executed"
+    # Payload da pendência tem amount=50_000 → 0,5% = R$250 + R$75 base.
+    assert body["usage"]["work_type"] == "execution"
+    assert body["usage"]["fee_brl"] == 250.00
+    assert body["usage"]["price_brl"] == 325.00
+
+    usage = client.get("/api/usage", headers=_auth("sk-acme")).json()
+    assert usage["by_work_type"]["execution"]["total_brl"] == 325.00

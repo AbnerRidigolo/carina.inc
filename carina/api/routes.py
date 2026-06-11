@@ -22,6 +22,7 @@ from carina.api.deps import (
     get_orchestrator,
     get_watchtower,
 )
+from carina.b2b.metering import WorkType, extract_value_brl
 from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
 from carina.utils.errors import AOPError, InboxError, IntegrationError
 from carina.utils.logging import get_logger
@@ -126,13 +127,17 @@ async def list_inbox(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
 
 @router.post("/inbox/{request_id}/decision")
 async def decide(request_id: str, body: DecisionRequest, tenant: Tenant = CurrentTenant) -> dict:
-    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação do tenant."""
+    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação do tenant.
+
+    Aprovação executada de ação irreversível é uma resolução ``EXECUTION``:
+    preço base + fee sobre o valor movimentado (rejeição não cobra).
+    """
     request = await get_inbox().get(request_id)
     # 404 (e não 403) para não revelar a existência de solicitações de outros tenants.
     if request is None or not owns_client(tenant, request.client_id):
         raise HTTPException(status_code=404, detail="Solicitação não encontrada")
     try:
-        return await get_inbox().decide(
+        outcome = await get_inbox().decide(
             request_id,
             approved=body.approved,
             decided_by=body.decided_by,
@@ -140,6 +145,21 @@ async def decide(request_id: str, body: DecisionRequest, tenant: Tenant = Curren
         )
     except InboxError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if outcome.get("status") == "executed":
+        usage = await get_metering().record_resolution(
+            tenant_id=tenant.id,
+            client_id=request.client_id,
+            agents=[request.agent.lower()],
+            work_type=WorkType.EXECUTION,
+            value_brl=extract_value_brl(request.payload),
+        )
+        outcome["usage"] = {
+            "work_type": usage.work_type.value,
+            "price_brl": usage.price_brl,
+            "fee_brl": usage.fee_brl,
+        }
+    return outcome
 
 
 @router.get("/usage")

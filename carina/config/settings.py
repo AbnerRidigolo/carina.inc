@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     carina_tenant_limits: str = Field(default="", alias="CARINA_TENANT_LIMITS")
     carina_default_rpm: int = Field(default=60, alias="CARINA_DEFAULT_RPM")
     carina_default_monthly_quota: int = Field(default=0, alias="CARINA_DEFAULT_MONTHLY_QUOTA")
+
+    # ── B2B (precificação) ──────────────────────────────────────────────────
+    # Fee sobre o valor movimentado em execuções aprovadas, em % (0.5 = 0,5%).
+    # Soma-se ao preço base da resolução EXECUTION (tabela de docs/B2B.md).
+    carina_execution_fee_pct: float = Field(default=0.5, alias="CARINA_EXECUTION_FEE_PCT")
     models_config_path: str = Field(default="", alias="CARINA_MODELS_CONFIG")
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 

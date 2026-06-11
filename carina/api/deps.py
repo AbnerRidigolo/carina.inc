@@ -13,6 +13,7 @@ from functools import lru_cache
 from carina.agents.orchestrator import Orchestrator
 from carina.b2b.aops import AOPService, FalkorDBAOPStore
 from carina.b2b.metering import FalkorDBMeteringStore, MeteringService
+from carina.b2b.ratelimit import LimitsConfig, RateLimiter
 from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
 from carina.config.settings import get_settings
@@ -53,6 +54,18 @@ def get_watchtower() -> Watchtower:
     if get_settings().is_production:
         return Watchtower(store=FalkorDBAuditStore())
     return Watchtower()
+
+
+@lru_cache
+def get_limits_config() -> LimitsConfig:
+    """Limites por tenant (RPM e quota mensal) únicos do processo."""
+    return LimitsConfig()
+
+
+@lru_cache
+def get_rate_limiter() -> RateLimiter:
+    """Rate limiter único do processo (janela deslizante em memória)."""
+    return RateLimiter()
 
 
 @lru_cache

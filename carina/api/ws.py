@@ -18,8 +18,14 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from carina.api.auth import resolve_ws_tenant
-from carina.api.deps import get_metering, get_orchestrator, get_watchtower
+from carina.api.auth import quota_exhausted, resolve_ws_tenant
+from carina.api.deps import (
+    get_limits_config,
+    get_metering,
+    get_orchestrator,
+    get_rate_limiter,
+    get_watchtower,
+)
 from carina.b2b.tenants import scoped_client_id
 from carina.utils.logging import get_logger
 
@@ -44,6 +50,25 @@ async def ws_chat(websocket: WebSocket) -> None:
             if not client_id or not message:
                 await websocket.send_json(
                     {"type": "error", "detail": "client_id e message obrigatórios"}
+                )
+                continue
+
+            limits = get_limits_config().for_tenant(tenant.id)
+            if not await get_rate_limiter().try_acquire(tenant.id, limits.rpm):
+                await websocket.send_json(
+                    {
+                        "type": "rate_limited",
+                        "detail": f"Limite de {limits.rpm} requisições/min excedido",
+                        "retry_after": await get_rate_limiter().retry_after(tenant.id),
+                    }
+                )
+                continue
+            if await quota_exhausted(tenant):
+                await websocket.send_json(
+                    {
+                        "type": "rate_limited",
+                        "detail": "Quota mensal de resoluções esgotada",
+                    }
                 )
                 continue
 

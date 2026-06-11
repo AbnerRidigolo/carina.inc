@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     # Formato: "chave:tenant_id:Nome do Tenant;chave2:tenant2". Sem chaves:
     # dev usa um tenant implícito; produção falha fechada (tudo 401).
     carina_api_keys: str = Field(default="", alias="CARINA_API_KEYS")
+
+    # ── B2B (rate limiting e quotas) ────────────────────────────────────────
+    # Overrides por tenant: "tenant:rpm:resoluções_mês;tenant2:rpm". Quota 0 =
+    # ilimitada. Tenants ausentes usam os defaults abaixo.
+    carina_tenant_limits: str = Field(default="", alias="CARINA_TENANT_LIMITS")
+    carina_default_rpm: int = Field(default=60, alias="CARINA_DEFAULT_RPM")
+    carina_default_monthly_quota: int = Field(default=0, alias="CARINA_DEFAULT_MONTHLY_QUOTA")
     models_config_path: str = Field(default="", alias="CARINA_MODELS_CONFIG")
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 

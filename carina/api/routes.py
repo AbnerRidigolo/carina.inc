@@ -13,7 +13,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from carina.api.auth import CurrentTenant
+from carina.api.auth import CurrentTenant, enforce_quota
 from carina.api.deps import (
     get_aop_service,
     get_inbox,
@@ -67,6 +67,7 @@ async def health() -> dict:
 @router.post("/chat")
 async def chat(req: ChatRequest, tenant: Tenant = CurrentTenant) -> dict:
     """Processa uma mensagem via Orchestrator, com metering e auditoria."""
+    await enforce_quota(tenant)
     effective_id = scoped_client_id(tenant, req.client_id)
     orch = get_orchestrator(effective_id)
 
@@ -169,6 +170,7 @@ async def list_aops(tenant: Tenant = CurrentTenant) -> dict:
 @router.post("/aops/{aop_id}/run")
 async def run_aop(aop_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Executa um AOP agora (fora da agenda) para os clientes-alvo."""
+    await enforce_quota(tenant)
     aop = await _owned_aop(aop_id, tenant)
     try:
         return await get_aop_service().run(aop)

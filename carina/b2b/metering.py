@@ -90,6 +90,10 @@ class MeteringStore(abc.ABC):
     async def list_for_tenant(self, tenant_id: str, limit: int = 100) -> list[UsageRecord]:
         """Lista os registros mais recentes de um tenant."""
 
+    @abc.abstractmethod
+    async def count_for_tenant_since(self, tenant_id: str, since: datetime) -> int:
+        """Conta os registros do tenant a partir de ``since`` (para quotas)."""
+
 
 class InMemoryMeteringStore(MeteringStore):
     """Store em memória (dev/testes). NÃO persiste entre processos."""
@@ -106,6 +110,12 @@ class InMemoryMeteringStore(MeteringStore):
         async with self._lock:
             matches = [r for r in self._records if r.tenant_id == tenant_id]
             return [r.model_copy(deep=True) for r in matches[-limit:]]
+
+    async def count_for_tenant_since(self, tenant_id: str, since: datetime) -> int:
+        async with self._lock:
+            return sum(
+                1 for r in self._records if r.tenant_id == tenant_id and r.created_at >= since
+            )
 
 
 class FalkorDBMeteringStore(MeteringStore):
@@ -165,6 +175,18 @@ class FalkorDBMeteringStore(MeteringStore):
 
         rows = await asyncio.to_thread(_read)
         return [UsageRecord.model_validate_json(r) for r in rows]
+
+    async def count_for_tenant_since(self, tenant_id: str, since: datetime) -> int:
+        def _read() -> int:
+            graph = self._ensure_graph()
+            # created_at em ISO-8601: comparação lexicográfica == cronológica.
+            res = graph.query(
+                "MATCH (u:Usage {tenant_id: $tid}) WHERE u.created_at >= $since " "RETURN count(u)",
+                {"tid": tenant_id, "since": since.isoformat()},
+            )
+            return int(res.result_set[0][0]) if res.result_set else 0
+
+        return await asyncio.to_thread(_read)
 
 
 class MeteringService:
@@ -230,3 +252,9 @@ class MeteringService:
             "total_brl": total,
             "by_work_type": by_type,
         }
+
+    async def resolutions_this_month(self, tenant_id: str) -> int:
+        """Resoluções do tenant no mês corrente (UTC) — base da quota mensal."""
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return await self._store.count_for_tenant_since(tenant_id, month_start)

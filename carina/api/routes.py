@@ -17,6 +17,7 @@ from carina.api.auth import CurrentTenant, enforce_quota
 from carina.api.deps import (
     get_aop_service,
     get_inbox,
+    get_market_data,
     get_metering,
     get_open_finance,
     get_orchestrator,
@@ -268,3 +269,58 @@ async def list_transactions(client_id: str, tenant: Tenant = CurrentTenant) -> d
     except IntegrationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"transactions": [t.model_dump(mode="json") for t in transactions]}
+
+
+async def _record_data_query(tenant: Tenant) -> dict:
+    """Medição de uma chamada do Data Engine (SaaS por volume de chamadas)."""
+    usage = await get_metering().record_resolution(
+        tenant_id=tenant.id,
+        client_id=tenant.id,  # dado de mercado é por tenant, não por cliente final
+        agents=[],
+        work_type=WorkType.DATA_QUERY,
+    )
+    return {"work_type": usage.work_type.value, "price_brl": usage.price_brl}
+
+
+@router.get("/market/quotes")
+async def market_quotes(symbols: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Cotações B3 normalizadas (símbolos separados por vírgula)."""
+    requested = [s for s in symbols.split(",") if s.strip()]
+    if not requested:
+        raise HTTPException(status_code=422, detail="Informe ao menos um símbolo")
+    try:
+        quotes = await get_market_data().quotes(requested)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "quotes": [q.model_dump(mode="json") for q in quotes],
+        "usage": await _record_data_query(tenant),
+    }
+
+
+@router.get("/market/history/{symbol}")
+async def market_history(symbol: str, range: str = "3mo", tenant: Tenant = CurrentTenant) -> dict:
+    """Histórico diário OHLCV normalizado de um símbolo B3."""
+    try:
+        bars = await get_market_data().history(symbol, range_=range)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "symbol": symbol.upper().strip(),
+        "range": range,
+        "bars": [b.model_dump(mode="json") for b in bars],
+        "usage": await _record_data_query(tenant),
+    }
+
+
+@router.get("/market/macro")
+async def market_macro(tenant: Tenant = CurrentTenant) -> dict:
+    """Indicadores macro BCB normalizados (Selic, CDI, IPCA, PTAX)."""
+    try:
+        indicators = await get_market_data().macro()
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "indicators": [i.model_dump(mode="json") for i in indicators],
+        "usage": await _record_data_query(tenant),
+    }

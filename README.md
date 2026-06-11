@@ -58,6 +58,15 @@ inbox de aprovações. Sem chaves configuradas a API **falha fechada** (tudo 401
 em desenvolvimento, `CARINA_ALLOW_DEV_TENANT=1` habilita um tenant `dev`
 implícito (opt-in explícito, nunca em produção).
 
+## Data Engine — Camada 1 (Market Data BR)
+
+Dados de mercado B3 e macro BCB normalizados num schema único
+(`carina/data_engine/market_data.py`), em arquitetura de adapter (fontes
+atuais: brapi.dev e SGS/BCB; EODHD e B3 direto no futuro), com cache TTL para
+proteger rate limits. Endpoints (medidos como `data_query`, R$ 0,05/chamada):
+`GET /api/market/quotes?symbols=PETR4,HGLG11`, `GET /api/market/history/{symbol}`
+e `GET /api/market/macro` (Selic, CDI, IPCA, PTAX).
+
 Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
 e produtos B2B).

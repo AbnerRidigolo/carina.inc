@@ -35,15 +35,18 @@ class WorkType(str, Enum):
     MULTI_AGENT_ANALYSIS = "multi_agent_analysis"
     OPTIMIZATION = "optimization"
     EXECUTION = "execution"
+    DATA_QUERY = "data_query"
 
 
-#: Preço base B2B por resolução, em BRL (tabela de docs/B2B.md).
+#: Preço base B2B por resolução, em BRL (tabela de docs/B2B.md; DATA_QUERY é
+#: a chamada do Data Engine — "SaaS por volume de chamadas").
 PRICE_BRL: dict[WorkType, float] = {
     WorkType.QUERY: 1.50,
     WorkType.ANALYSIS: 7.50,
     WorkType.MULTI_AGENT_ANALYSIS: 15.00,
     WorkType.OPTIMIZATION: 30.00,
     WorkType.EXECUTION: 75.00,
+    WorkType.DATA_QUERY: 0.05,
 }
 
 #: Agentes cuja participação classifica a resolução como otimização.

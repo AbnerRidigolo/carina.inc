@@ -17,6 +17,7 @@ from carina.b2b.ratelimit import LimitsConfig, RateLimiter
 from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
 from carina.config.settings import get_settings
+from carina.data_engine.market_data import MarketDataService
 from carina.inbox.service import InboxService
 from carina.integrations.open_finance import FalkorDBConnectionRegistry, OpenFinanceClient
 from carina.models.router import ModelRouter, get_router
@@ -86,3 +87,9 @@ def get_open_finance() -> OpenFinanceClient:
     """Cliente Open Finance único do processo (registro FalkorDB em produção)."""
     registry = FalkorDBConnectionRegistry() if get_settings().is_production else None
     return OpenFinanceClient(registry=registry)
+
+
+@lru_cache
+def get_market_data() -> MarketDataService:
+    """Market Data BR único do processo (Data Engine — Camada 1)."""
+    return MarketDataService()

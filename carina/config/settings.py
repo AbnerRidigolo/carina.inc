@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # Fee sobre o valor movimentado em execuções aprovadas, em % (0.5 = 0,5%).
     # Soma-se ao preço base da resolução EXECUTION (tabela de docs/B2B.md).
     carina_execution_fee_pct: float = Field(default=0.5, alias="CARINA_EXECUTION_FEE_PCT")
+
+    # ── Data Engine — Camada 1 (Market Data BR) ─────────────────────────────
+    # brapi.dev (cotações/histórico B3) — token opcional, free tier sem ele.
+    brapi_token: str = Field(default="", alias="BRAPI_TOKEN")
+    brapi_base_url: str = Field(default="https://brapi.dev/api", alias="BRAPI_BASE_URL")
+    # SGS do Banco Central (macro) — API pública, sem chave.
+    bcb_base_url: str = Field(default="https://api.bcb.gov.br", alias="BCB_BASE_URL")
     models_config_path: str = Field(default="", alias="CARINA_MODELS_CONFIG")
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 

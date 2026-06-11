@@ -125,6 +125,10 @@ class InboxService:
         """Lista solicitações pendentes (não expiradas) de um cliente."""
         return await self._store.list_pending(client_id)
 
+    async def get(self, request_id: str) -> ApprovalRequest | None:
+        """Retorna uma solicitação pelo id (ou ``None``)."""
+        return await self._store.get(request_id)
+
     async def _run(self, request: ApprovalRequest) -> object:
         """Executa a ação via executor registrado."""
         executor = self._executors.get(request.action)

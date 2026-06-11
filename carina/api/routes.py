@@ -1,12 +1,29 @@
-"""Rotas REST do CARINA (FastAPI)."""
+"""Rotas REST do CARINA (FastAPI).
+
+Todas as rotas (exceto ``/health``) exigem chave de API B2B e operam no
+namespace do tenant autenticado: o ``client_id`` recebido é prefixado com o id
+do tenant antes de tocar grafo, inbox ou metering. Cada ``/chat`` atendido é
+medido (precificação por resolução) e auditado pelo Watchtower.
+"""
 
 from __future__ import annotations
+
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from carina.api.deps import get_inbox, get_orchestrator
-from carina.utils.errors import InboxError
+from carina.api.auth import CurrentTenant, enforce_quota
+from carina.api.deps import (
+    get_aop_service,
+    get_inbox,
+    get_metering,
+    get_open_finance,
+    get_orchestrator,
+    get_watchtower,
+)
+from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
+from carina.utils.errors import AOPError, InboxError, IntegrationError
 from carina.utils.logging import get_logger
 
 _log = get_logger("api")
@@ -28,6 +45,34 @@ class DecisionRequest(BaseModel):
     reason: str | None = None
 
 
+class AOPCreateRequest(BaseModel):
+    """Criação de um AOP a partir de linguagem natural."""
+
+    text: str = Field(min_length=1, description="Procedimento em linguagem natural.")
+    client_ids: list[str] = Field(min_length=1)
+    name: str | None = None
+
+
+class AOPUpdateRequest(BaseModel):
+    """Atualização de estado de um AOP."""
+
+    enabled: bool
+
+
+class ConnectionRequest(BaseModel):
+    """Registro de uma conexão Open Finance consentida (item do agregador)."""
+
+    item_id: str = Field(min_length=1)
+
+
+def _scoped(tenant: Tenant, client_id: str) -> str:
+    """``scoped_client_id`` com fronteira HTTP: client_id inválido → 422."""
+    try:
+        return scoped_client_id(tenant, client_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/health")
 async def health() -> dict:
     """Liveness simples."""
@@ -35,22 +80,57 @@ async def health() -> dict:
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest) -> dict:
-    """Processa uma mensagem via Orchestrator (multi-agente)."""
-    orch = get_orchestrator(req.client_id)
-    return await orch.handle(req.message)
+async def chat(req: ChatRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Processa uma mensagem via Orchestrator, com metering e auditoria."""
+    await enforce_quota(tenant)
+    effective_id = _scoped(tenant, req.client_id)
+    orch = get_orchestrator(effective_id)
+
+    started = time.monotonic()
+    outcome = await orch.handle(req.message)
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    agents = outcome["plan"].get("agents", [])
+    usage = await get_metering().record_resolution(
+        tenant_id=tenant.id,
+        client_id=effective_id,
+        agents=agents,
+        duration_ms=duration_ms,
+    )
+    audit = await get_watchtower().review(
+        tenant_id=tenant.id,
+        client_id=effective_id,
+        query=req.message,
+        results=outcome["results"],
+        channel="rest",
+        duration_ms=duration_ms,
+    )
+
+    return {
+        **outcome,
+        "usage": {"work_type": usage.work_type.value, "price_brl": usage.price_brl},
+        "compliance": {
+            "audit_id": audit.id,
+            "flags": [f.model_dump() for f in audit.flags],
+        },
+    }
 
 
 @router.get("/clients/{client_id}/inbox")
-async def list_inbox(client_id: str) -> dict:
-    """Lista as aprovações pendentes de um cliente."""
-    pending = await get_inbox().list_pending(client_id)
+async def list_inbox(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Lista as aprovações pendentes de um cliente (escopo do tenant)."""
+    effective_id = _scoped(tenant, client_id)
+    pending = await get_inbox().list_pending(effective_id)
     return {"pending": [p.model_dump(mode="json") for p in pending]}
 
 
 @router.post("/inbox/{request_id}/decision")
-async def decide(request_id: str, body: DecisionRequest) -> dict:
-    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação."""
+async def decide(request_id: str, body: DecisionRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação do tenant."""
+    request = await get_inbox().get(request_id)
+    # 404 (e não 403) para não revelar a existência de solicitações de outros tenants.
+    if request is None or not owns_client(tenant, request.client_id):
+        raise HTTPException(status_code=404, detail="Solicitação não encontrada")
     try:
         return await get_inbox().decide(
             request_id,
@@ -60,3 +140,111 @@ async def decide(request_id: str, body: DecisionRequest) -> dict:
         )
     except InboxError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/usage")
+async def usage(tenant: Tenant = CurrentTenant) -> dict:
+    """Resumo de uso e cobrança do tenant (precificação por resolução)."""
+    return await get_metering().summary(tenant.id)
+
+
+@router.get("/audit")
+async def audit_trail(limit: int = 100, tenant: Tenant = CurrentTenant) -> dict:
+    """Trilha de auditoria do Watchtower para o tenant."""
+    events = await get_watchtower().trail(tenant.id, limit=min(limit, 500))
+    return {"events": [e.model_dump(mode="json") for e in events]}
+
+
+async def _owned_aop(aop_id: str, tenant: Tenant):
+    """Resolve um AOP do tenant; 404 se não existir ou for de outro tenant."""
+    aop = await get_aop_service().get(aop_id)
+    if aop is None or aop.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="AOP não encontrado")
+    return aop
+
+
+@router.post("/aops", status_code=201)
+async def create_aop(body: AOPCreateRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Cria um AOP a partir da descrição em linguagem natural."""
+    try:
+        aop = await get_aop_service().create_from_text(
+            tenant_id=tenant.id, text=body.text, client_ids=body.client_ids, name=body.name
+        )
+    except AOPError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return aop.model_dump(mode="json")
+
+
+@router.get("/aops")
+async def list_aops(tenant: Tenant = CurrentTenant) -> dict:
+    """Lista os AOPs do tenant."""
+    aops = await get_aop_service().list_for_tenant(tenant.id)
+    return {"aops": [a.model_dump(mode="json") for a in aops]}
+
+
+@router.post("/aops/{aop_id}/run")
+async def run_aop(aop_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Executa um AOP agora (fora da agenda) para os clientes-alvo."""
+    await enforce_quota(tenant)
+    aop = await _owned_aop(aop_id, tenant)
+    try:
+        return await get_aop_service().run(aop)
+    except AOPError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/aops/{aop_id}")
+async def update_aop(aop_id: str, body: AOPUpdateRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Habilita/desabilita um AOP."""
+    await _owned_aop(aop_id, tenant)
+    aop = await get_aop_service().set_enabled(aop_id, body.enabled)
+    return aop.model_dump(mode="json")
+
+
+@router.post("/clients/{client_id}/connections", status_code=201)
+async def add_connection(
+    client_id: str, body: ConnectionRequest, tenant: Tenant = CurrentTenant
+) -> dict:
+    """Registra uma conexão Open Finance consentida do cliente."""
+    effective_id = _scoped(tenant, client_id)
+    await get_open_finance().registry.add(effective_id, body.item_id)
+    return {"client_id": client_id, "item_id": body.item_id}
+
+
+@router.get("/clients/{client_id}/connections")
+async def list_connections(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Lista as conexões Open Finance do cliente (escopo do tenant)."""
+    effective_id = _scoped(tenant, client_id)
+    return {"item_ids": await get_open_finance().registry.list_items(effective_id)}
+
+
+@router.delete("/clients/{client_id}/connections/{item_id}")
+async def remove_connection(client_id: str, item_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Remove uma conexão Open Finance do cliente."""
+    effective_id = _scoped(tenant, client_id)
+    removed = await get_open_finance().registry.remove(effective_id, item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Conexão não encontrada")
+    return {"removed": True}
+
+
+@router.get("/clients/{client_id}/positions")
+async def list_positions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Posições consolidadas (Open Finance) de todas as conexões do cliente."""
+    effective_id = _scoped(tenant, client_id)
+    try:
+        positions = await get_open_finance().fetch_positions(effective_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"positions": [p.model_dump(mode="json") for p in positions]}
+
+
+@router.get("/clients/{client_id}/transactions")
+async def list_transactions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Transações consolidadas (Open Finance) de todas as conexões do cliente."""
+    effective_id = _scoped(tenant, client_id)
+    try:
+        transactions = await get_open_finance().fetch_transactions(effective_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"transactions": [t.model_dump(mode="json") for t in transactions]}

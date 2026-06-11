@@ -177,7 +177,13 @@ class CarinaBaseAgent:
 
     @staticmethod
     def make_msg(content: str, *, name: str = "user", role: str = "user") -> Any:
-        """Helper para criar um ``agentscope.message.Msg``."""
+        """Helper para criar um ``agentscope.message.Msg``.
+
+        AgentScope 2.x exige ``content`` como lista de blocos; 1.x aceita str.
+        """
         from agentscope.message import Msg
 
-        return Msg(name=name, content=content, role=role)
+        try:
+            return Msg(name=name, content=content, role=role)
+        except Exception:  # noqa: BLE001 - compat 2.x (content em blocos)
+            return Msg(name=name, content=[{"type": "text", "text": content}], role=role)

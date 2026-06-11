@@ -42,12 +42,30 @@ class Settings(BaseSettings):
     # ── Operacional ──────────────────────────────────────────────────────────
     carina_env: str = Field(default="dev", alias="CARINA_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    # ── B2B (chaves de API por tenant) ──────────────────────────────────────
+    # Formato: "chave:tenant_id:Nome do Tenant;chave2:tenant2". Tenant ids não
+    # podem conter "__" (separador de namespace). Sem chaves: falha fechada,
+    # exceto em dev com CARINA_ALLOW_DEV_TENANT=1 (tenant implícito).
+    carina_api_keys: str = Field(default="", alias="CARINA_API_KEYS")
+    carina_allow_dev_tenant: bool = Field(default=False, alias="CARINA_ALLOW_DEV_TENANT")
+
+    # ── B2B (rate limiting e quotas) ────────────────────────────────────────
+    # Overrides por tenant: "tenant:rpm:resoluções_mês;tenant2:rpm". Quota 0 =
+    # ilimitada. Tenants ausentes usam os defaults abaixo.
+    carina_tenant_limits: str = Field(default="", alias="CARINA_TENANT_LIMITS")
+    carina_default_rpm: int = Field(default=60, alias="CARINA_DEFAULT_RPM")
+    carina_default_monthly_quota: int = Field(default=0, alias="CARINA_DEFAULT_MONTHLY_QUOTA")
     models_config_path: str = Field(default="", alias="CARINA_MODELS_CONFIG")
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 
     # ── Integrações (opcionais até F3/F4) ────────────────────────────────────
+    # Open Finance via agregador (atual: Pluggy — credenciais do dashboard).
     open_finance_client_id: str = Field(default="", alias="OPEN_FINANCE_CLIENT_ID")
     open_finance_client_secret: str = Field(default="", alias="OPEN_FINANCE_CLIENT_SECRET")
+    open_finance_base_url: str = Field(
+        default="https://api.pluggy.ai", alias="OPEN_FINANCE_BASE_URL"
+    )
     whatsapp_token: str = Field(default="", alias="WHATSAPP_TOKEN")
     smtp_host: str = Field(default="", alias="SMTP_HOST")
     smtp_user: str = Field(default="", alias="SMTP_USER")

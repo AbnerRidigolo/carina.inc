@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # ── Operacional ──────────────────────────────────────────────────────────
     carina_env: str = Field(default="dev", alias="CARINA_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    # ── B2B (chaves de API por tenant) ──────────────────────────────────────
+    # Formato: "chave:tenant_id:Nome do Tenant;chave2:tenant2". Sem chaves:
+    # dev usa um tenant implícito; produção falha fechada (tudo 401).
+    carina_api_keys: str = Field(default="", alias="CARINA_API_KEYS")
     models_config_path: str = Field(default="", alias="CARINA_MODELS_CONFIG")
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 

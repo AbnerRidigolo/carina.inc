@@ -1,11 +1,21 @@
-"""Rotas REST do CARINA (FastAPI)."""
+"""Rotas REST do CARINA (FastAPI).
+
+Todas as rotas (exceto ``/health``) exigem chave de API B2B e operam no
+namespace do tenant autenticado: o ``client_id`` recebido é prefixado com o id
+do tenant antes de tocar grafo, inbox ou metering. Cada ``/chat`` atendido é
+medido (precificação por resolução) e auditado pelo Watchtower.
+"""
 
 from __future__ import annotations
+
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from carina.api.deps import get_inbox, get_orchestrator
+from carina.api.auth import CurrentTenant
+from carina.api.deps import get_inbox, get_metering, get_orchestrator, get_watchtower
+from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
 from carina.utils.errors import InboxError
 from carina.utils.logging import get_logger
 
@@ -35,22 +45,56 @@ async def health() -> dict:
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest) -> dict:
-    """Processa uma mensagem via Orchestrator (multi-agente)."""
-    orch = get_orchestrator(req.client_id)
-    return await orch.handle(req.message)
+async def chat(req: ChatRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Processa uma mensagem via Orchestrator, com metering e auditoria."""
+    effective_id = scoped_client_id(tenant, req.client_id)
+    orch = get_orchestrator(effective_id)
+
+    started = time.monotonic()
+    outcome = await orch.handle(req.message)
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    agents = outcome["plan"].get("agents", [])
+    usage = await get_metering().record_resolution(
+        tenant_id=tenant.id,
+        client_id=effective_id,
+        agents=agents,
+        duration_ms=duration_ms,
+    )
+    audit = await get_watchtower().review(
+        tenant_id=tenant.id,
+        client_id=effective_id,
+        query=req.message,
+        results=outcome["results"],
+        channel="rest",
+        duration_ms=duration_ms,
+    )
+
+    return {
+        **outcome,
+        "usage": {"work_type": usage.work_type.value, "price_brl": usage.price_brl},
+        "compliance": {
+            "audit_id": audit.id,
+            "flags": [f.model_dump() for f in audit.flags],
+        },
+    }
 
 
 @router.get("/clients/{client_id}/inbox")
-async def list_inbox(client_id: str) -> dict:
-    """Lista as aprovações pendentes de um cliente."""
-    pending = await get_inbox().list_pending(client_id)
+async def list_inbox(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Lista as aprovações pendentes de um cliente (escopo do tenant)."""
+    effective_id = scoped_client_id(tenant, client_id)
+    pending = await get_inbox().list_pending(effective_id)
     return {"pending": [p.model_dump(mode="json") for p in pending]}
 
 
 @router.post("/inbox/{request_id}/decision")
-async def decide(request_id: str, body: DecisionRequest) -> dict:
-    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação."""
+async def decide(request_id: str, body: DecisionRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Aplica a decisão humana (aprovar/rejeitar) a uma solicitação do tenant."""
+    request = await get_inbox().get(request_id)
+    # 404 (e não 403) para não revelar a existência de solicitações de outros tenants.
+    if request is None or not owns_client(tenant, request.client_id):
+        raise HTTPException(status_code=404, detail="Solicitação não encontrada")
     try:
         return await get_inbox().decide(
             request_id,
@@ -60,3 +104,16 @@ async def decide(request_id: str, body: DecisionRequest) -> dict:
         )
     except InboxError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/usage")
+async def usage(tenant: Tenant = CurrentTenant) -> dict:
+    """Resumo de uso e cobrança do tenant (precificação por resolução)."""
+    return await get_metering().summary(tenant.id)
+
+
+@router.get("/audit")
+async def audit_trail(limit: int = 100, tenant: Tenant = CurrentTenant) -> dict:
+    """Trilha de auditoria do Watchtower para o tenant."""
+    events = await get_watchtower().trail(tenant.id, limit=min(limit, 500))
+    return {"events": [e.model_dump(mode="json") for e in events]}

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import json
 from typing import Any
 
 from carina.config.settings import Settings, get_settings

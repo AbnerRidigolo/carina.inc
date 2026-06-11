@@ -46,6 +46,17 @@ pytest -m integration       # testes live (exigem credenciais reais)
 
 A troca de modelos é feita em [carina/config/models.yaml](carina/config/models.yaml) — sem tocar em código.
 
-Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md) e
+## API B2B (Agent API)
+
+A API REST/WS é multi-tenant: toda rota (exceto `/api/health`) exige chave de API
+(`Authorization: Bearer sk-...` ou `X-API-Key`), configurada em `CARINA_API_KEYS`.
+Cada resolução é medida e precificada por trabalho (`carina/b2b/metering.py`) e
+auditada pelo **Watchtower** (`carina/b2b/watchtower.py`) — flags de compliance
+(suitability, LGPD/PII, recomendação não autorizada CVM, disclaimers) e trilha
+append-only. Endpoints do tenant: `POST /api/chat`, `GET /api/usage`, `GET /api/audit`,
+inbox de aprovações. Sem chaves configuradas, dev usa um tenant implícito e
+**produção rejeita tudo** (falha fechada).
+
+Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
 e produtos B2B).

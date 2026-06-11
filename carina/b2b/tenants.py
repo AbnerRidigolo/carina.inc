@@ -11,9 +11,15 @@ As chaves vêm da variável ``CARINA_API_KEYS`` no formato::
     sk-live-abc:acme:Acme Fintech;sk-live-def:warren:Warren
 
 Apenas o hash SHA-256 das chaves fica em memória após o parse. Sem chaves
-configuradas, o comportamento depende do ambiente: em desenvolvimento existe um
-tenant ``dev`` implícito (para não quebrar o fluxo local); em produção a API
-falha fechada (nenhuma requisição autenticada).
+configuradas, a API só atende quando o ambiente é de desenvolvimento E
+``CARINA_ALLOW_DEV_TENANT=1`` (tenant ``dev`` implícito, opt-in explícito);
+em qualquer outro caso a API falha fechada (nenhuma requisição autenticada).
+
+O isolamento depende do separador ``__``: por isso ele é PROIBIDO tanto em
+``client_id`` (validado em :func:`scoped_client_id`) quanto em tenant ids
+(entradas inválidas de ``CARINA_API_KEYS`` são descartadas no parse). Com o
+separador banido das duas pontas, todo id efetivo tem exatamente um ``__`` e
+colisões de namespace são impossíveis por construção.
 """
 
 from __future__ import annotations
@@ -28,8 +34,8 @@ from carina.utils.logging import get_logger
 
 _log = get_logger(__name__)
 
-#: Separador entre tenant e client_id no id efetivo (escolhido para não colidir
-#: com ids comuns e permitir checagem de posse por prefixo).
+#: Separador entre tenant e client_id no id efetivo. Proibido dentro de
+#: tenant ids e client_ids — é o que garante a unicidade do namespace.
 _SCOPE_SEP = "__"
 
 _DEV_TENANT_ID = "dev"
@@ -43,8 +49,23 @@ class Tenant(BaseModel):
     plan: str = Field(default="standard", description="Plano comercial (informativo).")
 
 
+def ensure_valid_client_id(client_id: str) -> None:
+    """Valida um ``client_id`` vindo da API.
+
+    Raises:
+        ValueError: Se contiver o separador de namespace ``__``.
+    """
+    if _SCOPE_SEP in client_id:
+        raise ValueError(f"client_id não pode conter '{_SCOPE_SEP}' (separador de namespace)")
+
+
 def scoped_client_id(tenant: Tenant, client_id: str) -> str:
-    """Retorna o ``client_id`` efetivo, isolado no namespace do tenant."""
+    """Retorna o ``client_id`` efetivo, isolado no namespace do tenant.
+
+    Raises:
+        ValueError: Se ``client_id`` contiver o separador ``__``.
+    """
+    ensure_valid_client_id(client_id)
     return f"{tenant.id}{_SCOPE_SEP}{client_id}"
 
 
@@ -76,6 +97,11 @@ class ApiKeyStore:
                 _log.warning("apikeys.entry_invalid", entry_prefix=entry[:8])
                 continue
             key, tenant_id = parts[0], parts[1]
+            if _SCOPE_SEP in tenant_id:
+                # '__' quebraria a unicidade do namespace (tenant 'a__b' colide
+                # com o client 'b' do tenant 'a') — entrada descartada.
+                _log.warning("apikeys.tenant_id_invalid", tenant_id=tenant_id)
+                continue
             name = parts[2] if len(parts) == 3 else tenant_id
             self._by_hash[_hash_key(key)] = Tenant(id=tenant_id, name=name)
         _log.info("apikeys.loaded", tenants=len(self._by_hash))
@@ -88,11 +114,12 @@ class ApiKeyStore:
     def resolve(self, key: str | None) -> Tenant | None:
         """Resolve uma chave apresentada em um :class:`Tenant` (ou ``None``).
 
-        Sem chaves configuradas: em dev retorna o tenant ``dev`` implícito;
-        em produção retorna ``None`` (falha fechada).
+        Sem chaves configuradas: falha fechada, EXCETO quando o ambiente é de
+        desenvolvimento e ``CARINA_ALLOW_DEV_TENANT=1`` (opt-in explícito do
+        tenant ``dev`` implícito).
         """
         if not self.has_keys:
-            if self._settings.is_production:
+            if self._settings.is_production or not self._settings.carina_allow_dev_tenant:
                 return None
             return Tenant(id=_DEV_TENANT_ID, name="Desenvolvimento local")
         if not key:

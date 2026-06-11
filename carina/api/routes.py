@@ -65,6 +65,14 @@ class ConnectionRequest(BaseModel):
     item_id: str = Field(min_length=1)
 
 
+def _scoped(tenant: Tenant, client_id: str) -> str:
+    """``scoped_client_id`` com fronteira HTTP: client_id inválido → 422."""
+    try:
+        return scoped_client_id(tenant, client_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/health")
 async def health() -> dict:
     """Liveness simples."""
@@ -75,7 +83,7 @@ async def health() -> dict:
 async def chat(req: ChatRequest, tenant: Tenant = CurrentTenant) -> dict:
     """Processa uma mensagem via Orchestrator, com metering e auditoria."""
     await enforce_quota(tenant)
-    effective_id = scoped_client_id(tenant, req.client_id)
+    effective_id = _scoped(tenant, req.client_id)
     orch = get_orchestrator(effective_id)
 
     started = time.monotonic()
@@ -111,7 +119,7 @@ async def chat(req: ChatRequest, tenant: Tenant = CurrentTenant) -> dict:
 @router.get("/clients/{client_id}/inbox")
 async def list_inbox(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Lista as aprovações pendentes de um cliente (escopo do tenant)."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     pending = await get_inbox().list_pending(effective_id)
     return {"pending": [p.model_dump(mode="json") for p in pending]}
 
@@ -198,7 +206,7 @@ async def add_connection(
     client_id: str, body: ConnectionRequest, tenant: Tenant = CurrentTenant
 ) -> dict:
     """Registra uma conexão Open Finance consentida do cliente."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     await get_open_finance().registry.add(effective_id, body.item_id)
     return {"client_id": client_id, "item_id": body.item_id}
 
@@ -206,14 +214,14 @@ async def add_connection(
 @router.get("/clients/{client_id}/connections")
 async def list_connections(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Lista as conexões Open Finance do cliente (escopo do tenant)."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     return {"item_ids": await get_open_finance().registry.list_items(effective_id)}
 
 
 @router.delete("/clients/{client_id}/connections/{item_id}")
 async def remove_connection(client_id: str, item_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Remove uma conexão Open Finance do cliente."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     removed = await get_open_finance().registry.remove(effective_id, item_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Conexão não encontrada")
@@ -223,7 +231,7 @@ async def remove_connection(client_id: str, item_id: str, tenant: Tenant = Curre
 @router.get("/clients/{client_id}/positions")
 async def list_positions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Posições consolidadas (Open Finance) de todas as conexões do cliente."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     try:
         positions = await get_open_finance().fetch_positions(effective_id)
     except IntegrationError as exc:
@@ -234,7 +242,7 @@ async def list_positions(client_id: str, tenant: Tenant = CurrentTenant) -> dict
 @router.get("/clients/{client_id}/transactions")
 async def list_transactions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
     """Transações consolidadas (Open Finance) de todas as conexões do cliente."""
-    effective_id = scoped_client_id(tenant, client_id)
+    effective_id = _scoped(tenant, client_id)
     try:
         transactions = await get_open_finance().fetch_transactions(effective_id)
     except IntegrationError as exc:

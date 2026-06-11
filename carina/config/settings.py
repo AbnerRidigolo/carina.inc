@@ -44,9 +44,11 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     # ── B2B (chaves de API por tenant) ──────────────────────────────────────
-    # Formato: "chave:tenant_id:Nome do Tenant;chave2:tenant2". Sem chaves:
-    # dev usa um tenant implícito; produção falha fechada (tudo 401).
+    # Formato: "chave:tenant_id:Nome do Tenant;chave2:tenant2". Tenant ids não
+    # podem conter "__" (separador de namespace). Sem chaves: falha fechada,
+    # exceto em dev com CARINA_ALLOW_DEV_TENANT=1 (tenant implícito).
     carina_api_keys: str = Field(default="", alias="CARINA_API_KEYS")
+    carina_allow_dev_tenant: bool = Field(default=False, alias="CARINA_ALLOW_DEV_TENANT")
 
     # ── B2B (rate limiting e quotas) ────────────────────────────────────────
     # Overrides por tenant: "tenant:rpm:resoluções_mês;tenant2:rpm". Quota 0 =

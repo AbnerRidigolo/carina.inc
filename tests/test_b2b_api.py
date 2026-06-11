@@ -101,6 +101,17 @@ def test_chat_escopa_client_id_e_retorna_usage_e_compliance(client: TestClient):
     assert body["compliance"]["audit_id"]
 
 
+def test_client_id_com_separador_retorna_422(client: TestClient):
+    # '__' quebraria o namespace do tenant — rejeitado na fronteira HTTP.
+    resp = client.post(
+        "/api/chat",
+        json={"client_id": "staging__victim", "message": "oi"},
+        headers=_auth("sk-acme"),
+    )
+    assert resp.status_code == 422
+    assert client.get("/api/clients/a__b/inbox", headers=_auth("sk-acme")).status_code == 422
+
+
 def test_chat_aceita_x_api_key(client: TestClient):
     resp = client.post(
         "/api/chat",

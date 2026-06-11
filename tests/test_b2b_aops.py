@@ -115,6 +115,12 @@ async def test_create_sem_agentes_identificaveis_falha():
         await svc.create_from_text(tenant_id="acme", text="Bom dia!", client_ids=["c1"])
 
 
+async def test_create_com_client_id_invalido_falha():
+    svc = AOPService()
+    with pytest.raises(AOPError, match="__"):
+        await svc.create_from_text(tenant_id="acme", text=_TEXT_SEXTA, client_ids=["a__b"])
+
+
 async def test_run_executa_mede_e_audita(fake_registry: None):
     metering = MeteringService()
     watchtower = Watchtower()

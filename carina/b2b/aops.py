@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from carina.b2b.metering import MeteringService
-from carina.b2b.tenants import Tenant, scoped_client_id
+from carina.b2b.tenants import Tenant, ensure_valid_client_id, scoped_client_id
 from carina.b2b.watchtower import Watchtower
 from carina.config.settings import Settings, get_settings
 from carina.models.roles import Role
@@ -393,8 +393,14 @@ class AOPService:
         """Compila a descrição em linguagem natural e persiste o AOP.
 
         Raises:
-            AOPError: Se nenhum agente válido for identificado na descrição.
+            AOPError: Se nenhum agente válido for identificado na descrição ou
+                se algum ``client_id`` for inválido.
         """
+        for client_id in client_ids:
+            try:
+                ensure_valid_client_id(client_id)
+            except ValueError as exc:
+                raise AOPError(str(exc)) from exc
         compiled = await self._compiler.compile(text)
         if not compiled.agents:
             raise AOPError(

@@ -54,8 +54,9 @@ Cada resolução é medida e precificada por trabalho (`carina/b2b/metering.py`)
 auditada pelo **Watchtower** (`carina/b2b/watchtower.py`) — flags de compliance
 (suitability, LGPD/PII, recomendação não autorizada CVM, disclaimers) e trilha
 append-only. Endpoints do tenant: `POST /api/chat`, `GET /api/usage`, `GET /api/audit`,
-inbox de aprovações. Sem chaves configuradas, dev usa um tenant implícito e
-**produção rejeita tudo** (falha fechada).
+inbox de aprovações. Sem chaves configuradas a API **falha fechada** (tudo 401);
+em desenvolvimento, `CARINA_ALLOW_DEV_TENANT=1` habilita um tenant `dev`
+implícito (opt-in explícito, nunca em produção).
 
 Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia

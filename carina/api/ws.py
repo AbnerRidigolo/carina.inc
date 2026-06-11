@@ -72,7 +72,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
-            effective_id = scoped_client_id(tenant, client_id)
+            try:
+                effective_id = scoped_client_id(tenant, client_id)
+            except ValueError as exc:
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+                continue
             orch = get_orchestrator(effective_id)
             try:
                 started = time.monotonic()

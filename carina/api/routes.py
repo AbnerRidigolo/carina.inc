@@ -14,9 +14,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from carina.api.auth import CurrentTenant
-from carina.api.deps import get_inbox, get_metering, get_orchestrator, get_watchtower
+from carina.api.deps import (
+    get_aop_service,
+    get_inbox,
+    get_metering,
+    get_orchestrator,
+    get_watchtower,
+)
 from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
-from carina.utils.errors import InboxError
+from carina.utils.errors import AOPError, InboxError
 from carina.utils.logging import get_logger
 
 _log = get_logger("api")
@@ -36,6 +42,20 @@ class DecisionRequest(BaseModel):
     approved: bool
     decided_by: str = Field(min_length=1)
     reason: str | None = None
+
+
+class AOPCreateRequest(BaseModel):
+    """Criação de um AOP a partir de linguagem natural."""
+
+    text: str = Field(min_length=1, description="Procedimento em linguagem natural.")
+    client_ids: list[str] = Field(min_length=1)
+    name: str | None = None
+
+
+class AOPUpdateRequest(BaseModel):
+    """Atualização de estado de um AOP."""
+
+    enabled: bool
 
 
 @router.get("/health")
@@ -117,3 +137,48 @@ async def audit_trail(limit: int = 100, tenant: Tenant = CurrentTenant) -> dict:
     """Trilha de auditoria do Watchtower para o tenant."""
     events = await get_watchtower().trail(tenant.id, limit=min(limit, 500))
     return {"events": [e.model_dump(mode="json") for e in events]}
+
+
+async def _owned_aop(aop_id: str, tenant: Tenant):
+    """Resolve um AOP do tenant; 404 se não existir ou for de outro tenant."""
+    aop = await get_aop_service().get(aop_id)
+    if aop is None or aop.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="AOP não encontrado")
+    return aop
+
+
+@router.post("/aops", status_code=201)
+async def create_aop(body: AOPCreateRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Cria um AOP a partir da descrição em linguagem natural."""
+    try:
+        aop = await get_aop_service().create_from_text(
+            tenant_id=tenant.id, text=body.text, client_ids=body.client_ids, name=body.name
+        )
+    except AOPError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return aop.model_dump(mode="json")
+
+
+@router.get("/aops")
+async def list_aops(tenant: Tenant = CurrentTenant) -> dict:
+    """Lista os AOPs do tenant."""
+    aops = await get_aop_service().list_for_tenant(tenant.id)
+    return {"aops": [a.model_dump(mode="json") for a in aops]}
+
+
+@router.post("/aops/{aop_id}/run")
+async def run_aop(aop_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Executa um AOP agora (fora da agenda) para os clientes-alvo."""
+    aop = await _owned_aop(aop_id, tenant)
+    try:
+        return await get_aop_service().run(aop)
+    except AOPError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/aops/{aop_id}")
+async def update_aop(aop_id: str, body: AOPUpdateRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Habilita/desabilita um AOP."""
+    await _owned_aop(aop_id, tenant)
+    aop = await get_aop_service().set_enabled(aop_id, body.enabled)
+    return aop.model_dump(mode="json")

@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from carina.agents.orchestrator import Orchestrator
+from carina.b2b.aops import AOPService, FalkorDBAOPStore
 from carina.b2b.metering import FalkorDBMeteringStore, MeteringService
 from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
@@ -52,3 +53,15 @@ def get_watchtower() -> Watchtower:
     if get_settings().is_production:
         return Watchtower(store=FalkorDBAuditStore())
     return Watchtower()
+
+
+@lru_cache
+def get_aop_service() -> AOPService:
+    """Serviço de AOPs único do processo (compartilha metering e Watchtower)."""
+    store = FalkorDBAOPStore() if get_settings().is_production else None
+    return AOPService(
+        store=store,
+        router=get_router(),
+        metering=get_metering(),
+        watchtower=get_watchtower(),
+    )

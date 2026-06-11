@@ -47,4 +47,5 @@ pytest -m integration       # testes live (exigem credenciais reais)
 A troca de modelos é feita em [carina/config/models.yaml](carina/config/models.yaml) — sem tocar em código.
 
 Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md) e
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
+e produtos B2B).

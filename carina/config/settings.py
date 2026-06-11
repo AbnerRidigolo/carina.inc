@@ -58,8 +58,12 @@ class Settings(BaseSettings):
     embedding_cache_dir: str = Field(default=".carina_cache", alias="CARINA_EMBEDDING_CACHE_DIR")
 
     # ── Integrações (opcionais até F3/F4) ────────────────────────────────────
+    # Open Finance via agregador (atual: Pluggy — credenciais do dashboard).
     open_finance_client_id: str = Field(default="", alias="OPEN_FINANCE_CLIENT_ID")
     open_finance_client_secret: str = Field(default="", alias="OPEN_FINANCE_CLIENT_SECRET")
+    open_finance_base_url: str = Field(
+        default="https://api.pluggy.ai", alias="OPEN_FINANCE_BASE_URL"
+    )
     whatsapp_token: str = Field(default="", alias="WHATSAPP_TOKEN")
     smtp_host: str = Field(default="", alias="SMTP_HOST")
     smtp_user: str = Field(default="", alias="SMTP_USER")

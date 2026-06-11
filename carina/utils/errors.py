@@ -41,3 +41,7 @@ class AgentError(CarinaError):
 
 class AOPError(CarinaError):
     """Falha em um Agent Operating Procedure (compilação, validação ou execução)."""
+
+
+class IntegrationError(CarinaError):
+    """Falha em integração externa (Open Finance, notificações)."""

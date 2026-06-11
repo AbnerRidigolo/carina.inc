@@ -18,6 +18,7 @@ from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
 from carina.config.settings import get_settings
 from carina.inbox.service import InboxService
+from carina.integrations.open_finance import FalkorDBConnectionRegistry, OpenFinanceClient
 from carina.models.router import ModelRouter, get_router
 
 
@@ -78,3 +79,10 @@ def get_aop_service() -> AOPService:
         metering=get_metering(),
         watchtower=get_watchtower(),
     )
+
+
+@lru_cache
+def get_open_finance() -> OpenFinanceClient:
+    """Cliente Open Finance único do processo (registro FalkorDB em produção)."""
+    registry = FalkorDBConnectionRegistry() if get_settings().is_production else None
+    return OpenFinanceClient(registry=registry)

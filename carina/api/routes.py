@@ -18,11 +18,12 @@ from carina.api.deps import (
     get_aop_service,
     get_inbox,
     get_metering,
+    get_open_finance,
     get_orchestrator,
     get_watchtower,
 )
 from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
-from carina.utils.errors import AOPError, InboxError
+from carina.utils.errors import AOPError, InboxError, IntegrationError
 from carina.utils.logging import get_logger
 
 _log = get_logger("api")
@@ -56,6 +57,12 @@ class AOPUpdateRequest(BaseModel):
     """Atualização de estado de um AOP."""
 
     enabled: bool
+
+
+class ConnectionRequest(BaseModel):
+    """Registro de uma conexão Open Finance consentida (item do agregador)."""
+
+    item_id: str = Field(min_length=1)
 
 
 @router.get("/health")
@@ -184,3 +191,52 @@ async def update_aop(aop_id: str, body: AOPUpdateRequest, tenant: Tenant = Curre
     await _owned_aop(aop_id, tenant)
     aop = await get_aop_service().set_enabled(aop_id, body.enabled)
     return aop.model_dump(mode="json")
+
+
+@router.post("/clients/{client_id}/connections", status_code=201)
+async def add_connection(
+    client_id: str, body: ConnectionRequest, tenant: Tenant = CurrentTenant
+) -> dict:
+    """Registra uma conexão Open Finance consentida do cliente."""
+    effective_id = scoped_client_id(tenant, client_id)
+    await get_open_finance().registry.add(effective_id, body.item_id)
+    return {"client_id": client_id, "item_id": body.item_id}
+
+
+@router.get("/clients/{client_id}/connections")
+async def list_connections(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Lista as conexões Open Finance do cliente (escopo do tenant)."""
+    effective_id = scoped_client_id(tenant, client_id)
+    return {"item_ids": await get_open_finance().registry.list_items(effective_id)}
+
+
+@router.delete("/clients/{client_id}/connections/{item_id}")
+async def remove_connection(client_id: str, item_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Remove uma conexão Open Finance do cliente."""
+    effective_id = scoped_client_id(tenant, client_id)
+    removed = await get_open_finance().registry.remove(effective_id, item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Conexão não encontrada")
+    return {"removed": True}
+
+
+@router.get("/clients/{client_id}/positions")
+async def list_positions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Posições consolidadas (Open Finance) de todas as conexões do cliente."""
+    effective_id = scoped_client_id(tenant, client_id)
+    try:
+        positions = await get_open_finance().fetch_positions(effective_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"positions": [p.model_dump(mode="json") for p in positions]}
+
+
+@router.get("/clients/{client_id}/transactions")
+async def list_transactions(client_id: str, tenant: Tenant = CurrentTenant) -> dict:
+    """Transações consolidadas (Open Finance) de todas as conexões do cliente."""
+    effective_id = scoped_client_id(tenant, client_id)
+    try:
+        transactions = await get_open_finance().fetch_transactions(effective_id)
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"transactions": [t.model_dump(mode="json") for t in transactions]}

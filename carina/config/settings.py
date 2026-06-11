@@ -79,9 +79,15 @@ class Settings(BaseSettings):
         default="https://api.pluggy.ai", alias="OPEN_FINANCE_BASE_URL"
     )
     whatsapp_token: str = Field(default="", alias="WHATSAPP_TOKEN")
+    whatsapp_phone_number_id: str = Field(default="", alias="WHATSAPP_PHONE_NUMBER_ID")
+    whatsapp_base_url: str = Field(
+        default="https://graph.facebook.com/v19.0", alias="WHATSAPP_BASE_URL"
+    )
     smtp_host: str = Field(default="", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str = Field(default="", alias="SMTP_USER")
     smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    smtp_from: str = Field(default="", alias="SMTP_FROM")
 
     @property
     def is_production(self) -> bool:

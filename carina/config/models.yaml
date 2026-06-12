@@ -12,16 +12,21 @@
 
 roles:
   # Agentes conversacionais: Navigator, Researcher, Insight, Monitor, Assessor Liaison.
+  # Cadeia: gpt-oss-120b → outro modelo grande do MESMO OpenRouter (mesma chave) →
+  # Groq como última linha. IDs ":free" rotacionam — confirmar no dashboard.
   conversational:
     primary: "openrouter/openai/gpt-oss-120b:free"
     fallback:
+      - "openrouter/meta-llama/llama-3.3-70b-instruct:free"   # TODO confirmar id no OpenRouter
       - "groq/llama-3.3-70b-versatile"
 
   # Agentes de raciocínio (saídas estruturadas/JSON): Strategist, Predictor,
-  # Risk, Tax, Executor. gpt-oss-120b é MoE de high-reasoning — serve aos dois papéis.
+  # Risk, Tax, Executor + classificador do Orchestrator e compilador de AOPs.
+  # gpt-oss-120b é MoE de high-reasoning; DeepSeek V3 como segundo reasoning.
   reasoning:
     primary: "openrouter/openai/gpt-oss-120b:free"
     fallback:
+      - "openrouter/deepseek/deepseek-chat-v3.1:free"          # TODO confirmar id no OpenRouter
       - "groq/llama-3.3-70b-versatile"
 
   # Embeddings via NeMo Retriever (1024 dims) — OpenRouter NÃO oferece embeddings,

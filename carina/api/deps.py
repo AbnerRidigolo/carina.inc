@@ -19,14 +19,21 @@ from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
 from carina.config.settings import get_settings
 from carina.data_engine.market_data import MarketDataService
 from carina.inbox.service import InboxService
+from carina.integrations.notify import Notifier, inbox_notifier
 from carina.integrations.open_finance import FalkorDBConnectionRegistry, OpenFinanceClient
 from carina.models.router import ModelRouter, get_router
 
 
 @lru_cache
+def get_notifier() -> Notifier:
+    """Notificador (WhatsApp/e-mail) único do processo."""
+    return Notifier()
+
+
+@lru_cache
 def get_inbox() -> InboxService:
-    """Serviço de inbox único do processo."""
-    return InboxService()
+    """Serviço de inbox único do processo (notifica reversíveis executadas)."""
+    return InboxService(notifier=inbox_notifier(get_notifier()))
 
 
 @lru_cache

@@ -11,7 +11,7 @@ from carina.utils.errors import AllProvidersFailedError, ConfigError
 
 def test_chain_includes_primary_and_fallbacks(router: ModelRouter) -> None:
     chain = router.chain_for(Role.CONVERSATIONAL)
-    assert chain[0].startswith("nvidia_nim/")
+    assert chain[0].startswith("openrouter/")
     assert any(m.startswith("groq/") for m in chain[1:]), "fallback Groq esperado"
 
 
@@ -26,7 +26,14 @@ def test_embedding_dimensions(router: ModelRouter) -> None:
 
 def test_openai_params_resolves_provider(router: ModelRouter) -> None:
     params = router.openai_params_for(Role.CONVERSATIONAL)
-    assert not params["model_name"].startswith("nvidia_nim"), "prefixo de provedor removido"
+    # O prefixo do provedor sai; o caminho do modelo no OpenRouter permanece.
+    assert params["model_name"] == "openai/gpt-oss-120b:free"
+    assert "openrouter.ai" in params["base_url"]
+    assert params["api_key"] == "sk-or-test"
+
+
+def test_openai_params_embeddings_continuam_na_nvidia(router: ModelRouter) -> None:
+    params = router.openai_params_for(Role.EMBEDDINGS)
     assert "integrate.api.nvidia.com" in params["base_url"]
     assert params["api_key"] == "nvapi-test"
 

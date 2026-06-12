@@ -23,6 +23,7 @@ _MODELS_YAML = _REPO_ROOT / "carina" / "config" / "models.yaml"
 def fake_settings() -> Settings:
     """Settings com credenciais fictícias (suficientes para o router montar env)."""
     return Settings(
+        OPENROUTER_API_KEY="sk-or-test",
         NVIDIA_API_KEY="nvapi-test",
         GROQ_API_KEY="gsk-test",
         FALKORDB_HOST="localhost",

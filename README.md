@@ -78,6 +78,16 @@ compliance do Watchtower em cada resposta. Endpoints: `GET /api/eval/cases`
 (catálogo) e `POST /api/eval/submit` (execução medida como `evaluation`,
 R$ 5,00/execução).
 
+## Builder Layer (estratégias + backtesting)
+
+Esqueleto do Produto 3 (`carina/builder/`): o tenant registra estratégias
+**declarativas** validadas (`buy_hold`, `sma_cross` — nunca código arbitrário;
+a camada é regulada e auditável por construção) e roda backtests
+determinísticos sem lookahead sobre o Market Data BR, com retorno total,
+drawdown máximo, volatilidade anualizada e curva de equity. Endpoints:
+`POST/GET /api/builder/strategies` e `POST /api/builder/strategies/{id}/backtest`
+(medido como `backtest`, R$ 7,50/execução).
+
 Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
 e produtos B2B).

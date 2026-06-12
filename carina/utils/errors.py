@@ -45,3 +45,7 @@ class AOPError(CarinaError):
 
 class IntegrationError(CarinaError):
     """Falha em integração externa (Open Finance, notificações)."""
+
+
+class BuilderError(CarinaError):
+    """Falha na Builder Layer (especificação ou backtest de estratégia)."""

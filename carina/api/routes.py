@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from carina.api.auth import CurrentTenant, enforce_quota
 from carina.api.deps import (
     get_aop_service,
+    get_builder,
     get_evaluation,
     get_inbox,
     get_market_data,
@@ -26,8 +27,9 @@ from carina.api.deps import (
 )
 from carina.b2b.metering import WorkType, extract_value_brl
 from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
+from carina.builder.strategies import StrategySpec
 from carina.data_engine.evaluation import EvalCategory
-from carina.utils.errors import AOPError, InboxError, IntegrationError
+from carina.utils.errors import AOPError, BuilderError, InboxError, IntegrationError
 from carina.utils.logging import get_logger
 
 _log = get_logger("api")
@@ -73,6 +75,13 @@ class EvalSubmitRequest(BaseModel):
     """Respostas de um agente para correção no benchmark SEAL BR."""
 
     answers: dict[str, str] = Field(min_length=1, description="{case_id: resposta do agente}.")
+
+
+class StrategyCreateRequest(BaseModel):
+    """Registro de uma estratégia declarativa (Builder Layer)."""
+
+    name: str = Field(min_length=1)
+    spec: StrategySpec
 
 
 def _scoped(tenant: Tenant, client_id: str) -> str:
@@ -366,5 +375,53 @@ async def eval_submit(body: EvalSubmitRequest, tenant: Tenant = CurrentTenant) -
     )
     return {
         **report.model_dump(mode="json"),
+        "usage": {"work_type": usage.work_type.value, "price_brl": usage.price_brl},
+    }
+
+
+async def _owned_strategy(strategy_id: str, tenant: Tenant):
+    """Resolve uma estratégia do tenant; 404 se não existir ou for de outro."""
+    strategy = await get_builder().get(strategy_id)
+    if strategy is None or strategy.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Estratégia não encontrada")
+    return strategy
+
+
+@router.post("/builder/strategies", status_code=201)
+async def create_strategy(body: StrategyCreateRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Registra uma estratégia declarativa do tenant (Builder Layer)."""
+    strategy = await get_builder().create(tenant_id=tenant.id, name=body.name, spec=body.spec)
+    return strategy.model_dump(mode="json")
+
+
+@router.get("/builder/strategies")
+async def list_strategies(tenant: Tenant = CurrentTenant) -> dict:
+    """Lista as estratégias registradas do tenant."""
+    strategies = await get_builder().list_for_tenant(tenant.id)
+    return {"strategies": [s.model_dump(mode="json") for s in strategies]}
+
+
+@router.post("/builder/strategies/{strategy_id}/backtest")
+async def backtest_strategy(
+    strategy_id: str, range: str = "1y", tenant: Tenant = CurrentTenant
+) -> dict:
+    """Roda o backtest de uma estratégia sobre o Market Data BR (cobrável)."""
+    await enforce_quota(tenant)
+    strategy = await _owned_strategy(strategy_id, tenant)
+    try:
+        result = await get_builder().backtest(strategy, range_=range)
+    except BuilderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except IntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    usage = await get_metering().record_resolution(
+        tenant_id=tenant.id,
+        client_id=tenant.id,  # backtest é por tenant, não por cliente final
+        agents=[],
+        work_type=WorkType.BACKTEST,
+    )
+    return {
+        **result.model_dump(mode="json"),
         "usage": {"work_type": usage.work_type.value, "price_brl": usage.price_brl},
     }

@@ -300,4 +300,372 @@ DATASET: list[EvalCase] = [
         ],
         reference="Regimento do Copom (BCB)",
     ),
+    # ── Tributação (expansão) ────────────────────────────────────────────────
+    EvalCase(
+        id="darf-acoes-prazo",
+        category=_T,
+        difficulty="medium",
+        question=(
+            "Como e até quando a pessoa física recolhe o IR devido sobre ganhos " "com ações?"
+        ),
+        expected_facts=[
+            _fact("recolhimento via DARF", "darf"),
+            _fact(
+                "até o último dia útil do mês seguinte",
+                "mês seguinte",
+                "mes seguinte",
+                "mês subsequente",
+                "mes subsequente",
+            ),
+        ],
+        reference="IN RFB 1585/2015 (apuração mensal e recolhimento por DARF, código 6015)",
+    ),
+    EvalCase(
+        id="dedo-duro-swing",
+        category=_T,
+        difficulty="hard",
+        question=(
+            "Qual é a alíquota do IR retido na fonte (o 'dedo-duro') em operações "
+            "comuns de bolsa, e para que ele serve?"
+        ),
+        expected_facts=[
+            _fact("0,005% sobre a alienação", "0.005"),
+            _fact(
+                "informar a Receita / antecipar o controle das operações",
+                "receita",
+                "fiscaliza",
+                "informar",
+                "antecip",
+            ),
+        ],
+        reference="Lei 11.033/2004, art. 2º, §1º (IRRF 0,005% em operações comuns)",
+    ),
+    EvalCase(
+        id="compensacao-prejuizos",
+        category=_T,
+        difficulty="medium",
+        question=(
+            "Prejuízos em operações com ações podem ser compensados com ganhos "
+            "futuros? Há alguma restrição?"
+        ),
+        expected_facts=[
+            _fact("podem ser compensados, sem prazo", "compensa"),
+            _fact(
+                "respeitando a modalidade (day trade só com day trade)",
+                "modalidade",
+                "day trade",
+                "day-trade",
+                "mesma natureza",
+            ),
+        ],
+        reference="IN RFB 1585/2015, art. 64 (compensação de perdas por modalidade)",
+    ),
+    EvalCase(
+        id="fii-venda-cotas",
+        category=_T,
+        difficulty="medium",
+        question=(
+            "Qual a alíquota de IR sobre o ganho de capital na VENDA de cotas de "
+            "FII por pessoa física, e existe isenção mensal como nas ações?"
+        ),
+        expected_facts=[
+            _fact("alíquota de 20%", "20%", "20 %"),
+            _fact(
+                "não há a isenção de R$ 20 mil para FII",
+                "não se aplica",
+                "nao se aplica",
+                "não há isenção",
+                "nao ha isencao",
+                "sem isenção",
+                "sem isencao",
+                "não vale",
+                "nao vale",
+            ),
+        ],
+        reference="Lei 8.668/1993, art. 18 (ganho de capital em FII: 20%, sem isenção mensal)",
+    ),
+    EvalCase(
+        id="bdr-sem-isencao",
+        category=_T,
+        difficulty="hard",
+        question=("A isenção mensal de R$ 20.000 para vendas de ações vale também para " "BDRs?"),
+        expected_facts=[
+            _fact(
+                "não se aplica a BDRs (restrita a ações)",
+                "não se aplica",
+                "nao se aplica",
+                "não vale",
+                "nao vale",
+                "não há isenção",
+                "nao ha isencao",
+                "sem isenção",
+                "sem isencao",
+                "apenas a ações",
+                "apenas a acoes",
+                "restrita a ações",
+                "restrita a acoes",
+            ),
+        ],
+        reference="IN RFB 1585/2015 (isenção do art. 59 restrita a ações no mercado à vista)",
+    ),
+    EvalCase(
+        id="come-cotas-aliquotas",
+        category=_T,
+        difficulty="medium",
+        question="Quais alíquotas o come-cotas usa em fundos de longo e de curto prazo?",
+        expected_facts=[
+            _fact("15% em fundos de longo prazo", "15"),
+            _fact("20% em fundos de curto prazo", "20"),
+        ],
+        reference="Lei 14.754/2023 (alíquotas do come-cotas por classificação do fundo)",
+    ),
+    EvalCase(
+        id="fundos-curto-longo-prazo",
+        category=_T,
+        difficulty="hard",
+        question=(
+            "O que diferencia um fundo de CURTO prazo de um de LONGO prazo para " "fins de IR?"
+        ),
+        expected_facts=[
+            _fact("prazo médio da carteira de 365 dias", "365"),
+        ],
+        reference="IN RFB 1585/2015, art. 3º (carteira com prazo médio ≤ 365 dias = curto prazo)",
+    ),
+    EvalCase(
+        id="previdencia-escolha-tabela",
+        category=_T,
+        difficulty="hard",
+        question=(
+            "Quando o participante de previdência privada escolhe entre a tabela "
+            "progressiva e a regressiva?"
+        ),
+        expected_facts=[
+            _fact(
+                "a opção pode ser feita no momento do resgate/benefício",
+                "resgate",
+                "benefício",
+                "beneficio",
+                "momento",
+            ),
+        ],
+        reference="Lei 14.803/2024 (opção pelo regime de tributação no resgate/benefício)",
+    ),
+    EvalCase(
+        id="vgbl-base-ir",
+        category=_T,
+        difficulty="medium",
+        question=("No resgate, qual a diferença da base de cálculo do IR entre VGBL e " "PGBL?"),
+        expected_facts=[
+            _fact("no VGBL o IR incide só sobre os rendimentos", "rendimento"),
+            _fact(
+                "no PGBL incide sobre o valor total resgatado",
+                "total",
+                "todo o valor",
+                "valor integral",
+            ),
+        ],
+        reference="Lei 11.053/2004 (regimes de tributação de PGBL/VGBL)",
+    ),
+    # ── CVM (expansão) ───────────────────────────────────────────────────────
+    EvalCase(
+        id="assessor-investimentos",
+        category=_C,
+        difficulty="hard",
+        question=(
+            "Qual resolução da CVM rege a atividade de assessor de investimentos "
+            "(antigo agente autônomo)?"
+        ),
+        expected_facts=[_fact("Resolução CVM 178", "178")],
+        reference="Resolução CVM 178/2023",
+    ),
+    EvalCase(
+        id="insider-trading",
+        category=_C,
+        difficulty="medium",
+        question=(
+            "Negociar valores mobiliários usando informação relevante ainda não "
+            "divulgada ao mercado tem qual consequência legal no Brasil?"
+        ),
+        expected_facts=[
+            _fact("é crime (uso indevido de informação privilegiada)", "crime", "ilícit", "ilicit"),
+            _fact("informação privilegiada/insider", "privilegiada", "insider"),
+        ],
+        reference="Lei 6.385/1976, art. 27-D (crime de uso indevido de informação privilegiada)",
+    ),
+    EvalCase(
+        id="ofertas-publicas",
+        category=_C,
+        difficulty="hard",
+        question=(
+            "Qual resolução da CVM rege atualmente as ofertas públicas de "
+            "distribuição de valores mobiliários?"
+        ),
+        expected_facts=[_fact("Resolução CVM 160", "160")],
+        reference="Resolução CVM 160/2022 (substituiu as ICVM 400 e 476)",
+    ),
+    EvalCase(
+        id="crowdfunding",
+        category=_C,
+        difficulty="hard",
+        question=(
+            "Qual resolução da CVM regula o investimento via plataformas de "
+            "crowdfunding no Brasil?"
+        ),
+        expected_facts=[_fact("Resolução CVM 88", "88")],
+        reference="Resolução CVM 88/2022 (crowdfunding de investimento)",
+    ),
+    # ── Open Finance (expansão) ──────────────────────────────────────────────
+    EvalCase(
+        id="open-finance-itp",
+        category=_OF,
+        difficulty="medium",
+        question=(
+            "O que faz um Iniciador de Transação de Pagamento (ITP) no ecossistema "
+            "do Open Finance?"
+        ),
+        expected_facts=[
+            _fact("inicia pagamentos em nome do cliente", "inicia"),
+            _fact(
+                "sem detenção da conta do cliente",
+                "sem ser",
+                "sem deter",
+                "não detém",
+                "nao detem",
+                "conta",
+            ),
+        ],
+        reference="Resolução BCB 80/2021 (instituições de pagamento; modalidade ITP)",
+    ),
+    EvalCase(
+        id="open-finance-participacao",
+        category=_OF,
+        difficulty="hard",
+        question="A participação no Open Finance é obrigatória para quais instituições?",
+        expected_facts=[
+            _fact("obrigatória para as grandes (S1 e S2)", "obrigat"),
+            _fact("segmentos S1/S2", "s1", "s2", "grande", "porte"),
+        ],
+        reference="Resolução Conjunta CMN/BCB 1/2020 (escopo obrigatório para S1/S2)",
+    ),
+    # ── Produtos (expansão) ──────────────────────────────────────────────────
+    EvalCase(
+        id="tesouro-direto-titulos",
+        category=_P,
+        difficulty="easy",
+        question="Quais são os três tipos básicos de títulos do Tesouro Direto?",
+        expected_facts=[
+            _fact("Tesouro Selic (pós-fixado)", "selic"),
+            _fact("Tesouro Prefixado", "prefixado"),
+            _fact("Tesouro IPCA+ (híbrido)", "ipca"),
+        ],
+        reference="Programa Tesouro Direto (Tesouro Nacional/B3)",
+    ),
+    EvalCase(
+        id="tesouro-custodia-b3",
+        category=_P,
+        difficulty="hard",
+        question=(
+            "Qual a taxa de custódia da B3 no Tesouro Direto e qual a isenção "
+            "para o Tesouro Selic?"
+        ),
+        expected_facts=[
+            _fact("0,20% ao ano", "0.2"),
+            _fact("isenção até R$ 10 mil em Tesouro Selic", "10.000", "10 mil", "10000", "dez mil"),
+        ],
+        reference="Regulamento do Tesouro Direto (B3) — custódia 0,20% a.a.",
+    ),
+    EvalCase(
+        id="cri-cra",
+        category=_P,
+        difficulty="medium",
+        question=(
+            "CRI e CRA são isentos de IR para pessoa física? E contam com a " "garantia do FGC?"
+        ),
+        expected_facts=[
+            _fact("isentos de IR para PF", "isen"),
+            _fact(
+                "não contam com FGC",
+                "sem fgc",
+                "não tem fgc",
+                "nao tem fgc",
+                "não contam",
+                "nao contam",
+                "não são cobertos",
+                "nao sao cobertos",
+                "não possuem",
+                "nao possuem",
+                "não há fgc",
+                "nao ha fgc",
+            ),
+        ],
+        reference="Lei 11.033/2004, art. 3º (isenção); regulamento do FGC (sem cobertura)",
+    ),
+    EvalCase(
+        id="fgc-produtos",
+        category=_P,
+        difficulty="medium",
+        question=("Entre CDB, LCI e debênture, quais contam com a garantia do FGC?"),
+        expected_facts=[
+            _fact("CDB tem FGC", "cdb"),
+            _fact("LCI tem FGC", "lci"),
+            _fact(
+                "debênture fica de fora",
+                "debênture não",
+                "debenture nao",
+                "debênture fica de fora",
+                "debenture fica de fora",
+                "exceto a debênture",
+                "exceto a debenture",
+                "debêntures não",
+                "debentures nao",
+            ),
+        ],
+        reference="Regulamento do FGC (instrumentos elegíveis)",
+    ),
+    # ── Macro (expansão) ─────────────────────────────────────────────────────
+    EvalCase(
+        id="ipca-ibge",
+        category=_M,
+        difficulty="easy",
+        question="O que é o IPCA e quem o calcula?",
+        expected_facts=[
+            _fact(
+                "índice oficial de inflação (preços ao consumidor)",
+                "inflação",
+                "inflacao",
+                "preços",
+                "precos",
+            ),
+            _fact("calculado pelo IBGE", "ibge"),
+        ],
+        reference="IBGE (Sistema Nacional de Índices de Preços ao Consumidor)",
+    ),
+    EvalCase(
+        id="cdi-definicao",
+        category=_M,
+        difficulty="medium",
+        question="O que é o CDI e quem calcula/divulga essa taxa?",
+        expected_facts=[
+            _fact(
+                "taxa dos depósitos interfinanceiros/interbancários",
+                "interfinanceir",
+                "interbancár",
+                "interbancar",
+                "entre bancos",
+            ),
+            _fact("calculada pela B3 (antiga Cetip)", "b3", "cetip"),
+        ],
+        reference="Metodologia da Taxa DI (B3)",
+    ),
+    EvalCase(
+        id="meta-inflacao",
+        category=_M,
+        difficulty="medium",
+        question=("Quem define a meta de inflação do Brasil e qual é a meta vigente?"),
+        expected_facts=[
+            _fact("definida pelo CMN", "cmn", "conselho monetário", "conselho monetario"),
+            _fact("meta de 3% (com banda de tolerância)", "3%", "3 %", "3.0"),
+        ],
+        reference="Decreto 11.617/2023 (meta contínua de 3,0% ± 1,5 p.p.)",
+    ),
 ]

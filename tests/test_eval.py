@@ -24,7 +24,7 @@ from carina.data_engine.evaluation import (
 def test_dataset_tem_ids_unicos_e_tamanho_minimo():
     ids = [c.id for c in DATASET]
     assert len(ids) == len(set(ids))
-    assert len(DATASET) >= 15
+    assert len(DATASET) >= 40
 
 
 def test_dataset_cobre_todas_as_categorias():

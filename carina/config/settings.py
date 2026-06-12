@@ -23,7 +23,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── NVIDIA NIM (primário) ────────────────────────────────────────────────
+    # ── OpenRouter (primário para conversa/reasoning) ────────────────────────
+    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
+    )
+
+    # ── NVIDIA NIM (embeddings; fallback opcional de inferência) ─────────────
     nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(
         default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL"

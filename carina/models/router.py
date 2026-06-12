@@ -79,6 +79,9 @@ class ModelRouter:
         chamadas diretas funcionem sem repassar segredos manualmente.
         """
         s = self._settings
+        if s.openrouter_api_key:
+            os.environ.setdefault("OPENROUTER_API_KEY", s.openrouter_api_key)
+            os.environ.setdefault("OPENROUTER_API_BASE", s.openrouter_base_url)
         if s.nvidia_api_key:
             os.environ.setdefault("NVIDIA_NIM_API_KEY", s.nvidia_api_key)
             os.environ.setdefault("NVIDIA_NIM_API_BASE", s.nvidia_base_url)
@@ -119,8 +122,10 @@ class ModelRouter:
     def openai_params_for(self, role: Role) -> dict[str, Any]:
         """Traduz o modelo primário do papel em params do ``OpenAIChatModel``.
 
-        NIM e Groq são OpenAI-compatible; o prefixo do provedor na string LiteLLM
-        decide o ``base_url`` + ``api_key``. Mantém modelo-como-config.
+        OpenRouter, NIM e Groq são OpenAI-compatible; o prefixo do provedor na
+        string LiteLLM decide o ``base_url`` + ``api_key``. Mantém
+        modelo-como-config. No OpenRouter o nome do modelo preserva o caminho
+        completo após o prefixo (ex.: ``openai/gpt-oss-120b:free``).
 
         Args:
             role: Papel desejado.
@@ -132,11 +137,17 @@ class ModelRouter:
         s = self._settings
         model = self.model_for(role)
         provider, _, name = model.partition("/")
+        if provider == "openrouter":
+            return {
+                "model_name": name,
+                "api_key": s.openrouter_api_key,
+                "base_url": s.openrouter_base_url,
+            }
         if provider == "nvidia_nim":
             return {"model_name": name, "api_key": s.nvidia_api_key, "base_url": s.nvidia_base_url}
         if provider == "groq":
             return {"model_name": name, "api_key": s.groq_api_key, "base_url": s.groq_base_url}
-        # Sem prefixo reconhecido: assume NIM (provedor primário do CARINA).
+        # Sem prefixo reconhecido: assume NIM (embeddings e modelos legados).
         return {"model_name": model, "api_key": s.nvidia_api_key, "base_url": s.nvidia_base_url}
 
     # ── objetos do GraphRAG-SDK ───────────────────────────────────────────────

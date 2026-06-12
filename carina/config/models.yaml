@@ -2,29 +2,31 @@
 # Roteamento de modelos do CARINA — TROCA DE MODELO É AQUI, NUNCA NO CÓDIGO.
 #
 # Os nomes de modelo são strings LiteLLM (prefixo do provedor decide a rota):
-#   nvidia_nim/<modelo>   → NVIDIA NIM   (api_base/api_key injetados via env)
+#   openrouter/<modelo>   → OpenRouter   (primário — OPENROUTER_API_KEY)
 #   groq/<modelo>         → Groq         (fallback)
+#   nvidia_nim/<modelo>   → NVIDIA NIM   (embeddings; opcional para inferência)
 #
-# ⚠️ Modelos free do NIM podem ser removidos com pouco aviso. Mantenha SEMPRE em
-#    config. Os IDs abaixo são placeholders plausíveis — CONFIRMAR na sua conta NIM.
+# ⚠️ Modelos :free do OpenRouter têm rate limit baixo (≈20 req/min) e podem ser
+#    removidos com pouco aviso. Mantenha SEMPRE em config, nunca no código.
 # ─────────────────────────────────────────────────────────────────────────────
 
 roles:
   # Agentes conversacionais: Navigator, Researcher, Insight, Monitor, Assessor Liaison.
   conversational:
-    primary: "nvidia_nim/meta/llama-3.3-70b-instruct"   # TODO confirmar nome exato na NIM
+    primary: "openrouter/openai/gpt-oss-120b:free"
     fallback:
       - "groq/llama-3.3-70b-versatile"
 
-  # Agentes de raciocínio (Hermes <think>): Strategist, Predictor, Risk, Tax, Executor.
-  # Forte aderência a JSON/schema/tool-use → usar para saídas estruturadas.
+  # Agentes de raciocínio (saídas estruturadas/JSON): Strategist, Predictor,
+  # Risk, Tax, Executor. gpt-oss-120b é MoE de high-reasoning — serve aos dois papéis.
   reasoning:
-    primary: "nvidia_nim/nousresearch/hermes-4-70b"      # TODO confirmar nome exato (Hermes 4.x na NIM)
+    primary: "openrouter/openai/gpt-oss-120b:free"
     fallback:
-      - "nvidia_nim/meta/llama-3.3-70b-instruct"          # TODO confirmar
       - "groq/llama-3.3-70b-versatile"
 
-  # Embeddings via NeMo Retriever (1024 dims). SEM fallback → cachear agressivamente.
+  # Embeddings via NeMo Retriever (1024 dims) — OpenRouter NÃO oferece embeddings,
+  # então este papel continua na NVIDIA (NVIDIA_API_KEY segue necessária para o
+  # GraphRAG). SEM fallback → cachear agressivamente.
   embeddings:
     primary: "nvidia/nv-embedqa-e5-v5"
     dimensions: 1024
@@ -32,7 +34,7 @@ roles:
 
 # Parâmetros gerais de chamada (LiteLLM).
 litellm:
-  rpm: 40            # free tier do NIM
+  rpm: 20            # free tier do OpenRouter (modelos :free)
   timeout: 60        # segundos
   max_retries: 2     # retries dentro do MESMO provedor antes de cair para o fallback
   temperature: 0.2

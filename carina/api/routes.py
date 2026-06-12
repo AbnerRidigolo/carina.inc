@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from carina.api.auth import CurrentTenant, enforce_quota
 from carina.api.deps import (
     get_aop_service,
+    get_evaluation,
     get_inbox,
     get_market_data,
     get_metering,
@@ -25,6 +26,7 @@ from carina.api.deps import (
 )
 from carina.b2b.metering import WorkType, extract_value_brl
 from carina.b2b.tenants import Tenant, owns_client, scoped_client_id
+from carina.data_engine.evaluation import EvalCategory
 from carina.utils.errors import AOPError, InboxError, IntegrationError
 from carina.utils.logging import get_logger
 
@@ -65,6 +67,12 @@ class ConnectionRequest(BaseModel):
     """Registro de uma conexão Open Finance consentida (item do agregador)."""
 
     item_id: str = Field(min_length=1)
+
+
+class EvalSubmitRequest(BaseModel):
+    """Respostas de um agente para correção no benchmark SEAL BR."""
+
+    answers: dict[str, str] = Field(min_length=1, description="{case_id: resposta do agente}.")
 
 
 def _scoped(tenant: Tenant, client_id: str) -> str:
@@ -323,4 +331,40 @@ async def market_macro(tenant: Tenant = CurrentTenant) -> dict:
     return {
         "indicators": [i.model_dump(mode="json") for i in indicators],
         "usage": await _record_data_query(tenant),
+    }
+
+
+@router.get("/eval/cases")
+async def eval_catalog(category: str | None = None, tenant: Tenant = CurrentTenant) -> dict:
+    """Catálogo do benchmark SEAL BR — perguntas SEM gabarito."""
+    parsed: EvalCategory | None = None
+    if category is not None:
+        try:
+            parsed = EvalCategory(category)
+        except ValueError as exc:
+            valid = ", ".join(c.value for c in EvalCategory)
+            raise HTTPException(
+                status_code=422, detail=f"Categoria inválida — use uma de: {valid}"
+            ) from exc
+    return {"cases": get_evaluation().catalog(parsed)}
+
+
+@router.post("/eval/submit")
+async def eval_submit(body: EvalSubmitRequest, tenant: Tenant = CurrentTenant) -> dict:
+    """Corrige as respostas de um agente contra o benchmark (execução cobrável)."""
+    await enforce_quota(tenant)
+    try:
+        report = get_evaluation().evaluate(body.answers)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    usage = await get_metering().record_resolution(
+        tenant_id=tenant.id,
+        client_id=tenant.id,  # benchmark é por tenant, não por cliente final
+        agents=[],
+        work_type=WorkType.EVALUATION,
+    )
+    return {
+        **report.model_dump(mode="json"),
+        "usage": {"work_type": usage.work_type.value, "price_brl": usage.price_brl},
     }

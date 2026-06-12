@@ -67,6 +67,17 @@ proteger rate limits. Endpoints (medidos como `data_query`, R$ 0,05/chamada):
 `GET /api/market/quotes?symbols=PETR4,HGLG11`, `GET /api/market/history/{symbol}`
 e `GET /api/market/macro` (Selic, CDI, IPCA, PTAX).
 
+## Data Engine — Camada 3 (SEAL BR, avaliação de agentes)
+
+Benchmark de perguntas financeiras brasileiras com correção determinística
+(`carina/data_engine/evaluation.py` + dataset curado em `eval_dataset.py`):
+tributação (isenção de R$20K, come-cotas, FII, JCP), CVM (suitability,
+Resolução 175), Open Finance, produtos e macro. O catálogo nunca expõe o
+gabarito; a correção mede fatos esperados, afirmações proibidas E flags de
+compliance do Watchtower em cada resposta. Endpoints: `GET /api/eval/cases`
+(catálogo) e `POST /api/eval/submit` (execução medida como `evaluation`,
+R$ 5,00/execução).
+
 Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
 e produtos B2B).

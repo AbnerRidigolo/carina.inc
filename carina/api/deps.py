@@ -16,6 +16,7 @@ from carina.b2b.metering import FalkorDBMeteringStore, MeteringService
 from carina.b2b.ratelimit import LimitsConfig, RateLimiter
 from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
+from carina.builder.strategies import BuilderService, FalkorDBStrategyStore
 from carina.config.settings import get_settings
 from carina.data_engine.evaluation import EvaluationService
 from carina.data_engine.market_data import MarketDataService
@@ -107,3 +108,10 @@ def get_market_data() -> MarketDataService:
 def get_evaluation() -> EvaluationService:
     """Benchmark SEAL BR único do processo (Data Engine — Camada 3)."""
     return EvaluationService()
+
+
+@lru_cache
+def get_builder() -> BuilderService:
+    """Builder Layer única do processo (FalkorDB em produção)."""
+    store = FalkorDBStrategyStore() if get_settings().is_production else None
+    return BuilderService(store=store, market_data=get_market_data())

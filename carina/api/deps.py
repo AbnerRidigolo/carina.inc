@@ -17,6 +17,7 @@ from carina.b2b.ratelimit import LimitsConfig, RateLimiter
 from carina.b2b.tenants import ApiKeyStore
 from carina.b2b.watchtower import FalkorDBAuditStore, Watchtower
 from carina.config.settings import get_settings
+from carina.data_engine.evaluation import EvaluationService
 from carina.data_engine.market_data import MarketDataService
 from carina.inbox.service import InboxService
 from carina.integrations.notify import Notifier, inbox_notifier
@@ -100,3 +101,9 @@ def get_open_finance() -> OpenFinanceClient:
 def get_market_data() -> MarketDataService:
     """Market Data BR único do processo (Data Engine — Camada 1)."""
     return MarketDataService()
+
+
+@lru_cache
+def get_evaluation() -> EvaluationService:
+    """Benchmark SEAL BR único do processo (Data Engine — Camada 3)."""
+    return EvaluationService()

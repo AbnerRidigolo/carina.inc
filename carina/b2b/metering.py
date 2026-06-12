@@ -36,10 +36,12 @@ class WorkType(str, Enum):
     OPTIMIZATION = "optimization"
     EXECUTION = "execution"
     DATA_QUERY = "data_query"
+    EVALUATION = "evaluation"
 
 
 #: Preço base B2B por resolução, em BRL (tabela de docs/B2B.md; DATA_QUERY é
-#: a chamada do Data Engine — "SaaS por volume de chamadas").
+#: a chamada do Data Engine — "SaaS por volume de chamadas" — e EVALUATION é
+#: uma execução do benchmark SEAL BR).
 PRICE_BRL: dict[WorkType, float] = {
     WorkType.QUERY: 1.50,
     WorkType.ANALYSIS: 7.50,
@@ -47,6 +49,7 @@ PRICE_BRL: dict[WorkType, float] = {
     WorkType.OPTIMIZATION: 30.00,
     WorkType.EXECUTION: 75.00,
     WorkType.DATA_QUERY: 0.05,
+    WorkType.EVALUATION: 5.00,
 }
 
 #: Agentes cuja participação classifica a resolução como otimização.

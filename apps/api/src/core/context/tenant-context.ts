@@ -32,11 +32,9 @@ function assertUuid(field: string, value: string): void {
 const storage = new AsyncLocalStorage<TenantCtx>();
 
 /**
- * Executa `fn` e espera o resultado DENTRO do escopo de `ctx`. Necessário porque as promises do
- * Prisma são preguiçosas: a consulta (e a leitura do contexto pela extensão) só acontece no
- * `.then`. Se `fn` devolvesse a PrismaPromise e o `.then` fosse chamado por quem espera, fora do
- * `storage.run`, a consulta rodaria no contexto de fora (sem tenant, ou sem o cliente de
- * `withClient`).
+ * Executa `fn` e espera o resultado DENTRO do escopo de `ctx`, para que um thenable preguiçoso
+ * devolvido por `fn` também seja consumido com este contexto. (O TenantPrismaService não depende
+ * disso: ele captura o contexto na chamada de cada método.)
  */
 function runIn<T>(ctx: TenantCtx, fn: () => Promise<T>): Promise<T> {
   return storage.run(ctx, async () => await fn());

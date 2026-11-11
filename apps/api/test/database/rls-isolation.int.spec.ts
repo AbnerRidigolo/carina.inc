@@ -131,6 +131,61 @@ describe("TenantPrismaService: isolamento por RLS (conectado como carina_app)", 
     await expect(db.client.position.findMany()).rejects.toBeInstanceOf(UnauthenticatedError);
   });
 
+  // O contexto é o de quem CRIA a consulta, não o de quem a espera.
+  describe("contexto fixado na chamada", () => {
+    it("consultas devolvidas num array por withClient(A1) e esperadas em run(A) veem só A1", async () => {
+      const [positions, clients] = await TenantContext.run({ tenantId: tenantA }, async () => {
+        const queries = await TenantContext.withClient(clientA1, async () => [
+          db.client.position.findMany(),
+          db.client.client.findMany(),
+        ]);
+        return Promise.all(queries);
+      });
+      expect(positions).toHaveLength(1);
+      expect(positions).toEqual([
+        expect.objectContaining({ tenantId: tenantA, clientId: clientA1 }),
+      ]);
+      expect(clients).toEqual([expect.objectContaining({ id: clientA1 })]);
+    });
+
+    it("consulta criada em run(A) e esperada em run(B) devolve dados de A", async () => {
+      const pending = await TenantContext.run({ tenantId: tenantA }, async () => ({
+        query: db.client.position.findMany(),
+      }));
+      const rows = await TenantContext.run({ tenantId: tenantB }, () => pending.query);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.tenantId === tenantA)).toBe(true);
+    });
+
+    it("consulta criada fora de contexto rejeita mesmo se esperada dentro de run(A)", async () => {
+      const pending = db.client.position.findMany();
+      await expect(TenantContext.run({ tenantId: tenantA }, () => pending)).rejects.toBeInstanceOf(
+        UnauthenticatedError,
+      );
+    });
+
+    it("client expõe só os modelos: $transaction e SQL bruto não existem", () => {
+      const raw = db.client as unknown as Record<string, unknown>;
+      for (const key of [
+        "$transaction",
+        "$queryRaw",
+        "$executeRaw",
+        "$queryRawUnsafe",
+        "$extends",
+      ]) {
+        expect(raw[key]).toBeUndefined();
+      }
+    });
+
+    it("API fluente de relações falha alto (TypeError), sem consulta fora do contexto", async () => {
+      await TenantContext.run({ tenantId: tenantA }, async () => {
+        const found = db.client.client.findUnique({ where: { id: clientA1 } });
+        expect(() => found.positions()).toThrow(TypeError);
+        await expect(found).resolves.toMatchObject({ id: clientA1 });
+      });
+    });
+  });
+
   it("tx(): o segundo create falha e o primeiro não é gravado", async () => {
     const before = await countPositions(tenantA);
     const dup = `dup-${randomUUID()}`;

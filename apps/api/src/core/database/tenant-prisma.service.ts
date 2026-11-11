@@ -6,11 +6,19 @@
  * `set_config(nome, valor, true)` (local à transação: some no COMMIT/ROLLBACK, e a conexão volta
  * ao pool sem contexto) e depois executa a consulta. Valores sempre como parâmetros.
  *
- * - Sem TenantContext: UnauthenticatedError antes de qualquer SQL.
+ * O contexto é capturado NA CHAMADA do método do modelo, não quando a promise é esperada: as
+ * promises do Prisma são preguiçosas, e ler o contexto no `.then` faria a consulta rodar no
+ * contexto de quem espera (ex.: consultas criadas em `withClient(A1)` e esperadas fora dele
+ * veriam todos os clientes do tenant; uma promise compartilhada rodaria no tenant de outra
+ * requisição). Por isso cada método devolve uma Promise nativa, já em execução.
+ *
+ * - Sem TenantContext na chamada: a promise rejeita com UnauthenticatedError, sem SQL.
  * - Sem clientId: `app.client_id` = '' (NULL para as políticas): tabelas com cliente opcional
  *   mostram todos os clientes do tenant; as tabelas kg_* (cliente obrigatório) não mostram nada.
- * - Para várias operações atômicas ou SQL bruto parametrizado, use `tx()`. `client` não expõe
- *   `$transaction` nem `$queryRaw`/`$executeRaw`: ali o contexto não seria aplicado.
+ * - `client` expõe só os modelos. Para várias operações atômicas ou SQL bruto parametrizado, use
+ *   `tx()`; `$transaction`/`$queryRaw`/`$executeRaw` não existem em `client`.
+ * - A API fluente de relações (`findUnique(...).posicoes()`) não é suportada: o retorno é uma
+ *   Promise nativa, e a chamada falha com TypeError. Use `include`/`select`.
  */
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "../../generated/prisma/client.js";
@@ -27,33 +35,54 @@ function setContext(db: SqlRunner, ctx: TenantCtx) {
   ] as const;
 }
 
-function extend(base: PrismaClient) {
-  return base.$extends({
-    name: "tenant-rls",
-    query: {
-      $allModels: {
-        async $allOperations({ args, query }) {
+/** Chave do delegate de cada modelo no cliente (`KgChunk` → `kgChunk`). */
+type ModelKey = Uncapitalize<Prisma.ModelName>;
+
+const modelKeys = Object.values(Prisma.ModelName).map(
+  (name) => (name.charAt(0).toLowerCase() + name.slice(1)) as ModelKey,
+);
+
+/** Os delegates dos modelos; cada método roda com o contexto capturado na chamada. */
+export type TenantPrismaClient = Pick<PrismaClient, ModelKey>;
+
+type Method = (...args: unknown[]) => Prisma.PrismaPromise<unknown>;
+
+/**
+ * Envolve um delegate do cliente bruto: cada método lê `TenantContext.current()` de forma
+ * síncrona, na chamada, e já dispara a transação em batch com esse contexto.
+ */
+function bindDelegate(base: PrismaClient, delegate: object): object {
+  const cache = new Map<PropertyKey, unknown>();
+  return new Proxy(delegate, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (typeof value !== "function") return value;
+      let bound = cache.get(prop);
+      if (!bound) {
+        const method = value as Method;
+        // async: o corpo até o primeiro await roda já na chamada (captura o contexto agora), e
+        // qualquer erro vira rejeição.
+        bound = async (...args: unknown[]) => {
           const ctx = TenantContext.current();
-          const [, , result] = await base.$transaction([...setContext(base, ctx), query(args)]);
+          const query = method.apply(target, args);
+          const [, , result] = await base.$transaction([...setContext(base, ctx), query]);
           return result;
-        },
-      },
+        };
+        cache.set(prop, bound);
+      }
+      return bound;
+    },
+    set() {
+      return false;
     },
   });
 }
 
-type ExtendedClient = ReturnType<typeof extend>;
-
-/** Membros que executariam SQL fora da transação com contexto. */
-type Unscoped =
-  | "$transaction"
-  | "$queryRaw"
-  | "$executeRaw"
-  | "$queryRawUnsafe"
-  | "$executeRawUnsafe"
-  | "$extends";
-
-export type TenantPrismaClient = Omit<ExtendedClient, Unscoped>;
+function bindClient(base: PrismaClient): TenantPrismaClient {
+  const client: Partial<Record<ModelKey, object>> = {};
+  for (const key of modelKeys) client[key] = bindDelegate(base, base[key]);
+  return Object.freeze(client) as TenantPrismaClient;
+}
 
 export interface TxOptions {
   isolation?: "ReadCommitted" | "Serializable";
@@ -64,13 +93,13 @@ export class TenantPrismaService {
   readonly client: TenantPrismaClient;
 
   constructor(@Inject(PrismaService) private readonly base: PrismaClient) {
-    this.client = extend(base);
+    this.client = bindClient(base);
   }
 
   /**
-   * Transação interativa com o contexto atual fixado antes de `fn`. Roda no cliente bruto (o
-   * `tx` não passa pela extensão): todo o trabalho de `fn` usa a mesma conexão e o mesmo contexto.
-   * O contexto é lido uma vez, na entrada: `withClient` dentro de `fn` não muda o `tx`.
+   * Transação interativa com o contexto atual fixado antes de `fn`. O contexto é lido na chamada
+   * (corpo síncrono do método async); `withClient` dentro de `fn` não muda o `tx`. Todo o
+   * trabalho de `fn` usa a mesma conexão e o mesmo contexto.
    */
   async tx<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, opts?: TxOptions): Promise<T> {
     const ctx = TenantContext.current();

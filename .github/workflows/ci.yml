@@ -64,7 +64,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # Ainda não usadas; test:int e test:e2e entram no job a partir da Task 4.
+      # Superusuário do service container: o global-setup dos testes cria os papéis
+      # carina_migrator/carina_app e um banco novo por execução, e aplica as migrações.
       TEST_DATABASE_URL: postgresql://carina:carina@localhost:5432/carina_test
       TEST_REDIS_URL: redis://localhost:6379
     steps:
@@ -88,6 +89,9 @@ jobs:
 
       - name: Testes unitários
         run: pnpm test
+
+      - name: Testes de integração
+        run: pnpm --filter @carina/api test:int
 
       - name: Build
         run: pnpm build

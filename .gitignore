@@ -44,3 +44,6 @@ Thumbs.db
 node_modules/
 *.tsbuildinfo
 coverage/
+
+# Cliente Prisma gerado
+apps/api/src/generated/

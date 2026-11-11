@@ -6,3 +6,4 @@ pnpm-lock.yaml
 .claude
 .superpowers
 README.md
+apps/api/src/generated

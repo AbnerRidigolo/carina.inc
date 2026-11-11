@@ -1,0 +1,35 @@
+# CARINA — infraestrutura local. Os serviços api e web entram depois (Task 21).
+# Senhas de desenvolvimento têm padrão; em qualquer outro ambiente, defina-as no .env.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      CARINA_MIGRATOR_PASSWORD: ${CARINA_MIGRATOR_PASSWORD:-carina_migrator_dev}
+      CARINA_APP_PASSWORD: ${CARINA_APP_PASSWORD:-carina_app_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-carina.sh:ro
+      # Fora de docker-entrypoint-initdb.d: o entrypoint executaria o .sql sem as variáveis.
+      - ./docker/postgres/roles.sql:/opt/carina/roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d carina"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

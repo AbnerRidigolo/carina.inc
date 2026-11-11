@@ -10,6 +10,8 @@ export default tseslint.config(
       "docs/**",
       ".claude/**",
       ".superpowers/**",
+      // Cliente Prisma gerado (`prisma generate`)
+      "**/src/generated/**",
     ],
   },
   js.configs.recommended,

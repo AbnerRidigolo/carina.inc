@@ -39,3 +39,8 @@ Thumbs.db
 
 # Workspace do subagent-driven-development
 .superpowers/
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+coverage/

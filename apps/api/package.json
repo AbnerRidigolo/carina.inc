@@ -1,0 +1,17 @@
+{
+  "name": "@carina/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm test:unit",
+    "test:unit": "vitest run --project unit --passWithNoTests",
+    "test:int": "vitest run --project int --passWithNoTests",
+    "test:e2e": "vitest run --project e2e --passWithNoTests"
+  },
+  "dependencies": {
+    "@carina/shared": "workspace:*"
+  }
+}

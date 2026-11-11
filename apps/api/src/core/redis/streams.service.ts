@@ -116,7 +116,7 @@ export class StreamsService {
         for (const [, entries] of reply ?? []) {
           for (const [id, fields] of entries) {
             if (signal.aborted) break;
-            await this.processEntry(opts, id, fields, 1);
+            await this.safely(stream, id, () => this.processEntry(opts, id, fields, 1));
           }
         }
       }
@@ -202,14 +202,31 @@ export class StreamsService {
       cursor = res[0];
       for (const [id, fields] of res[1]) {
         if (signal.aborted) return;
-        // Entradas apagadas do stream chegam sem campos; só confirma.
-        if (fields === null) {
-          await this.redis.xack(stream, group, id);
-          continue;
-        }
-        await this.processEntry(opts, id, fields, await this.deliveries(stream, group, id));
+        await this.safely(stream, id, async () => {
+          // Entradas apagadas do stream chegam sem campos; só confirma.
+          if (fields === null) {
+            await this.redis.xack(stream, group, id);
+            return;
+          }
+          await this.processEntry(opts, id, fields, await this.deliveries(stream, group, id));
+        });
       }
     } while (cursor !== "0-0");
+  }
+
+  /**
+   * Isola o processamento de uma entrada: erro do Redis (SET/GET/XACK/DEL/DLQ) é registrado com o
+   * stack e a entrada fica pendente para o XAUTOCLAIM tentar de novo; o loop segue.
+   */
+  private async safely(stream: string, id: string, fn: () => Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (err) {
+      this.logger.error(
+        `Falha ao processar a entrada ${id} de ${stream}; ficará pendente para nova tentativa: ${errMessage(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+    }
   }
 
   private async deliveries(stream: string, group: string, id: string): Promise<number> {
@@ -296,11 +313,14 @@ export class StreamsService {
     event: unknown,
     error: string,
   ): Promise<void> {
-    await this.redis
+    const results = await this.redis
       .multi()
       .xadd(`${stream}.dlq`, "*", "data", JSON.stringify({ event, error }))
       .xack(stream, group, id)
       .exec();
+    // exec() devolve null se a transação foi descartada e pode carregar erro por comando.
+    if (results === null) throw new Error(`MULTI da DLQ de ${stream} descartado`);
+    for (const [cmdErr] of results) if (cmdErr) throw cmdErr;
   }
 
   private sleep(ms: number, signal: AbortSignal): Promise<void> {

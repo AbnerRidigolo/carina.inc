@@ -182,4 +182,90 @@ describe("StreamsService", () => {
     ac.abort();
     await done;
   });
+
+  describe("falhas transitórias do Redis durante o processamento", () => {
+    function runWithLogger(handler: (e: StreamEvent) => Promise<void>) {
+      const logger = { error: vi.fn(), warn: vi.fn() };
+      const s = new StreamsService(redis, { claimIdleMs: 150, blockMs: 100, logger });
+      const ac = new AbortController();
+      let settled: "pending" | "resolved" | "rejected" = "pending";
+      const done = s
+        .consume({ stream: "jobs", group: "g", consumer: "c1", handler, signal: ac.signal })
+        .then(
+          () => {
+            settled = "resolved";
+          },
+          () => {
+            settled = "rejected";
+          },
+        );
+      return {
+        logger,
+        state: () => settled,
+        stop: async () => {
+          ac.abort();
+          await done;
+        },
+      };
+    }
+
+    it("XACK que falha uma vez não encerra o consume; a entrega se repete e conclui", async () => {
+      vi.spyOn(redis, "xack").mockRejectedValueOnce(new Error("blip no XACK"));
+      let calls = 0;
+      const c = runWithLogger(async () => {
+        calls++;
+      });
+      await svc.publish("jobs", ev());
+      await until(async () => calls >= 2 && (await pending("jobs")) === 0);
+      expect(c.state()).toBe("pending");
+      await c.stop();
+      expect(c.state()).toBe("resolved");
+      expect(calls).toBe(2);
+    });
+
+    it("DEL que falha após erro do handler não encerra o consume e registra o stack", async () => {
+      vi.spyOn(redis, "del").mockRejectedValueOnce(new Error("blip no DEL"));
+      let calls = 0;
+      const c = runWithLogger(async () => {
+        calls++;
+        if (calls === 1) throw new Error("falha do handler");
+      });
+      await svc.publish("jobs", ev());
+      await until(async () => calls === 2 && (await pending("jobs")) === 0);
+      expect(c.state()).toBe("pending");
+      await c.stop();
+      expect(c.state()).toBe("resolved");
+      const withStack = c.logger.error.mock.calls.find((args) =>
+        args.some((a) => typeof a === "string" && a.includes("blip no DEL") && a.includes("at ")),
+      );
+      expect(withStack).toBeDefined();
+    });
+
+    it("falha do MULTI da DLQ deixa a entrada pendente e é registrada", async () => {
+      const real = redis.multi.bind(redis);
+      let broke = false;
+      vi.spyOn(redis, "multi").mockImplementation(((...args: Parameters<typeof real>) => {
+        const m = real(...args);
+        if (!broke) {
+          broke = true;
+          vi.spyOn(m, "exec").mockResolvedValueOnce([[new Error("falha no MULTI"), null]]);
+        }
+        return m;
+      }) as typeof real);
+      let calls = 0;
+      const c = runWithLogger(async () => {
+        calls++;
+        throw new Error("sempre falha");
+      });
+      await svc.publish("jobs", ev());
+      await until(async () => (await redis.xlen("jobs.dlq")) === 1);
+      expect(c.state()).toBe("pending");
+      await c.stop();
+      expect(broke).toBe(true);
+      expect(calls).toBeGreaterThanOrEqual(5);
+      expect(c.logger.error.mock.calls.some((a) => String(a[0]).includes("falha no MULTI"))).toBe(
+        true,
+      );
+    });
+  });
 });

@@ -49,6 +49,15 @@ export class ProblemDetailsFilter implements ExceptionFilter {
           .join("; "),
         traceId,
       };
+    } else if (exception instanceof HttpException && exception.getStatus() >= 500) {
+      // 5xx: a mensagem pode carregar detalhe interno; vai só para o log.
+      res.err = exception;
+      problem = {
+        type: `${PROBLEM_BASE}/http_${exception.getStatus()}`,
+        title: "Erro interno",
+        status: exception.getStatus(),
+        traceId,
+      };
     } else if (exception instanceof HttpException) {
       problem = {
         type: `${PROBLEM_BASE}/http_${exception.getStatus()}`,

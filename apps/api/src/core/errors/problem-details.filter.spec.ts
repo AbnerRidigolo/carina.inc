@@ -1,4 +1,4 @@
-import { HttpException, type ArgumentsHost } from "@nestjs/common";
+import { HttpException, InternalServerErrorException, type ArgumentsHost } from "@nestjs/common";
 import { describe, expect, it } from "vitest";
 import { ZodValidationException } from "nestjs-zod";
 import { z } from "zod";
@@ -66,6 +66,16 @@ describe("ProblemDetailsFilter", () => {
     const { res, body } = run(new ZodValidationException(parsed.error));
     expect(res.statusCode).toBe(422);
     expect(body.title).toBe("Validação falhou");
+  });
+
+  it("HttpException 5xx não vaza mensagem e vai para o log", () => {
+    const ex = new InternalServerErrorException("senha do banco xyz");
+    const { res, body } = run(ex);
+    expect(res.statusCode).toBe(500);
+    expect(body.title).toBe("Erro interno");
+    expect(body.detail).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("senha");
+    expect(res.err).toBe(ex);
   });
 
   it("HttpException preserva status", () => {

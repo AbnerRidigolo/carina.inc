@@ -1,7 +1,8 @@
 # CI do CARINA — roda em todo push para main e em todo pull request.
 # legacy-python: testes unitários (mockados, sem credenciais externas), ruff e black.
 #   Os testes `integration` (credenciais reais NIM/Groq/FalkorDB) ficam FORA do CI.
-# typescript: lint, typecheck, testes unitários e build do monorepo pnpm.
+# typescript: lint, typecheck, testes unitários, testes de integração da API (Postgres 17 +
+#   pgvector e Redis dos service containers; RLS e migrações reais) e build do monorepo pnpm.
 name: CI
 
 on:

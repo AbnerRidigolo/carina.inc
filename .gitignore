@@ -36,3 +36,6 @@ Thumbs.db
 
 # Worktrees locais do Claude Code
 .claude/worktrees/
+
+# Workspace do subagent-driven-development
+.superpowers/

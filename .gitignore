@@ -33,3 +33,6 @@ Thumbs.db
 
 # Modal
 .modal/
+
+# Worktrees locais do Claude Code
+.claude/worktrees/

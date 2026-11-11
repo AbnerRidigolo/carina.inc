@@ -112,14 +112,17 @@ CREATE POLICY tenant_client_strict ON kg_mention
 
 -- ─── Autenticação por chave de API ──────────────────────────────────────────
 -- Roda com os privilégios do dono: lê api_key (sem grant para carina_app) e tenant (sem FORCE).
+-- Isolamento do SECURITY DEFINER: pg_temp vai por último no search_path (sem ele, o schema
+-- temporário é consultado PRIMEIRO, e carina_app, que tem TEMPORARY, poderia sombrear api_key e
+-- tenant com tabelas temporárias e forjar o tenant), e as tabelas são qualificadas com public.
 CREATE FUNCTION resolve_api_key(p_hash text)
   RETURNS TABLE(key_id uuid, tenant_id uuid, tenant_name text, scopes text[], rpm int, monthly_quota int)
   LANGUAGE sql STABLE SECURITY DEFINER
-  SET search_path = public
+  SET search_path = public, pg_temp
 AS $$
   SELECT k.id, t.id, t.name, k.scopes, t.rpm, t.monthly_quota
-  FROM api_key k
-  JOIN tenant t ON t.id = k.tenant_id
+  FROM public.api_key k
+  JOIN public.tenant t ON t.id = k.tenant_id
   WHERE k.hash = p_hash AND k.revoked_at IS NULL
 $$;
 ALTER FUNCTION resolve_api_key(text) OWNER TO carina_migrator;

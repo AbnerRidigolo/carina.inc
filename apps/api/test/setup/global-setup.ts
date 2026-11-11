@@ -2,7 +2,9 @@
  * Global setup dos testes de integração e E2E.
  *
  * - Com TEST_DATABASE_URL (superusuário; CI com service container ou Postgres local): cria um banco
- *   novo `carina_test_<pid>_<projeto>`, aplica os papéis de docker/postgres/roles.sql e a
+ *   novo `carina_test_<pid>_<projeto>`, cria os papéis que faltarem (docker/postgres/roles.sql;
+ *   papéis existentes nunca são alterados, e a senha deles precisa bater com
+ *   CARINA_MIGRATOR_PASSWORD/CARINA_APP_PASSWORD, padrão igual ao do .env.example), cria a
  *   extensão vector e roda `prisma migrate deploy` como carina_migrator. O banco é removido no
  *   teardown.
  * - Sem TEST_DATABASE_URL: sobe `pgvector/pgvector:pg17` via Testcontainers e faz o mesmo.
@@ -30,10 +32,27 @@ const here = dirname(fileURLToPath(import.meta.url));
 const apiRoot = resolve(here, "../..");
 const rolesSqlPath = resolve(apiRoot, "../../docker/postgres/roles.sql");
 
-// Senhas fixas só de teste: papéis são do cluster, e senhas aleatórias por execução quebrariam
-// execuções simultâneas (int e e2e) no mesmo servidor.
-const MIGRATOR_PASSWORD = process.env["TEST_MIGRATOR_PASSWORD"] ?? "carina_migrator_test";
-const APP_PASSWORD = process.env["TEST_APP_PASSWORD"] ?? "carina_app_test";
+// Papéis são do cluster inteiro e podem já existir (ex.: o Postgres do docker compose, usado
+// também pelo dev). O harness usa as mesmas senhas do compose/.env.example, só cria papéis que
+// faltam e NUNCA altera os existentes; se a senha não bater, falha com instruções.
+const MIGRATOR_PASSWORD = process.env["CARINA_MIGRATOR_PASSWORD"] || "carina_migrator_dev";
+const APP_PASSWORD = process.env["CARINA_APP_PASSWORD"] || "carina_app_dev";
+
+/** Confere que o papel entra com a senha configurada, sem tocar no papel. */
+async function assertRoleLogin(url: string, role: string, envVar: string): Promise<void> {
+  try {
+    await withClient(url, async () => undefined);
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    const reason = code === "28P01" ? "a senha não confere" : `erro ${code ?? String(err)}`;
+    throw new Error(
+      `Não foi possível conectar como ${role} (${reason}). O papel já existe no cluster de ` +
+        `TEST_DATABASE_URL e o harness não altera papéis existentes: defina ${envVar} com a ` +
+        `senha atual do papel (a mesma do seu .env/docker compose).`,
+      { cause: err },
+    );
+  }
+}
 
 /** Lê roles.sql e troca os placeholders do psql (`:'var'`) por literais escapados pelo driver. */
 export function renderRolesSql(
@@ -82,6 +101,8 @@ async function bootstrapDatabase(superuserUrl: string, database: string) {
 
   const migratorUrl = withCredentials(superuserUrl, "carina_migrator", MIGRATOR_PASSWORD, database);
   const appUrl = withCredentials(superuserUrl, "carina_app", APP_PASSWORD, database);
+  await assertRoleLogin(migratorUrl, "carina_migrator", "CARINA_MIGRATOR_PASSWORD");
+  await assertRoleLogin(appUrl, "carina_app", "CARINA_APP_PASSWORD");
 
   try {
     execFileSync(resolve(apiRoot, "node_modules/.bin/prisma"), ["migrate", "deploy"], {
@@ -140,13 +161,14 @@ export default async function setup(project: TestProject) {
     }
 
     const admin = superuserUrl;
-    const { migratorUrl, appUrl } = await bootstrapDatabase(admin, database);
-    // Roda antes de parar o container (teardowns em ordem reversa).
+    // Registrado antes do bootstrap, para limpar o banco mesmo se ele falhar no meio; roda antes
+    // de parar o container (teardowns em ordem reversa).
     teardowns.push(async () => {
       await withClient(admin, (c) =>
         c.query(`DROP DATABASE IF EXISTS ${c.escapeIdentifier(database)} WITH (FORCE)`),
       );
     });
+    const { migratorUrl, appUrl } = await bootstrapDatabase(admin, database);
 
     project.provide("TEST_DATABASE_URL_APP", appUrl);
     project.provide("TEST_DATABASE_URL_MIGRATOR", migratorUrl);

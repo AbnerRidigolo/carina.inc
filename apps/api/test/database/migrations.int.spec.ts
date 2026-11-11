@@ -111,6 +111,35 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
     });
   });
 
+  it("resolve_api_key não é sombreada por tabelas temporárias de carina_app", async () => {
+    const forgedTenant = randomUUID();
+    const forgedHash = sha256(`sk-live-${randomUUID()}`);
+    await asApp(async (c) => {
+      // carina_app tem TEMPORARY (via PUBLIC): tenta sombrear api_key e tenant com pg_temp.
+      await c.query(`CREATE TEMP TABLE api_key (id uuid, tenant_id uuid, hash text, prefix text,
+                       scopes text[], label text, revoked_at timestamptz, created_at timestamptz)`);
+      await c.query(`CREATE TEMP TABLE tenant (id uuid, name text, plan text, rpm int,
+                       monthly_quota int, created_at timestamptz)`);
+      await c.query(`INSERT INTO pg_temp.tenant VALUES ($1, 'Forjado', 'pro', 9999, 0, now())`, [
+        forgedTenant,
+      ]);
+      await c.query(
+        `INSERT INTO pg_temp.api_key VALUES (gen_random_uuid(), $1, $2, 'x', ARRAY['admin'], NULL, NULL, now()),
+                                            (gen_random_uuid(), $1, $3, 'x', ARRAY['admin'], NULL, NULL, now())`,
+        [forgedTenant, forgedHash, keyHash],
+      );
+      // Dono das tabelas temporárias, o atacante libera a leitura para o definer da função.
+      await c.query("GRANT SELECT ON pg_temp.api_key, pg_temp.tenant TO PUBLIC");
+
+      const forged = await c.query("SELECT * FROM resolve_api_key($1)", [forgedHash]);
+      expect(forged.rows).toHaveLength(0);
+
+      const real = await c.query("SELECT * FROM resolve_api_key($1)", [keyHash]);
+      expect(real.rows).toHaveLength(1);
+      expect(real.rows[0]).toMatchObject({ tenant_id: tenantA, tenant_name: "Tenant A" });
+    });
+  });
+
   it("toda tabela de dados tem RLS com FORCE e política (guarda para tabelas futuras)", async () => {
     const tables = await migratorSql<{
       relname: string;

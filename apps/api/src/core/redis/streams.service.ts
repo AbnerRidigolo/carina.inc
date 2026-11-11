@@ -313,14 +313,16 @@ export class StreamsService {
     event: unknown,
     error: string,
   ): Promise<void> {
-    const results = await this.redis
-      .multi()
-      .xadd(`${stream}.dlq`, "*", "data", JSON.stringify({ event, error }))
-      .xack(stream, group, id)
-      .exec();
-    // exec() devolve null se a transação foi descartada e pode carregar erro por comando.
-    if (results === null) throw new Error(`MULTI da DLQ de ${stream} descartado`);
-    for (const [cmdErr] of results) if (cmdErr) throw cmdErr;
+    // XADD antes do XACK, em dois passos: um MULTI não desfaz o XACK se o XADD falhar (erro de
+    // execução, ex. WRONGTYPE/OOM). Uma queda entre os dois deixa DLQ duplicada (at-least-once).
+    const dlqId = await this.redis.xadd(
+      `${stream}.dlq`,
+      "*",
+      "data",
+      JSON.stringify({ event, error }),
+    );
+    if (dlqId === null) throw new Error(`XADD em ${stream}.dlq não devolveu id`);
+    await this.redis.xack(stream, group, id);
   }
 
   private sleep(ms: number, signal: AbortSignal): Promise<void> {

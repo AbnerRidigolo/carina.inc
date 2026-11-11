@@ -241,31 +241,32 @@ describe("StreamsService", () => {
       expect(withStack).toBeDefined();
     });
 
-    it("falha do MULTI da DLQ deixa a entrada pendente e é registrada", async () => {
-      const real = redis.multi.bind(redis);
-      let broke = false;
-      vi.spyOn(redis, "multi").mockImplementation(((...args: Parameters<typeof real>) => {
-        const m = real(...args);
-        if (!broke) {
-          broke = true;
-          vi.spyOn(m, "exec").mockResolvedValueOnce([[new Error("falha no MULTI"), null]]);
-        }
-        return m;
-      }) as typeof real);
+    it("XADD da DLQ falhando de verdade (WRONGTYPE) deixa a entrada pendente até a DLQ voltar", async () => {
+      await redis.set("jobs.dlq", "não sou um stream");
       let calls = 0;
       const c = runWithLogger(async () => {
         calls++;
         throw new Error("sempre falha");
       });
       await svc.publish("jobs", ev());
-      await until(async () => (await redis.xlen("jobs.dlq")) === 1);
-      expect(c.state()).toBe("pending");
-      await c.stop();
-      expect(broke).toBe(true);
-      expect(calls).toBeGreaterThanOrEqual(5);
-      expect(c.logger.error.mock.calls.some((a) => String(a[0]).includes("falha no MULTI"))).toBe(
-        true,
+      await until(() =>
+        c.logger.error.mock.calls.some(
+          (a) => String(a[0]).includes("WRONGTYPE") && String(a[1]).includes("at "),
+        ),
       );
+      // Algumas tentativas de reprocessar a movimentação, sempre falhando: nada é confirmado.
+      await new Promise((r) => setTimeout(r, 500));
+      expect(c.state()).toBe("pending");
+      expect(await pending("jobs")).toBe(1);
+      expect(calls).toBe(5);
+      expect(await redis.get("jobs.dlq")).toBe("não sou um stream");
+
+      await redis.del("jobs.dlq");
+      await until(
+        async () => (await redis.xlen("jobs.dlq")) === 1 && (await pending("jobs")) === 0,
+      );
+      await c.stop();
+      expect(c.state()).toBe("resolved");
     });
   });
 });

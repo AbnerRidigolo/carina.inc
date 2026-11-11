@@ -1,7 +1,10 @@
 # Migração do CARINA para TypeScript / Node.js — Design
 
 - **Data:** 2026-11-11
-- **Status:** aprovado em conversa (seções 1–4); aguardando revisão deste documento
+- **Status:** aprovado em conversa (seções 1–4 e fonte de dados de clientes); aguardando revisão
+  deste documento
+- **Revisão 2026-11-11:** a Pluggy sai do escopo por custo; os dados de clientes passam a vir de API
+  de ingestão, importação de arquivos e gerador sintético (seção 6.4)
 - **Escopo:** reescrever o CARINA Wealth AI v3 (Python, ~9,5 mil linhas, 138 testes) como monorepo
   TypeScript, corrigindo na migração os defeitos encontrados na análise do código atual.
 
@@ -27,8 +30,9 @@ leads, que vão ler o código e rodar a demo.
 5. O README explica as decisões de arquitetura e os defeitos do Python que a migração corrigiu.
 
 **Fora de escopo:** deploy em produção com clientes reais, integração real com corretoras (o
-executor de ordens é simulado), paridade de prompts palavra por palavra e suporte a Python no
-repositório depois que a migração terminar.
+executor de ordens é simulado), paridade de prompts palavra por palavra, suporte a Python no
+repositório depois que a migração terminar e **agregadores pagos de Open Finance** (Pluggy, Belvo):
+a interface de provedor fica pronta para um adaptador futuro, mas nenhum é implementado agora.
 
 ---
 
@@ -45,6 +49,7 @@ repositório depois que a migração terminar.
 | Modelos | **LangChain.js**: OpenRouter → reservas → Groq via `withFallbacks()`; embeddings NVIDIA (OpenAI-compatible) | LiteLLM (só Python), misturar LangChain com AI SDK (dois sistemas de mensagens) |
 | Cache, limites, eventos | **Redis**: chaves com TTL (cache), sorted set e `INCR` (limites), **Redis Streams** com consumer groups (eventos e jobs) | Limites em memória (não valem com várias instâncias), Modal (só Python) |
 | Agendamento | `@nestjs/schedule` publicando em Streams | BullMQ (fica como evolução se precisar) |
+| Dados de clientes (posições e transações) | **Custo zero:** API de ingestão para o tenant B2B, importação de arquivos (OFX, CSV, planilhas da Área do Investidor B3, notas de corretagem) e gerador sintético para demo e testes, todos atrás da interface `FinancialDataProvider` | Pluggy (plano de dados a partir de R$ 2.500/mês), Belvo (a partir de R$ 1.500/mês, só alguns segmentos), APIs da B3 (contrato B2B cobrado por investidor), Open Finance direto (exige autorização do Banco Central) |
 | Testes | **Vitest**, Supertest, Testcontainers, Testing Library | Jest (problemas com pacotes só-ESM do NestJS 12) |
 | Qualidade | TypeScript `strict`, ESLint + Prettier, versões fixadas no lockfile | — |
 
@@ -86,8 +91,8 @@ apps/
   api/                 NestJS
     src/core/          config · database · redis · logging · errors
     src/modules/       tenancy · limits · llm · knowledge · agents · orchestrator ·
-                       inbox · billing · watchtower · chat · (fase 2/3: aops · market ·
-                       evaluation · builder · open-finance · notifications · monitor)
+                       inbox · billing · watchtower · chat · data-ingestion ·
+                       (fase 2/3: aops · market · evaluation · builder · notifications · monitor)
     src/main.ts        HTTP + WebSocket + workers
     src/main.worker.ts só workers (opcional, mesmo código)
     prisma/            schema.prisma · migrations/ (incluindo SQL de RLS e pgvector)
@@ -122,21 +127,22 @@ docker-compose.yml     postgres (pgvector/pgvector:pg17) · redis · api · web
 | limits | `RateLimitGuard` (janela deslizante) e cota mensal com reserva e devolução | redis, tenancy | `b2b/ratelimit` | 1 |
 | llm | `ModelFactory` por papel, `withFallbacks()`, limitador por provedor, embeddings, modo mock | config, redis | `models/` | 1 |
 | knowledge | Ingestão (chunks, entidades, relações, embeddings) e busca híbrida com citação; só SQL fixo e parametrizado | database, llm | `knowledge/` | 1 |
-| agents | 12 agentes (prompt, schema Zod, ferramentas) e registro por nome | llm, knowledge | `agents/tier1-3` | 1: navigator, insight, predictor, risk, executor · 2: strategist, researcher, assessor_liaison, monitor, sync, categorizer, tax |
+| agents | 12 agentes (prompt, schema Zod, ferramentas) e registro por nome | llm, knowledge | `agents/tier1-3` | 1: navigator, insight, predictor, risk, executor · 2: strategist, researcher, assessor_liaison, monitor, categorizer, tax · Sync vira o worker de `data-ingestion` (fase 1), sem LLM |
 | orchestrator | Grafo LangGraph, checkpointer Postgres, corte do histórico | agents, inbox | `agents/orchestrator` | 1 |
 | inbox | Classificação de risco, solicitações, decisão com trava, executores registrados, execução única, reconciliação | database, redis | `inbox/` | 1 |
 | billing | Preço por tipo de trabalho, fee sobre valor executado, resumo de uso | database | `b2b/metering` | 1 |
 | watchtower | Flags de compliance e trilha append-only | database | `b2b/watchtower` | 1 |
 | chat | `POST /chat`, ticket de WebSocket, gateway com streaming | orchestrator, billing, watchtower, limits | `api/routes`, `api/ws` | 1 |
+| data-ingestion | Interface `FinancialDataProvider`; API de ingestão em lote; gerador sintético; importação de arquivos (OFX, CSV, B3, notas de corretagem); Sync das posições e transações para o conhecimento (seção 6.4) | database, knowledge, redis | `integrations/open_finance` (modelos normalizados), `modal_jobs/sync_job` | 1: API de ingestão, gerador sintético e Sync · 2: importação de arquivos |
 | aops | Procedimentos em linguagem natural, compilação, agenda, execução | agents, billing, watchtower, redis | `b2b/aops`, `modal_jobs/aops_job` | 2 |
 | market | Cotações B3 (brapi) e macro BCB normalizados, cache | redis, billing | `data_engine/market_data` | 2 |
 | evaluation | Benchmark SEAL BR (42 casos, gabarito nunca exposto) | watchtower, billing | `data_engine/evaluation`, `eval_dataset` | 2 |
 | builder | Estratégias declarativas (`buy_hold`, `sma_cross`) e backtest sem lookahead | market, billing | `builder/` | 2 |
-| open-finance | Adaptador Pluggy, conexões, Sync para o conhecimento | database, knowledge | `integrations/open_finance`, `modal_jobs/sync_job` | 3 |
 | notifications | WhatsApp (Meta Cloud API) e SMTP, consumindo `notifications` | redis | `integrations/notify` | 3 |
 | monitor | Vigilância periódica de carteiras e alertas | market, notifications | `modal_jobs/monitor_job` | 3 |
 
-Deixam de existir: o keepalive do FalkorDB (o banco não pausa mais) e a UI Gradio (substituída por `apps/web`).
+Deixam de existir: o keepalive do FalkorDB (o banco não pausa mais), a UI Gradio (substituída por
+`apps/web`) e o adaptador Pluggy com seu registro de conexões (substituídos por `data-ingestion`).
 
 ### 4.1 Camada de modelos
 
@@ -183,14 +189,16 @@ START → classify ──(simples)───────────────�
 | Tabela | Campos principais | Notas |
 |---|---|---|
 | `tenant` | id (uuid), name, plan, rpm, monthly_quota | quota 0 = ilimitada |
-| `api_key` | id, tenant_id, hash (único), prefix, scopes (text[]), label, revoked_at | escopos: `chat`, `inbox:decide`, `admin` |
+| `api_key` | id, tenant_id, hash (único), prefix, scopes (text[]), label, revoked_at | escopos: `chat`, `inbox:decide`, `data:write`, `admin` |
 | `client` | id (uuid), tenant_id, external_id, `UNIQUE(tenant_id, external_id)` | substitui o id em string `{tenant}__{client}` |
 | `approval_request` | id (determinístico), tenant_id, client_id, thread_id, agent, action, risk, payload (jsonb), value_brl, status, expires_at, decided_by_key_id, decided_at, reason | status: `pending`, `approved`, `rejected`, `expired` |
 | `executed_action` | approval_request_id (PK), tenant_id, client_id, status (`started`, `succeeded`, `failed`, `needs_review`), result (jsonb), started_at, finished_at | garantia de execução no máximo uma vez |
 | `usage_record` | id, tenant_id, client_id?, work_type, agents (text[]), price_brl, fee_brl, value_brl, duration_ms, created_at | append-only |
 | `audit_event` | id, tenant_id, client_id?, channel, query, flags (jsonb), created_at | append-only |
+| `position` | id, tenant_id, client_id, source, external_id, institution, kind (`investment`, `cash`), asset_class, asset_code, name, quantity (`numeric(24,8)`), value_brl, as_of, `UNIQUE(tenant_id, client_id, source, external_id)` | upsert idempotente; `source`: `api`, `import`, `synthetic` |
+| `transaction` | id, tenant_id, client_id, source, external_id, institution, account, date, description, amount_brl, category?, kind (`debit`, `credit`, `buy`, `sell`, `dividend`, `fee`, `tax`, …), asset_code?, quantity?, `UNIQUE(tenant_id, client_id, source, external_id)` | `external_id` derivado (hash) quando o arquivo não traz id |
+| `import_job` | id, tenant_id, client_id, format, file_name, file_sha256, status (`queued`, `parsing`, `done`, `failed`), stats (jsonb), errors (jsonb), created_at | arquivo com o mesmo `file_sha256` não é processado duas vezes |
 | `aop`, `strategy` | — | fase 2 |
-| `of_connection` | — | fase 3 |
 
 Valores monetários em `numeric(18,2)` (Prisma `Decimal`), nunca float. A tabela de preços por tipo
 de trabalho e o fee sobre valor são portados de `carina/b2b/metering.py`.
@@ -226,7 +234,8 @@ kg_relation (id, tenant_id, client_id, source_id, target_id, type, properties js
 - **Políticas:**
   - Tabelas por tenant (`usage_record`, `audit_event`, `aop`, `strategy`):
     `tenant_id = current_setting('app.tenant_id', true)::uuid`.
-  - Tabelas por cliente (`client`, `approval_request`, `executed_action`): tenant igual; se
+  - Tabelas por cliente (`client`, `approval_request`, `executed_action`, `position`, `transaction`,
+    `import_job`): tenant igual; se
     `app.client_id` estiver fixado, o cliente também precisa ser igual.
   - Conhecimento (`kg_*`): **tenant E cliente obrigatórios**; sem `app.client_id`, nenhuma linha.
   - Sem `app.tenant_id` fixado, `current_setting` retorna NULL e **nada volta** (falha fechada).
@@ -299,6 +308,67 @@ kg_relation (id, tenant_id, client_id, source_id, target_id, type, properties js
 - Idempotência: `SET dedup:<stream>:<eventId> NX EX 86400` antes de processar.
 - Eventos tipados em `packages/shared` com schema Zod, validados ao consumir.
 
+### 6.4 Fontes de dados de clientes (sem agregador pago)
+
+Os dados públicos de mercado (cotações B3 via brapi.dev; Selic, CDI, IPCA e PTAX via Banco Central)
+continuam no módulo `market` e não mudam. Esta seção trata dos dados **do cliente final**: posições
+e transações.
+
+**Por que sem agregador:** toda fonte automática de dados de terceiros custa a partir de
+R$ 1.500/mês (Belvo) ou R$ 2.500/mês (Pluggy) ou exige contrato (APIs da B3) ou autorização do
+Banco Central (preços consultados em 2026-11-11). Os clientes do CARINA são bancos, fintechs e
+gestoras que **já têm** esses dados, então a fonte principal é o próprio tenant.
+
+**Interface comum** (`packages/shared` + `data-ingestion`):
+
+```ts
+interface FinancialDataProvider {
+  readonly source: "api" | "import" | "synthetic"; // futuro: "belvo" | "b3"
+  positions(input: ProviderInput): AsyncIterable<NormalizedPosition>;
+  transactions(input: ProviderInput): AsyncIterable<NormalizedTransaction>;
+}
+```
+
+`NormalizedPosition` e `NormalizedTransaction` são schemas Zod; nenhum consumidor vê o formato
+bruto de uma fonte. Um agregador pago, se vier a ser contratado, é só mais uma implementação.
+
+**1. API de ingestão (fase 1, fonte principal)**
+- `POST /clients/:clientId/positions` e `POST /clients/:clientId/transactions`: lotes de até 1.000
+  itens, validados por Zod e gravados com upsert por `(source, external_id)`. Reenviar o mesmo lote
+  não duplica nada.
+- Exige o escopo `data:write` na chave de API. Cada lote é medido como `DATA_INGESTION`, a
+  R$ 0,05 por lote (o mesmo preço de `DATA_QUERY`).
+- Ao terminar, publica `data.ingested` em `jobs`.
+
+**2. Gerador sintético (fase 1, demo e testes)**
+- Carteiras brasileiras realistas com semente fixa: ações, FIIs, Tesouro Direto, CDB/LCI/LCA,
+  fundos e caixa; transações de 12 meses com salário, despesas recorrentes, parcelas, aportes,
+  compras e vendas, dividendos e JCP.
+- Três perfis (conservador, moderado, arrojado). O seed do `docker compose` gera um cliente de cada
+  perfil para o tenant demo.
+- Os mesmos dados alimentam os testes E2E, então a demo e os testes contam a mesma história.
+
+**3. Importação de arquivos (fase 2, dados reais sem custo)**
+- `POST /clients/:clientId/imports` (multipart, até 10 MB) cria um `import_job` e publica em
+  `jobs`; um worker faz o parse e o upsert, e o progresso vai ao frontend pelo WebSocket.
+- Formatos:
+
+  | Formato | Origem | Parser |
+  |---|---|---|
+  | OFX | Extrato de praticamente todo banco | Parser OFX em TypeScript (SGML e XML) |
+  | CSV | Planilhas genéricas | Mapeamento de colunas informado no upload, com presets por banco |
+  | XLSX da Área do Investidor B3 | Posição, movimentação e negociação, exportadas pelo próprio investidor | Leitura de planilha com mapeamento fixo por aba |
+  | PDF de nota de corretagem | Padrão SINACOR das corretoras | Extração de texto + parser por seções; o LLM só entra quando o layout não bate, e a saída passa por validação Zod |
+
+- `file_sha256` impede processar o mesmo arquivo duas vezes; erros por linha ficam em
+  `import_job.errors` sem derrubar o lote inteiro.
+- O arquivo original não é guardado depois do parse (LGPD: minimização de dados).
+
+**Sync para o conhecimento (fase 1):** o worker consome `data.ingested` e o fim de cada
+`import_job` e transforma posições e transações em chunks, entidades (ativos, instituições,
+categorias) e relações no grafo do cliente, de forma incremental e idempotente. É o papel do agente
+Sync do Python, sem LLM.
+
 ---
 
 ## 7. Tratamento de erros e observabilidade
@@ -357,11 +427,14 @@ testes de integração e E2E → build de todos os pacotes.
 ### Fase 1 — núcleo apresentável
 
 Inclui monorepo, core, tenancy, limits, llm, knowledge, agentes navigator/insight/predictor/risk/executor,
-orchestrator, inbox, billing, watchtower, chat, web, docker compose, seed de demo e CI.
+orchestrator, inbox, billing, watchtower, chat, data-ingestion (API de ingestão, gerador sintético
+e Sync), web, docker compose, seed de demo e CI.
 
 **Aceite:**
 - `docker compose up` sem chaves sobe tudo; o seed cria um tenant demo, duas chaves (uma com
-  `inbox:decide`), dois clientes e documentos de conhecimento.
+  `inbox:decide` e uma com `data:write`), três clientes sintéticos (um por perfil) com posições,
+  transações e documentos de conhecimento já sincronizados.
+- Um lote enviado duas vezes pela API de ingestão não duplica posições nem transações (teste E2E).
 - O fluxo completo funciona pela interface: chat em streaming → ação irreversível → aprovação →
   execução → uso e auditoria visíveis.
 - Testes de RLS, de execução única e de append-only passando no CI.
@@ -369,17 +442,19 @@ orchestrator, inbox, billing, watchtower, chat, web, docker compose, seed de dem
 
 ### Fase 2 — produtos B2B
 
-AOPs (com agenda), market, evaluation (SEAL BR com os 42 casos), builder e os 7 agentes restantes.
+AOPs (com agenda), market, evaluation (SEAL BR com os 42 casos), builder, importação de arquivos
+(OFX, CSV, B3, notas de corretagem) e os 6 agentes restantes (o Sync já entra na fase 1 como worker).
 
 **Aceite:** endpoints equivalentes aos do Python, cobrados com os mesmos tipos de trabalho e
-cobertos por testes.
+cobertos por testes; cada formato de importação com arquivos de exemplo anonimizados como fixtures
+de teste.
 
 ### Fase 3 — integrações e remoção do Python
 
-Open Finance (Pluggy) e Sync, notificações (WhatsApp/SMTP), monitor e remoção de `legacy/python`.
+Notificações (WhatsApp/SMTP), monitor e remoção de `legacy/python`.
 
-**Aceite:** nenhuma funcionalidade do Python sem equivalente (checklist da tabela da seção 4) e CI
-apenas TypeScript.
+**Aceite:** nenhuma funcionalidade do Python sem equivalente (checklist da tabela da seção 4; a
+integração Pluggy é substituída de propósito por `data-ingestion`) e CI apenas TypeScript.
 
 ---
 
@@ -410,3 +485,5 @@ apenas TypeScript.
 | RLS mal configurada vaza dados | Papel `NOBYPASSRLS`, `FORCE RLS`, falha fechada e testes de isolamento obrigatórios no CI |
 | Custo de uma transação por operação no Prisma | Aceitável para a escala da demo; medir na fase 1 e agrupar operações por requisição se precisar |
 | Escopo grande | Fases com aceite próprio; a fase 1 já é apresentável sozinha |
+| Layouts de arquivos mudam (planilhas da B3, notas de corretagem) | Parsers isolados por formato com fixtures de teste; erros por linha no `import_job` em vez de falha silenciosa; fallback com LLM validado por Zod para PDFs |
+| Sem conexão automática para pessoa física | Decisão consciente de custo; a interface `FinancialDataProvider` aceita um adaptador de agregador quando houver receita para pagá-lo |

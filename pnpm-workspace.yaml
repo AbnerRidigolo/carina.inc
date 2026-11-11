@@ -1,3 +1,8 @@
 packages:
   - "packages/*"
   - "apps/*"
+
+peerDependencyRules:
+  allowedVersions:
+    # nestjs-zod ainda declara peer apenas ate @nestjs/common 11; funciona com 12.
+    "nestjs-zod>@nestjs/common": "12"

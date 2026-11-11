@@ -14,4 +14,8 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.strict,
+  {
+    // Módulos NestJS são classes vazias decoradas com @Module.
+    rules: { "@typescript-eslint/no-extraneous-class": ["error", { allowWithDecorator: true }] },
+  },
 );

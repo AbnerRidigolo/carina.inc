@@ -11,6 +11,9 @@
  *   existe no tenant, são registrados (warn) e confirmados: não há o que tentar de novo. Qualquer
  *   outro erro é registrado (error) e relançado, e o StreamsService refaz a entrega (DLQ depois
  *   de 5 entregas).
+ * - Concorrência: um lock no Redis por (tenant, cliente) (`sync:lock:<tenant>:<cliente>`, TTL
+ *   SYNC_LOCK_TTL_MS com heartbeat) serializa cada Sync inteiro (leitura e escrita) entre réplicas;
+ *   lock ocupado → SyncBusyError, relançado para o evento ser reentregue (ver `syncClient`).
  * - Idempotente: os documentos são reingeridos por `(source, title)` e o texto é função só dos
  *   dados (nada de relógio), então dois Syncs seguidos geram o mesmo conteúdo.
  * - Memória: leitura em páginas (keyset, até 1.000 linhas) agregadas em streaming; nenhuma lista
@@ -33,6 +36,7 @@ import { ENV } from "../../core/config/config.module.js";
 import type { Env } from "../../core/config/env.js";
 import { TenantContext } from "../../core/context/tenant-context.js";
 import { NotFoundError, ValidationError } from "../../core/errors/domain-errors.js";
+import { LockService } from "../../core/redis/lock.service.js";
 import { StreamsService } from "../../core/redis/streams.service.js";
 import { KnowledgeService } from "../knowledge/knowledge.service.js";
 import { IngestionService } from "./ingestion.service.js";
@@ -42,6 +46,17 @@ export const SYNC_SOURCE = "sync";
 export const SYNC_STREAM = "jobs";
 export const SYNC_GROUP = "sync";
 const RESTART_DELAY_MS = 1000;
+export const SYNC_LOCK_TTL_MS = 60_000;
+
+export class SyncBusyError extends Error {
+  constructor() {
+    super("Sync do cliente já em andamento");
+    this.name = "SyncBusyError";
+  }
+}
+
+export const syncLockKey = (tenantId: string, clientId: string) =>
+  `sync:lock:${tenantId.toLowerCase()}:${clientId.toLowerCase()}`;
 
 /**
  * Forma de OBJETO no 1º argumento (o Logger do Nest com nestjs-pino faz `Object.assign` dele no
@@ -55,6 +70,7 @@ export interface SyncLogFields {
 }
 
 export interface SyncLogger {
+  info(fields: SyncLogFields): void;
   warn(fields: SyncLogFields): void;
   error(fields: SyncLogFields): void;
 }
@@ -82,6 +98,7 @@ export class SyncWorker
     @Inject(StreamsService) private readonly streams: StreamsService,
     @Inject(IngestionService) private readonly ingestion: IngestionService,
     @Inject(KnowledgeService) private readonly knowledge: KnowledgeService,
+    @Inject(LockService) private readonly locks: LockService,
     @Inject(SYNC_LOGGER) private readonly logger: SyncLogger,
   ) {}
 
@@ -125,47 +142,69 @@ export class SyncWorker
    * Gera (ou regera) os documentos do Sync do cliente (id INTERNO) no tenant. Devolve quantos
    * documentos foram escritos (um tipo de dado sem nenhuma linha não gera documento).
    * Ids que não são uuid → ValidationError; cliente que não é do tenant → NotFoundError.
+   *
+   * Serializado por (tenant, cliente) com um lock no Redis em volta de TODA a leitura e escrita:
+   * sem ele, dois Syncs do mesmo cliente (réplicas diferentes, ou um reclaim enquanto o primeiro
+   * ainda roda) podiam terminar na ordem errada, e o que leu antes de uma ingestão sobrescreveria
+   * o que a viu. Lock ocupado → SyncBusyError (transitório): o evento fica pendente e o reclaim do
+   * StreamsService o reentrega depois, quando o Sync roda com dados no mínimo tão novos quanto os
+   * do dono anterior. Se o dono morre, o heartbeat morre junto, a chave expira em
+   * SYNC_LOCK_TTL_MS e as entradas pendentes são reivindicadas por outro consumidor.
+   * Antes de CADA escrita no conhecimento o lock é renovado e conferido (`assertHeld`); se foi
+   * perdido, lança LockLostError (transitório) sem escrever mais nada.
    */
   async syncClient(tenantId: string, clientId: string): Promise<{ documents: number }> {
     assertUuid("tenantId", tenantId);
     assertUuid("clientId", clientId);
-    return TenantContext.run({ tenantId }, async () => {
-      if (!(await this.ingestion.clientExists(clientId))) {
-        throw new NotFoundError("Cliente não encontrado");
-      }
-      const documents: SyncDocument[] = [];
-
-      const portfolio = new PortfolioAggregator();
-      for await (const page of this.ingestion.iteratePositions(clientId)) {
-        for (const p of page) portfolio.add(p);
-      }
-      const carteira = portfolio.build();
-      if (carteira) documents.push(carteira);
-
-      // Janela de 12 meses ancorada na transação mais recente (ordem `date desc`).
-      let newest: string | undefined;
-      for await (const page of this.ingestion.iterateTransactions(clientId, { pageSize: 1 })) {
-        newest = page[0]?.date;
-        break;
-      }
-      if (newest !== undefined) {
-        const flow = new CashFlowAggregator(newest);
-        for await (const page of this.ingestion.iterateTransactions(clientId, {
-          from: flow.from,
-        })) {
-          for (const t of page) flow.add(t);
+    const lock = await this.locks.acquire(syncLockKey(tenantId, clientId), SYNC_LOCK_TTL_MS);
+    if (!lock) throw new SyncBusyError();
+    try {
+      return await TenantContext.run({ tenantId }, async () => {
+        if (!(await this.ingestion.clientExists(clientId))) {
+          throw new NotFoundError("Cliente não encontrado");
         }
-        const fluxo = flow.build();
-        if (fluxo) documents.push(fluxo);
-      }
+        const documents = await this.buildDocuments(clientId);
+        for (const doc of documents) {
+          await lock.assertHeld();
+          await TenantContext.withClient(clientId, () =>
+            this.knowledge.ingestDocument({ source: SYNC_SOURCE, ...doc }),
+          );
+        }
+        return { documents: documents.length };
+      });
+    } finally {
+      await lock.release().catch(() => undefined);
+    }
+  }
 
-      for (const doc of documents) {
-        await TenantContext.withClient(clientId, () =>
-          this.knowledge.ingestDocument({ source: SYNC_SOURCE, ...doc }),
-        );
+  /** Lê posições e transações em páginas e monta os documentos (sem escrever nada). */
+  private async buildDocuments(clientId: string): Promise<SyncDocument[]> {
+    const documents: SyncDocument[] = [];
+
+    const portfolio = new PortfolioAggregator();
+    for await (const page of this.ingestion.iteratePositions(clientId)) {
+      for (const p of page) portfolio.add(p);
+    }
+    const carteira = portfolio.build();
+    if (carteira) documents.push(carteira);
+
+    // Janela de 12 meses ancorada na transação mais recente (ordem `date desc`).
+    let newest: string | undefined;
+    for await (const page of this.ingestion.iterateTransactions(clientId, { pageSize: 1 })) {
+      newest = page[0]?.date;
+      break;
+    }
+    if (newest !== undefined) {
+      const flow = new CashFlowAggregator(newest);
+      for await (const page of this.ingestion.iterateTransactions(clientId, {
+        from: flow.from,
+      })) {
+        for (const t of page) flow.add(t);
       }
-      return { documents: documents.length };
-    });
+      const fluxo = flow.build();
+      if (fluxo) documents.push(fluxo);
+    }
+    return documents;
   }
 
   /** Handler do stream: só `data.ingested`; erro permanente é logado e confirmado. */
@@ -179,6 +218,15 @@ export class SyncWorker
     try {
       await this.syncClient(event.tenantId, event.clientId);
     } catch (err) {
+      if (err instanceof SyncBusyError) {
+        // Esperado com várias réplicas: outro consumidor sincroniza este cliente agora. Relança
+        // para a entrada ficar pendente e ser reentregue pelo reclaim.
+        this.logger.info({
+          msg: "Sync do cliente já em andamento; evento será reentregue",
+          ...fields,
+        });
+        throw err;
+      }
       if (err instanceof ValidationError || err instanceof NotFoundError) {
         this.logger.warn({ msg: "Evento data.ingested descartado pelo Sync", err, ...fields });
         return;
@@ -224,5 +272,13 @@ export class SyncWorker
 /** Provider do logger do worker (substituível em testes com `overrideProvider`). */
 export const syncLoggerProvider = {
   provide: SYNC_LOGGER,
-  useFactory: (): SyncLogger => new Logger(SyncWorker.name),
+  useFactory: (): SyncLogger => {
+    // O Logger do Nest não tem `info`: `log` é o nível info (no pino, via nestjs-pino).
+    const logger = new Logger(SyncWorker.name);
+    return {
+      info: (fields) => logger.log(fields),
+      warn: (fields) => logger.warn(fields),
+      error: (fields) => logger.error(fields),
+    };
+  },
 };

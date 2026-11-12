@@ -3,6 +3,7 @@ import { Redis } from "ioredis";
 import { ENV } from "../config/config.module.js";
 import type { Env } from "../config/env.js";
 import { CacheService } from "./cache.service.js";
+import { LockService } from "./lock.service.js";
 import { REDIS } from "./redis.tokens.js";
 import { StreamsService } from "./streams.service.js";
 
@@ -16,9 +17,10 @@ import { StreamsService } from "./streams.service.js";
       useFactory: (env: Pick<Env, "REDIS_URL">) => new Redis(env.REDIS_URL),
     },
     CacheService,
+    LockService,
     StreamsService,
   ],
-  exports: [REDIS, CacheService, StreamsService],
+  exports: [REDIS, CacheService, LockService, StreamsService],
 })
 export class RedisModule implements OnModuleDestroy {
   constructor(@Inject(REDIS) private readonly redis: Redis) {}

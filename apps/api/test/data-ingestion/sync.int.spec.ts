@@ -10,16 +10,24 @@ import { Redis } from "ioredis";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { NotFoundError, ValidationError } from "../../src/core/errors/domain-errors.js";
+import { LockService } from "../../src/core/redis/lock.service.js";
 import { StreamsService } from "../../src/core/redis/streams.service.js";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
 import { IngestionService } from "../../src/modules/data-ingestion/ingestion.service.js";
 import {
+  PortfolioAggregator,
   cashFlowWindow,
   formatBrl,
   parseCents,
 } from "../../src/modules/data-ingestion/sync-documents.js";
-import { SYNC_LOGGER, SyncWorker } from "../../src/modules/data-ingestion/sync.worker.js";
+import {
+  SYNC_LOGGER,
+  SyncBusyError,
+  SyncWorker,
+  syncLockKey,
+} from "../../src/modules/data-ingestion/sync.worker.js";
 import { generatePortfolio } from "../../src/modules/data-ingestion/synthetic/generator.js";
+import { chunkText } from "../../src/modules/knowledge/chunker.js";
 import { KnowledgeService } from "../../src/modules/knowledge/knowledge.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, redisDbUrl } from "../setup/db.js";
@@ -486,5 +494,221 @@ describe("SyncWorker consumindo jobs (grupo sync)", () => {
     t = undefined;
     expect(running.running).toBe(false);
     expect(Date.now() - began).toBeLessThan(3000);
+  });
+});
+
+describe("Sync serializado por (tenant, cliente) com lock no Redis (R22)", () => {
+  let t: TestApp;
+  let redis: Redis;
+  let sync: SyncWorker;
+  let ingestion: IngestionService;
+  let knowledge: KnowledgeService;
+  let locks: LockService;
+  let T: SeededTenant;
+  const silent = { error: vi.fn(), warn: vi.fn() };
+
+  beforeAll(async () => {
+    redis = new Redis(redisDbUrl(REDIS_DB));
+    await redis.flushdb();
+    t = await createTestApp({ imports: [DataIngestionModule], redisDb: REDIS_DB });
+    sync = t.app.get(SyncWorker);
+    ingestion = t.app.get(IngestionService);
+    knowledge = t.app.get(KnowledgeService);
+    locks = t.app.get(LockService);
+    T = await t.seedTenant({ name: "Lock" });
+  });
+
+  afterAll(async () => {
+    await t.close();
+    await redis.flushdb();
+    redis.disconnect();
+  });
+
+  beforeEach(async () => {
+    await redis.flushdb();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Consumidor real do grupo `sync` com reentrega rápida, delegando ao handler do worker. */
+  function consumer(handler: (e: Parameters<SyncWorker["handle"]>[0]) => Promise<void>) {
+    const conn = new Redis(redisDbUrl(REDIS_DB));
+    const streams = new StreamsService(conn, {
+      claimIdleMs: 100,
+      blockMs: 100,
+      maxDeliveries: 3,
+      logger: silent,
+    });
+    const ac = new AbortController();
+    const done = streams.consume({
+      stream: "jobs",
+      group: "sync",
+      consumer: "teste",
+      handler,
+      signal: ac.signal,
+    });
+    return {
+      streams,
+      stop: async () => {
+        ac.abort();
+        await done;
+        conn.disconnect();
+      },
+    };
+  }
+
+  const pending = async () => {
+    const [count] = (await redis.xpending("jobs", "sync")) as [number, ...unknown[]];
+    return count;
+  };
+
+  it("exclusão mútua: com o lock tomado, o Sync do mesmo cliente é SyncBusyError e não escreve; outro cliente segue", async () => {
+    await ingestSynthetic(ingestion, T.tenantId, "cli-lock-1", 21);
+    await ingestSynthetic(ingestion, T.tenantId, "cli-lock-2", 22);
+    const c1 = await clientIdOf(T.tenantId, "cli-lock-1");
+    const c2 = await clientIdOf(T.tenantId, "cli-lock-2");
+
+    const held = await locks.acquire(syncLockKey(T.tenantId, c1), 60_000);
+    expect(held).not.toBeNull();
+    await expect(sync.syncClient(T.tenantId, c1)).rejects.toBeInstanceOf(SyncBusyError);
+    expect((await kgCounts(T.tenantId, c1))["kg_document"]).toBe(0);
+    // outro cliente do mesmo tenant não é bloqueado
+    expect(await sync.syncClient(T.tenantId, c2)).toEqual({ documents: 2 });
+
+    expect(await held?.release()).toBe(true);
+    expect(await sync.syncClient(T.tenantId, c1)).toEqual({ documents: 2 });
+    expect(await redis.exists(syncLockKey(T.tenantId, c1))).toBe(0);
+  });
+
+  it("falha no meio do Sync libera o lock; a chamada seguinte adquire e sincroniza", async () => {
+    await ingestSynthetic(ingestion, T.tenantId, "cli-falha", 23);
+    const c = await clientIdOf(T.tenantId, "cli-falha");
+    const boom = new Error("falha no meio");
+    const original = knowledge.ingestDocument.bind(knowledge);
+    vi.spyOn(knowledge, "ingestDocument")
+      .mockImplementationOnce(original)
+      .mockRejectedValueOnce(boom);
+    await expect(sync.syncClient(T.tenantId, c)).rejects.toBe(boom);
+    expect(await redis.exists(syncLockKey(T.tenantId, c))).toBe(0);
+    vi.restoreAllMocks();
+    expect(await sync.syncClient(T.tenantId, c)).toEqual({ documents: 2 });
+  });
+
+  it("corrida: um Sync que leu antes de uma ingestão não sobrescreve o que viu a ingestão", async () => {
+    const p = generatePortfolio("moderado", 31, "2026-11-10");
+    await TenantContext.run({ tenantId: T.tenantId }, async () => {
+      await ingestion.upsertPositions("cli-corrida", "synthetic", p.positions);
+      await ingestion.upsertTransactions("cli-corrida", "synthetic", p.transactions);
+    });
+    const c = await clientIdOf(T.tenantId, "cli-corrida");
+
+    // 1º Sync: leu a versão 1 e para (portão) antes da primeira escrita.
+    let reached!: () => void;
+    const atGate = new Promise<void>((r) => (reached = r));
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const original = knowledge.ingestDocument.bind(knowledge);
+    vi.spyOn(knowledge, "ingestDocument").mockImplementationOnce(async (input) => {
+      reached();
+      await gate;
+      return original(input);
+    });
+    const first = sync.syncClient(T.tenantId, c);
+    await atGate;
+
+    // Nova ingestão confirmada enquanto o 1º Sync segura dados velhos.
+    const petr = p.positions.find((x) => x.assetCode === "PETR4");
+    if (!petr) throw new Error("carteira sem PETR4");
+    const v2 = p.positions.map((x) =>
+      x === petr ? { ...x, quantity: "1", valueBrl: "38.50" } : x,
+    );
+    await TenantContext.run({ tenantId: T.tenantId }, () =>
+      ingestion.upsertPositions("cli-corrida", "synthetic", [
+        { ...petr, quantity: "1", valueBrl: "38.50" },
+      ]),
+    );
+
+    // 2º Sync (o evento da nova ingestão): o 1º ainda segura o lock → ocupado, nada escrito.
+    await expect(sync.syncClient(T.tenantId, c)).rejects.toBeInstanceOf(SyncBusyError);
+    open();
+    expect(await first).toEqual({ documents: 2 });
+    // a reentrega do evento ocupado roda depois e vê os dados finais
+    expect(await sync.syncClient(T.tenantId, c)).toEqual({ documents: 2 });
+
+    const agg = new PortfolioAggregator();
+    for (const x of v2) agg.add(x);
+    const expected = chunkText(agg.build()?.text ?? "").sort();
+    const stored = (
+      await migratorSql<{ content: string }>(
+        `SELECT c.content FROM kg_chunk c JOIN kg_document d ON d.id = c.document_id
+          WHERE d.source = 'sync' AND d.title = 'Carteira consolidada'`,
+        [],
+        { tenantId: T.tenantId, clientId: c },
+      )
+    )
+      .map((r) => r.content)
+      .sort();
+    expect(stored).toEqual(expected);
+    expect(stored.join("\n")).toContain("1 PETR4 (ação)");
+  });
+
+  it("evento com lock ocupado fica pendente e é reentregue pelo reclaim depois da liberação", async () => {
+    await ingestSynthetic(ingestion, T.tenantId, "cli-pendente", 24);
+    const c = await clientIdOf(T.tenantId, "cli-pendente");
+    await redis.flushdb(); // descarta os data.ingested da ingestão acima
+    const held = await locks.acquire(syncLockKey(T.tenantId, c), 60_000);
+    const run = consumer((e) => sync.handle(e));
+    try {
+      await run.streams.publish("jobs", {
+        eventId: randomUUID(),
+        type: "data.ingested",
+        tenantId: T.tenantId,
+        clientId: c,
+        source: "api",
+      });
+      await until(async () => (await pending()) === 1);
+      expect((await kgCounts(T.tenantId, c))["kg_document"]).toBe(0);
+      await held?.release();
+      await until(async () => (await kgCounts(T.tenantId, c))["kg_document"] === 2);
+      await until(async () => (await pending()) === 0);
+      expect(await redis.xlen("jobs.dlq")).toBe(0);
+    } finally {
+      await run.stop();
+    }
+  });
+
+  it("falha permanente de infraestrutura (evento venenoso) chega à jobs.dlq depois do limite de entregas", async () => {
+    const c = await insertClient(T.tenantId, "cli-veneno");
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const broken = new SyncWorker(
+      { WORKERS_ENABLED: "false" },
+      t.app.get(StreamsService),
+      {
+        clientExists: async () => {
+          throw new Error("banco fora");
+        },
+      } as unknown as IngestionService,
+      knowledge,
+      locks,
+      logger,
+    );
+    const run = consumer((e) => broken.handle(e));
+    try {
+      await run.streams.publish("jobs", {
+        eventId: randomUUID(),
+        type: "data.ingested",
+        tenantId: T.tenantId,
+        clientId: c,
+        source: "api",
+      });
+      await until(async () => (await redis.xlen("jobs.dlq")) === 1);
+      await until(async () => (await pending()) === 0);
+      expect(logger.error.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(await redis.exists(syncLockKey(T.tenantId, c))).toBe(0);
+    } finally {
+      await run.stop();
+    }
   });
 });

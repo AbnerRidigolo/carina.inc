@@ -193,7 +193,7 @@ describe("ModelFactory.chat (live, cadeia de fallback)", () => {
     expect(JSON.stringify(e)).not.toContain("SEGREDO");
     expect((e as { cause?: unknown }).cause).toBeUndefined();
     // Cada falha de provedor é logada (com o erro original, que traz a stack).
-    const logged = logger.warn.mock.calls.map((c) => c[1]);
+    const logged = logger.warn.mock.calls.map((c) => c[0]);
     expect(logged).toHaveLength(3);
     for (const l of logged) expect((l as { err: Error }).err.stack).toContain("SEGREDO");
     expect(logger.error).toHaveBeenCalledOnce();

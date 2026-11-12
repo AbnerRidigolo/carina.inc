@@ -18,9 +18,21 @@ import { slidingWindowAcquire } from "../limits/sliding-window.lua.js";
 
 export const PROVIDER_WINDOW_MS = 60_000;
 
+/**
+ * Campos de uma linha de log. Forma de OBJETO no 1º argumento (o Logger do Nest com nestjs-pino faz
+ * `Object.assign` dele no registro do pino): assim `err` fica no topo e o serializador do pino
+ * guarda tipo, mensagem e stack. Um `Error` aninhado em outro objeto (ou como "contexto") perde tudo
+ * menos as propriedades enumeráveis. Nunca colocar chaves de API, cabeçalhos nem prompts aqui.
+ */
+export interface LogFields {
+  msg: string;
+  err?: unknown;
+  [field: string]: unknown;
+}
+
 export interface LlmLogger {
-  warn(message: string, ...rest: unknown[]): void;
-  error(message: string, ...rest: unknown[]): void;
+  warn(fields: LogFields): void;
+  error(fields: LogFields): void;
 }
 
 export class ProviderRateLimitedError extends Error {
@@ -53,7 +65,8 @@ export class ProviderLimiter {
         this.clock(),
       );
     } catch (err) {
-      this.logger.warn("Limitador de LLM indisponível; seguindo sem limite local", {
+      this.logger.warn({
+        msg: "Limitador de LLM indisponível; seguindo sem limite local",
         provider,
         err,
       });
@@ -97,14 +110,16 @@ export class LimitedRunnable<I, O> extends Runnable<I, O> {
   private logFailure(err: unknown): void {
     const { provider, model } = this.f;
     if (err instanceof ProviderRateLimitedError) {
-      this.f.logger.warn("Provedor de LLM no limite local; pulando para o próximo da cadeia", {
+      this.f.logger.warn({
+        msg: "Provedor de LLM no limite local; pulando para o próximo da cadeia",
         provider,
         model,
         retryAfterMs: err.retryAfterMs,
       });
       return;
     }
-    this.f.logger.warn("Provedor de LLM falhou; tentando o próximo da cadeia", {
+    this.f.logger.warn({
+      msg: "Provedor de LLM falhou; tentando o próximo da cadeia",
       provider,
       model,
       err,

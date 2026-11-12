@@ -168,7 +168,7 @@ class ChainFailureMapper<O> extends Runnable<BaseMessage[], O> {
   }
 
   private fail(): AllProvidersFailedError {
-    this.logger.error("Todos os provedores de LLM falharam", { role: this.role });
+    this.logger.error({ msg: "Todos os provedores de LLM falharam", role: this.role });
     return new AllProvidersFailedError();
   }
 
@@ -281,7 +281,9 @@ export class ModelFactory {
       const varName = ENV_VAR[spec.provider];
       if (!this.env[varName]) {
         missing.add(varName);
-        this.logger.warn(`${varName} ausente: ${spec.raw} fora da cadeia de ${role}`);
+        this.logger.warn({
+          msg: `${varName} ausente: ${spec.raw} fora da cadeia de ${role}`,
+        });
         continue;
       }
       chain.push({ spec, model: this.buildModel(spec) });

@@ -137,7 +137,7 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
       expect((r2.body as { upserted: number }).upserted).toBe(3);
 
       const res = await get("/api/clients/c1/positions", A.keys.chat).expect(200);
-      expect((res.body as unknown[]).length).toBe(3);
+      expect((res.body as { positions: unknown[] }).positions.length).toBe(3);
       expect(await countRows("position", A.tenantId)).toBe(3);
     });
 
@@ -151,7 +151,8 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
       expect(res.status).toBe(201);
       expect((res.body as { upserted: number }).upserted).toBe(2);
 
-      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body as {
+      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body
+        .positions as {
         externalId: string;
         name: string;
         valueBrl: string;
@@ -173,7 +174,8 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
       await post("/api/clients/c1/positions", A.keys.ingest, {
         items: [pos("p1", { valueBrl: "20.00", quantity: undefined })],
       }).expect(201);
-      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body as {
+      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body
+        .positions as {
         valueBrl: string;
         quantity?: string;
       }[];
@@ -264,7 +266,8 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
           pos("neg", { valueBrl: "-0.01", quantity: "0.00000001" }),
         ],
       }).expect(201);
-      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body as {
+      const list = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body
+        .positions as {
         externalId: string;
         valueBrl: string;
         quantity: string;
@@ -412,7 +415,9 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
         ],
       }).expect(201);
       const res = await get("/api/clients/c1/positions", A.keys.chat).expect(200);
-      const body = res.body as Record<string, unknown>[];
+      const page = res.body as { positions: Record<string, unknown>[]; nextCursor: string | null };
+      expect(page.nextCursor).toBeNull();
+      const body = page.positions;
       expect(body).toHaveLength(2);
       for (const p of body) {
         NormalizedPositionSchema.strict().parse(p);
@@ -443,7 +448,108 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
     it("cliente existente sem posições → 200 []", async () => {
       await post("/api/clients/c1/transactions", A.keys.ingest, { items: [txn("t1")] }).expect(201);
       const res = await get("/api/clients/c1/positions", A.keys.chat).expect(200);
-      expect(res.body).toEqual([]);
+      expect(res.body).toEqual({ positions: [], nextCursor: null });
+    });
+
+    describe("paginação (limit e after)", () => {
+      type Page = { positions: { externalId: string }[]; nextCursor: string | null };
+      const ids = (n: number) =>
+        Array.from({ length: n }, (_, i) => `p${String(i).padStart(4, "0")}`);
+      const seed = async (n: number) => {
+        // Em ordem embaralhada: a ordem da resposta é por externalId, não a de inserção.
+        const items = ids(n)
+          .reverse()
+          .map((id) => pos(id, { valueBrl: "1.00" }));
+        await post("/api/clients/c1/positions", A.keys.ingest, { items }).expect(201);
+      };
+      const page = async (query: string, key = A.keys.chat) =>
+        (await get(`/api/clients/c1/positions${query}`, key).expect(200)).body as Page;
+
+      it("padrão de 100 itens por página, com nextCursor quando há mais", async () => {
+        await seed(150);
+        const first = await page("");
+        expect(first.positions).toHaveLength(100);
+        expect(first.positions.map((p) => p.externalId)).toEqual(ids(150).slice(0, 100));
+        expect(first.nextCursor).toEqual(expect.any(String));
+        const second = await page(`?after=${encodeURIComponent(first.nextCursor as string)}`);
+        expect(second.positions.map((p) => p.externalId)).toEqual(ids(150).slice(100));
+        expect(second.nextCursor).toBeNull();
+      });
+
+      it("percorrer todas as páginas pelo nextCursor devolve cada linha uma vez, em ordem", async () => {
+        await seed(130);
+        const seen: string[] = [];
+        let cursor: string | null = null;
+        let pages = 0;
+        do {
+          const q: string = `?limit=40${cursor ? `&after=${encodeURIComponent(cursor)}` : ""}`;
+          const p: Page = await page(q);
+          seen.push(...p.positions.map((x) => x.externalId));
+          cursor = p.nextCursor;
+          pages++;
+        } while (cursor);
+        expect(pages).toBe(4);
+        expect(seen).toEqual(ids(130));
+      });
+
+      it("limit igual ao total: uma página só, nextCursor nulo", async () => {
+        await seed(5);
+        const p = await page("?limit=5");
+        expect(p.positions).toHaveLength(5);
+        expect(p.nextCursor).toBeNull();
+      });
+
+      it("linhas de fontes diferentes com o mesmo externalId não se perdem nem se repetem entre páginas", async () => {
+        await seed(3);
+        const clientId = await clientRowId(A.tenantId, "c1");
+        await migratorSql(
+          `INSERT INTO position (tenant_id, client_id, source, external_id, institution, kind,
+             asset_class, name, value_brl, as_of)
+           SELECT $1, $2, 'synthetic', external_id, 'XP', 'investment', 'acao', 'sintético', 1,
+                  current_date
+           FROM position WHERE source = 'api'`,
+          [A.tenantId, clientId],
+          { tenantId: A.tenantId },
+        );
+        const seen: string[] = [];
+        let cursor: string | null = null;
+        do {
+          const q: string = `?limit=1${cursor ? `&after=${encodeURIComponent(cursor)}` : ""}`;
+          const p: Page = await page(q);
+          seen.push(...p.positions.map((x) => x.externalId));
+          cursor = p.nextCursor;
+        } while (cursor);
+        expect(seen).toEqual(["p0000", "p0000", "p0001", "p0001", "p0002", "p0002"]);
+      });
+
+      it("parâmetros inválidos → 422", async () => {
+        await seed(2);
+        for (const q of [
+          "?limit=0",
+          "?limit=1001",
+          "?limit=-1",
+          "?limit=abc",
+          "?limit=1.5",
+          "?limit=",
+          "?limit=1&limit=2",
+          "?after=",
+          "?after=lixo",
+          `?after=${"x".repeat(2000)}`,
+          "?after=a&after=b",
+        ]) {
+          expectProblem(await get(`/api/clients/c1/positions${q}`, A.keys.chat), 422);
+        }
+        expect((await page("?limit=1000")).positions).toHaveLength(2);
+      });
+
+      it("cliente inexistente ou de outro tenant → 404, também com after", async () => {
+        await seed(2);
+        const cursor = (await page("?limit=1")).nextCursor as string;
+        const q = `?limit=1&after=${encodeURIComponent(cursor)}`;
+        expectProblem(await get(`/api/clients/nao-existe/positions${q}`, A.keys.chat), 404);
+        // O cursor de A não abre o cliente de A para B.
+        expectProblem(await get(`/api/clients/c1/positions${q}`, B.keys.chat), 404);
+      });
     });
 
     it("chave sem o escopo chat → 403", async () => {
@@ -470,11 +576,13 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
       await post("/api/clients/c1/positions", B.keys.ingest, {
         items: [pos("p1", { name: "de B", valueBrl: "2.00" })],
       }).expect(201);
-      const a = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body as {
+      const a = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body
+        .positions as {
         name: string;
         valueBrl: string;
       }[];
-      const b = (await get("/api/clients/c1/positions", B.keys.chat).expect(200)).body as {
+      const b = (await get("/api/clients/c1/positions", B.keys.chat).expect(200)).body
+        .positions as {
         name: string;
         valueBrl: string;
       }[];
@@ -668,10 +776,10 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
         }).expect(201);
       }),
     );
-    const a = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body as {
+    const a = (await get("/api/clients/c1/positions", A.keys.chat).expect(200)).body.positions as {
       name: string;
     }[];
-    const b = (await get("/api/clients/c1/positions", B.keys.chat).expect(200)).body as {
+    const b = (await get("/api/clients/c1/positions", B.keys.chat).expect(200)).body.positions as {
       name: string;
     }[];
     expect(a).toHaveLength(3);

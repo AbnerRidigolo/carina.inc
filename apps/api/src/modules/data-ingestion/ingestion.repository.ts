@@ -21,11 +21,25 @@ import type { Source } from "./provider.js";
 
 type Tx = Prisma.TransactionClient;
 
-export interface ListTransactionsQuery {
-  /** Datas `YYYY-MM-DD`, inclusivas. */
-  from?: string;
-  to?: string;
-  limit: number;
+/** Posição de uma linha na ordem da paginação (keyset): a próxima página começa depois dela. */
+export interface PositionCursor {
+  externalId: string;
+  source: string;
+}
+
+export interface TransactionCursor {
+  /** `YYYY-MM-DD`. */
+  date: string;
+  externalId: string;
+  source: string;
+}
+
+export interface Page<T, C> {
+  items: T[];
+  /** Há linhas depois desta página. */
+  hasMore: boolean;
+  /** Última linha da página (ausente se a página é vazia). */
+  last?: C;
 }
 
 const toDay = (d: Date): string => d.toISOString().slice(0, 10);
@@ -151,50 +165,112 @@ export class IngestionRepository {
     }
   }
 
-  /** Posições do cliente fixado no TenantContext, no contrato `NormalizedPosition`. */
-  async listPositions(clientId: string): Promise<NormalizedPosition[]> {
+  /**
+   * Uma página de posições do cliente fixado no TenantContext, por keyset em
+   * `(externalId, source)` (ordem total: a unicidade é por `(tenant, client, source, externalId)`),
+   * no contrato `NormalizedPosition`. Lê `take + 1` linhas para saber se há mais.
+   */
+  async positionsPage(
+    clientId: string,
+    q: { after?: PositionCursor; take: number },
+  ): Promise<Page<NormalizedPosition, PositionCursor>> {
     const rows = await this.db.client.position.findMany({
-      where: { clientId },
-      orderBy: [{ assetClass: "asc" }, { name: "asc" }, { externalId: "asc" }, { source: "asc" }],
+      where: {
+        clientId,
+        ...(q.after
+          ? {
+              OR: [
+                { externalId: { gt: q.after.externalId } },
+                { externalId: q.after.externalId, source: { gt: q.after.source } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ externalId: "asc" }, { source: "asc" }],
+      take: q.take + 1,
     });
-    return rows.map((r) => ({
-      externalId: r.externalId,
-      institution: r.institution,
-      kind: r.kind as NormalizedPosition["kind"],
-      assetClass: r.assetClass as NormalizedPosition["assetClass"],
-      ...(r.assetCode !== null ? { assetCode: r.assetCode } : {}),
-      name: r.name,
-      ...(r.quantity !== null ? { quantity: quantity(r.quantity) } : {}),
-      valueBrl: money(r.valueBrl),
-      asOf: toDay(r.asOf),
-    }));
+    const pageRows = rows.slice(0, q.take);
+    const lastRow = pageRows.at(-1);
+    return {
+      items: pageRows.map((r) => ({
+        externalId: r.externalId,
+        institution: r.institution,
+        kind: r.kind as NormalizedPosition["kind"],
+        assetClass: r.assetClass as NormalizedPosition["assetClass"],
+        ...(r.assetCode !== null ? { assetCode: r.assetCode } : {}),
+        name: r.name,
+        ...(r.quantity !== null ? { quantity: quantity(r.quantity) } : {}),
+        valueBrl: money(r.valueBrl),
+        asOf: toDay(r.asOf),
+      })),
+      hasMore: rows.length > q.take,
+      ...(lastRow ? { last: { externalId: lastRow.externalId, source: lastRow.source } } : {}),
+    };
   }
 
-  /** Transações do cliente, mais recentes primeiro, no contrato `NormalizedTransaction`. */
-  async listTransactions(
+  /**
+   * Uma página de transações do cliente, mais recentes primeiro, por keyset em
+   * `(date desc, externalId, source)`, no contrato `NormalizedTransaction`.
+   */
+  async transactionsPage(
     clientId: string,
-    q: ListTransactionsQuery,
-  ): Promise<NormalizedTransaction[]> {
-    const date = {
+    q: { from?: string; to?: string; after?: TransactionCursor; take: number },
+  ): Promise<Page<NormalizedTransaction, TransactionCursor>> {
+    const range = {
       ...(q.from !== undefined ? { gte: startOfDay(q.from) } : {}),
       ...(q.to !== undefined ? { lte: startOfDay(q.to) } : {}),
     };
+    const hasRange = q.from !== undefined || q.to !== undefined;
     const rows = await this.db.client.transaction.findMany({
-      where: { clientId, ...(q.from !== undefined || q.to !== undefined ? { date } : {}) },
+      where: {
+        clientId,
+        AND: [
+          ...(hasRange ? [{ date: range }] : []),
+          ...(q.after
+            ? [
+                {
+                  OR: [
+                    { date: { lt: startOfDay(q.after.date) } },
+                    { date: startOfDay(q.after.date), externalId: { gt: q.after.externalId } },
+                    {
+                      date: startOfDay(q.after.date),
+                      externalId: q.after.externalId,
+                      source: { gt: q.after.source },
+                    },
+                  ],
+                },
+              ]
+            : []),
+        ],
+      },
       orderBy: [{ date: "desc" }, { externalId: "asc" }, { source: "asc" }],
-      take: q.limit,
+      take: q.take + 1,
     });
-    return rows.map((r) => ({
-      externalId: r.externalId,
-      institution: r.institution,
-      account: r.account,
-      date: toDay(r.date),
-      description: r.description,
-      amountBrl: money(r.amountBrl),
-      kind: r.kind as NormalizedTransaction["kind"],
-      ...(r.category !== null ? { category: r.category } : {}),
-      ...(r.assetCode !== null ? { assetCode: r.assetCode } : {}),
-      ...(r.quantity !== null ? { quantity: quantity(r.quantity) } : {}),
-    }));
+    const pageRows = rows.slice(0, q.take);
+    const lastRow = pageRows.at(-1);
+    return {
+      items: pageRows.map((r) => ({
+        externalId: r.externalId,
+        institution: r.institution,
+        account: r.account,
+        date: toDay(r.date),
+        description: r.description,
+        amountBrl: money(r.amountBrl),
+        kind: r.kind as NormalizedTransaction["kind"],
+        ...(r.category !== null ? { category: r.category } : {}),
+        ...(r.assetCode !== null ? { assetCode: r.assetCode } : {}),
+        ...(r.quantity !== null ? { quantity: quantity(r.quantity) } : {}),
+      })),
+      hasMore: rows.length > q.take,
+      ...(lastRow
+        ? {
+            last: {
+              date: toDay(lastRow.date),
+              externalId: lastRow.externalId,
+              source: lastRow.source,
+            },
+          }
+        : {}),
+    };
   }
 }

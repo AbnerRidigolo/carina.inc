@@ -1,7 +1,6 @@
 import {
   PositionBatchSchema,
   TransactionBatchSchema,
-  type NormalizedPosition,
   type NormalizedTransaction,
   type PositionBatch,
   type TransactionBatch,
@@ -11,23 +10,34 @@ import { ZodValidationPipe } from "nestjs-zod";
 import { z } from "zod";
 import { RequireScopes } from "../tenancy/scopes.decorator.js";
 import {
-  DEFAULT_TRANSACTIONS_LIMIT,
+  DEFAULT_PAGE_LIMIT,
   IngestionService,
-  MAX_TRANSACTIONS_LIMIT,
+  MAX_PAGE_SIZE,
   type IngestResult,
+  type PositionsPage,
 } from "./ingestion.service.js";
+
+/** `?limit=`: inteiro de 1 a 1000 (padrão 100). */
+const LimitSchema = z
+  .string()
+  .regex(/^\d{1,4}$/, "precisa ser um inteiro")
+  .transform(Number)
+  .pipe(z.number().int().min(1).max(MAX_PAGE_SIZE))
+  .default(DEFAULT_PAGE_LIMIT);
+
+/** `?limit=` e `?after=` (o `nextCursor` da página anterior; a validade do cursor é do serviço). */
+export const PositionsQuerySchema = z.object({
+  limit: LimitSchema,
+  after: z.string().min(1).max(512).optional(),
+});
+type PositionsQuery = z.output<typeof PositionsQuerySchema>;
 
 /** `?from=&to=` (YYYY-MM-DD, inclusivos) e `?limit=` (1..1000, padrão 100). */
 export const TransactionsQuerySchema = z
   .object({
     from: z.iso.date().optional(),
     to: z.iso.date().optional(),
-    limit: z
-      .string()
-      .regex(/^\d{1,4}$/, "precisa ser um inteiro")
-      .transform(Number)
-      .pipe(z.number().int().min(1).max(MAX_TRANSACTIONS_LIMIT))
-      .default(DEFAULT_TRANSACTIONS_LIMIT),
+    limit: LimitSchema,
   })
   .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
     path: ["from"],
@@ -65,8 +75,11 @@ export class IngestionController {
 
   @Get("positions")
   @RequireScopes("chat")
-  positions(@Param("clientId") clientId: string): Promise<NormalizedPosition[]> {
-    return this.ingestion.listPositions(clientId);
+  positions(
+    @Param("clientId") clientId: string,
+    @Query(new ZodValidationPipe(PositionsQuerySchema)) query: PositionsQuery,
+  ): Promise<PositionsPage> {
+    return this.ingestion.listPositions(clientId, query);
   }
 
   @Get("transactions")

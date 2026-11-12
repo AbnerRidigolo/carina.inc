@@ -161,7 +161,7 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
         .get("/api/clients/a1/positions")
         .set("X-API-Key", A.keys.chat)
         .expect(200);
-      const body = res.body as Record<string, unknown>[];
+      const body = (res.body as { positions: Record<string, unknown>[] }).positions;
       expect(body.map((p) => p["externalId"])).toEqual(["pa1"]);
       expect(body[0]?.["valueBrl"]).toBe("100.50");
       // Contrato NormalizedPosition: sem ids de tenant/cliente nem colunas internas.
@@ -177,7 +177,9 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
         .get("/api/clients/shared/positions")
         .set("X-API-Key", B.keys.chat)
         .expect(200);
-      expect((res.body as { externalId: string }[]).map((p) => p.externalId)).toEqual(["pbs"]);
+      expect(
+        (res.body as { positions: { externalId: string }[] }).positions.map((p) => p.externalId),
+      ).toEqual(["pbs"]);
     });
 
     it("externalId de B com a chave de A → 404, igual a um cliente inexistente", async () => {

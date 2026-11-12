@@ -17,7 +17,7 @@ import { Public, RequireScopes } from "./scopes.decorator.js";
 
 const TENANT_ID = "6f1c1d1e-8a3b-4c2d-9e0f-0123456789ab";
 const KEY_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-const KEY = "sk-live-0123456789ABCDEFGHIJabcdefghij";
+const KEY = "sk-live-0123456789ABCDEFGHIJabcdefghijKL";
 
 class Handlers {
   @RequireScopes("chat")
@@ -157,6 +157,38 @@ describe("ApiKeyGuard", () => {
       await expect(
         guard.canActivate(httpContext(req(headers), handlers.chat)),
       ).rejects.toBeInstanceOf(UnauthenticatedError);
+    }
+    expect($queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("chave fora do formato sk-live-<32 base62>: 401 sem consultar o banco, igual a chave ausente", async () => {
+    const { prisma, $queryRaw } = fakePrisma([row(["chat"])]);
+    const guard = new ApiKeyGuard(prisma, new Reflector());
+    const missing = await guard
+      .canActivate(httpContext(req(), handlers.chat))
+      .catch((e: unknown) => e);
+    const body32 = "0123456789ABCDEFGHIJabcdefghijKL";
+    const malformed = [
+      "x",
+      `sk-test-${body32}`,
+      `sk-live-${body32.slice(1)}`, // 31 caracteres
+      `sk-live-${body32}M`, // 33 caracteres
+      `sk-live-${body32.slice(1)}-`, // caractere fora de base62
+      `sk-live-${body32.slice(1)}_`,
+      `SK-LIVE-${body32}`,
+    ];
+    for (const bad of malformed) {
+      const variants: Record<string, string>[] = [
+        { authorization: `Bearer ${bad}` },
+        { "x-api-key": bad },
+      ];
+      for (const headers of variants) {
+        const err = await guard
+          .canActivate(httpContext(req(headers), handlers.chat))
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(UnauthenticatedError);
+        expect((err as Error).message).toBe((missing as Error).message);
+      }
     }
     expect($queryRaw).not.toHaveBeenCalled();
   });

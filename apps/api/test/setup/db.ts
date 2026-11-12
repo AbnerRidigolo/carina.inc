@@ -27,6 +27,13 @@ export function redisUrl(): string {
   return inject("TEST_REDIS_URL");
 }
 
+/** URL do Redis de teste apontando para um DB lógico próprio. */
+export function redisDbUrl(db: number): string {
+  const url = new URL(redisUrl());
+  url.pathname = `/${db}`;
+  return url.toString();
+}
+
 /** Abre uma conexão nova, roda `fn` e fecha a conexão. */
 export async function withPgClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({ connectionString: url });

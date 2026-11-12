@@ -30,13 +30,26 @@ export class ApprovalConflictError extends DomainError {
   readonly code = "approval_conflict";
   readonly status = 409;
 }
+/** 429 sempre traz `Retry-After`: por isso o construtor exige `retryAfterSeconds`. */
 export class RateLimitedError extends DomainError {
   readonly code = "rate_limited";
   readonly status = 429;
+
+  // Não é inútil: torna `retryAfterSeconds` obrigatório (a base o deixa opcional).
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message, retryAfterSeconds);
+  }
 }
 export class QuotaExceededError extends DomainError {
   readonly code = "quota_exceeded";
   readonly status = 429;
+
+  // Não é inútil: torna `retryAfterSeconds` obrigatório (a base o deixa opcional).
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message, retryAfterSeconds);
+  }
 }
 export class AllProvidersFailedError extends DomainError {
   readonly code = "all_providers_failed";

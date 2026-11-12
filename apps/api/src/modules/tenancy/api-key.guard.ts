@@ -57,6 +57,12 @@ interface ResolvedKeyRow {
 const UNAUTHENTICATED_MESSAGE = "Chave de API ausente ou inválida";
 /** Chaves geradas têm 40 caracteres; o limite só evita hashear entradas absurdas. */
 const MAX_KEY_LENGTH = 256;
+/**
+ * Formato das chaves geradas (`sk-live-` + 32 base62). Conferido ANTES do banco: sem isto, toda
+ * requisição com lixo no header viraria uma consulta a `resolve_api_key` (carga sem limite, já
+ * que o rate limit só roda por tenant, depois da autenticação).
+ */
+const API_KEY_FORMAT = /^sk-live-[0-9A-Za-z]{32}$/;
 
 function unauthenticated(): UnauthenticatedError {
   return new UnauthenticatedError(UNAUTHENTICATED_MESSAGE);
@@ -95,7 +101,8 @@ export class ApiKeyGuard implements CanActivate {
 
     const req = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const key = extractApiKey(req.headers);
-    if (key === undefined) throw unauthenticated();
+    // Ausente ou fora do formato: o mesmo 401 de chave desconhecida, sem tocar no banco.
+    if (key === undefined || !API_KEY_FORMAT.test(key)) throw unauthenticated();
 
     const tenant = await this.resolve(hashApiKey(key));
     if (!tenant) throw unauthenticated();

@@ -13,7 +13,7 @@ import { loadEnv } from "../../src/core/config/env.js";
 import { ProblemDetailsFilter } from "../../src/core/errors/problem-details.filter.js";
 import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
-import { appUrl, migratorSql, migratorUrl, redisUrl } from "./db.js";
+import { appUrl, migratorSql, migratorUrl, redisDbUrl, redisUrl } from "./db.js";
 
 export type SeedKeyName = "chat" | "approver" | "ingest";
 
@@ -55,22 +55,32 @@ export interface TestApp {
 
 type ModuleImport = Type | DynamicModule;
 
-export async function createTestApp(opts: { imports?: ModuleImport[] } = {}): Promise<TestApp> {
+export interface CreateTestAppOptions {
+  imports?: ModuleImport[];
+  /** Substitui providers (ex.: o relógio CLOCK dos limites). */
+  overrides?: { token: unknown; useValue: unknown }[];
+  /** DB lógico do Redis do app; cada arquivo de teste usa o seu para não colidir com os demais. */
+  redisDb?: number;
+}
+
+export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<TestApp> {
   const env = loadEnv({
     ...process.env,
     NODE_ENV: "test",
     DATABASE_URL: appUrl(),
     MIGRATION_DATABASE_URL: migratorUrl(),
-    REDIS_URL: redisUrl(),
+    REDIS_URL: opts.redisDb === undefined ? redisUrl() : redisDbUrl(opts.redisDb),
     LLM_MODE: "mock",
   });
 
-  const moduleRef = await Test.createTestingModule({
+  let builder = Test.createTestingModule({
     imports: [ConfigModule, TenancyModule, ...(opts.imports ?? [])],
   })
     .overrideProvider(ENV)
-    .useValue(env)
-    .compile();
+    .useValue(env);
+  for (const o of opts.overrides ?? [])
+    builder = builder.overrideProvider(o.token).useValue(o.useValue);
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication({ logger: false });
   app.setGlobalPrefix("api");

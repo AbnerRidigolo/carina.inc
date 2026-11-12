@@ -81,9 +81,16 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
         .get("/api/clients")
         .set("Authorization", `Bearer ${unknown}`);
       const r3 = await request(server).get("/api/clients");
+      // Fora do formato sk-live-<32 base62>: rejeitada antes do banco, com a mesma resposta.
+      const r4 = await request(server).get("/api/clients").set("Authorization", "Bearer lixo-123");
       const strip = (res: request.Response) => withoutTraceId(expectProblem(res, 401));
       expect(strip(r1)).toEqual(strip(r2));
       expect(strip(r2)).toEqual(strip(r3));
+      expect(strip(r3)).toEqual(strip(r4));
+      for (const r of [r2, r3, r4]) {
+        expect(r.headers["content-type"]).toBe(r1.headers["content-type"]);
+        expect(r.headers["www-authenticate"]).toBe(r1.headers["www-authenticate"]);
+      }
     });
 
     it("chave revogada depois de usada deixa de autenticar", async () => {

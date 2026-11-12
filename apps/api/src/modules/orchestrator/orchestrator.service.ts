@@ -72,7 +72,7 @@ export class OrchestratorService {
     @Inject(AgentRegistry) agents: Pick<AgentRegistry, "get" | "navigator" | "executor">,
     @Inject(KnowledgeService) knowledge: Pick<KnowledgeService, "search">,
     @Inject(InboxService)
-    private readonly inbox: Pick<InboxService, "request" | "executeOnce" | "get">,
+    private readonly inbox: Pick<InboxService, "request" | "executeOnce" | "get" | "executionOf">,
     @Inject(ExecutorRegistry) executors: Pick<ExecutorRegistry, "get">,
     @Inject(StreamsService) streams: Pick<StreamsService, "publish">,
     @Inject(ORCHESTRATOR_CHECKPOINTER) checkpointer: BaseCheckpointSaver,
@@ -120,9 +120,14 @@ export class OrchestratorService {
   }
 
   /**
-   * Retoma o thread interrompido com a decisão. Sem aprovação pendente no thread (já retomado):
-   * `skipped`, sem tocar no grafo nem no executor. A execução de verdade só acontece se a
-   * aprovação estiver `approved` no banco (InboxService.executeOnce).
+   * Retoma o thread interrompido. `approved` é só o sinal do evento: quem decide é a aprovação
+   * gravada no banco (lida aqui e de novo no nó `approval`).
+   * - Aprovação ainda `pending` no banco: ApprovalConflictError, SEM tocar no grafo (o interrupt
+   *   continua de pé e a retomada depois da decisão funciona).
+   * - Thread já resolvido: devolve a execução gravada, com o status atualizado de
+   *   `executed_action` quando houver (nunca chama o executor de novo).
+   * - Thread sem aprovação: NotFoundError. O worker de retomada (Task 19) deve tratar NotFound
+   *   como TERMINAL (ack, sem retentar): o thread não espera nada.
    */
   async resume(threadId: string, approved: boolean): Promise<{ execution: Execution }> {
     assertThreadInContext(threadId);
@@ -134,7 +139,17 @@ export class OrchestratorService {
     const approvalId = values.pending?.approvalId;
     if (!approvalId) throw new NotFoundError("Thread sem aprovação pendente");
     if (!awaitingApproval(snapshot)) {
-      return { execution: { approvalId, status: "skipped" } };
+      const stored = values.execution;
+      if (!stored || stored.status !== "rejected") {
+        const real = await this.inbox.executionOf(approvalId);
+        if (real) return { execution: { approvalId, ...real } };
+      }
+      return { execution: stored ?? { approvalId, status: "skipped" } };
+    }
+
+    const view = await this.inbox.get(approvalId);
+    if (view.status === "pending") {
+      throw new ApprovalConflictError("A aprovação ainda não foi decidida");
     }
 
     const out = (await this.graph.invoke(

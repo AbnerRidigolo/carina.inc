@@ -81,13 +81,22 @@ function setup(responders: Record<string, MockResponder> = {}) {
   registerAgentMockResponders(mocks);
   registerOrchestratorMockResponders(mocks);
   const models = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, mocks);
+  // Banco simulado: status da aprovação e cerca de execução (como o InboxService real).
+  const db: {
+    status: ApprovalView["status"];
+    executed: { status: "succeeded" | "started"; result?: unknown } | null;
+  } = { status: "pending", executed: null };
+  const wins = { n: 0 };
   const inbox = {
     request: vi.fn(async () => ({ approvalId: APPROVAL, created: true })),
-    executeOnce: vi.fn(async () => ({
-      status: "succeeded" as const,
-      result: { orderId: "SIM-1" },
-    })),
-    get: vi.fn(async (id: string) => approvalView(id)),
+    executeOnce: vi.fn(async (): Promise<{ status: "succeeded" | "skipped"; result?: unknown }> => {
+      if (db.status !== "approved" || db.executed) return { status: "skipped" };
+      wins.n++;
+      db.executed = { status: "succeeded", result: { orderId: "SIM-1" } };
+      return db.executed as { status: "succeeded"; result: unknown };
+    }),
+    executionOf: vi.fn(async () => db.executed),
+    get: vi.fn(async (id: string) => ({ ...approvalView(id), status: db.status })),
   };
   const agentLogger = { warn: vi.fn(), error: vi.fn() };
   const agents = new AgentRegistry(models, inbox as never, agentLogger);
@@ -108,7 +117,22 @@ function setup(responders: Record<string, MockResponder> = {}) {
       checkpointer,
       logger,
     );
-  return { mocks, models, inbox, agents, knowledge, executed, executors, streams, logger, make };
+  /** Quantas vezes a "cerca" deixou executar de fato. */
+  const executeCount = () => wins.n;
+  return {
+    executeCount,
+    db,
+    mocks,
+    models,
+    inbox,
+    agents,
+    knowledge,
+    executed,
+    executors,
+    streams,
+    logger,
+    make,
+  };
 }
 
 async function collect(it: AsyncIterable<ChatEvent>): Promise<ChatEvent[]> {
@@ -343,9 +367,10 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(ctx).toMatchObject({ tenantId: T, clientId: C });
     });
 
-    it("retomada aprovada executa uma vez; a segunda retomada é skipped", async () => {
+    it("retomada aprovada executa uma vez; a segunda devolve o status gravado", async () => {
       const threadId = newThread();
       await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
       const first = await asClient(() => svc.resume(threadId, true));
       expect(first.execution).toEqual({
         approvalId: APPROVAL,
@@ -356,7 +381,7 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(s.inbox.executeOnce).toHaveBeenCalledWith(APPROVAL);
 
       const again = await asClient(() => svc.resume(threadId, true));
-      expect(again.execution).toMatchObject({ approvalId: APPROVAL, status: "skipped" });
+      expect(again.execution).toEqual(first.execution);
       expect(s.inbox.executeOnce).toHaveBeenCalledTimes(1);
       // o executor (LLM) não roda de novo na retomada
       expect(s.inbox.request).toHaveBeenCalledTimes(1);
@@ -365,20 +390,89 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
     it("um OrchestratorService novo (mesmo checkpointer) retoma o thread", async () => {
       const threadId = newThread();
       await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
       const fresh = s.make();
       const out = await asClient(() => fresh.resume(threadId, true));
       expect(out.execution?.status).toBe("succeeded");
       expect(s.inbox.executeOnce).toHaveBeenCalledTimes(1);
     });
 
-    it("retomada rejeitada nunca executa, nem com uma aprovação depois", async () => {
+    it("resume(true) cedo (banco pending): 409, interrupt preservado; depois da decisão executa uma vez", async () => {
       const threadId = newThread();
       await turn(svc, threadId, "compre 100 ações de PETR4");
-      const out = await asClient(() => svc.resume(threadId, false));
-      expect(out.execution).toEqual({ approvalId: APPROVAL, status: "rejected" });
-      const later = await asClient(() => svc.resume(threadId, true));
-      expect(later.execution?.status).toBe("skipped");
+      await expect(asClient(() => svc.resume(threadId, true))).rejects.toThrow(
+        ApprovalConflictError,
+      );
       expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+      s.db.status = "approved";
+      const out = await asClient(() => svc.resume(threadId, true));
+      expect(out.execution).toMatchObject({ approvalId: APPROVAL, status: "succeeded" });
+      expect(s.executeCount()).toBe(1);
+    });
+
+    it("banco pending no nó (corrida com a checagem do service): erro repetível, thread retomável", async () => {
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      // O service vê approved; o nó relê e vê pending (ex.: leitura anterior obsoleta).
+      s.inbox.get
+        .mockResolvedValueOnce({ ...approvalView(APPROVAL), status: "approved" })
+        .mockResolvedValueOnce({ ...approvalView(APPROVAL), status: "pending" });
+      await expect(asClient(() => svc.resume(threadId, true))).rejects.toThrow(
+        ApprovalConflictError,
+      );
+      s.db.status = "approved";
+      const out = await asClient(() => svc.resume(threadId, true));
+      expect(out.execution?.status).toBe("succeeded");
+      expect(s.executeCount()).toBe(1);
+    });
+
+    it("resume(false) com o banco approved: executa (o banco manda) e loga a divergência", async () => {
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
+      const out = await asClient(() => svc.resume(threadId, false));
+      expect(out.execution).toMatchObject({ approvalId: APPROVAL, status: "succeeded" });
+      expect(s.executeCount()).toBe(1);
+      const warned = s.logger.warn.mock.calls.map((c) => c[0] as Record<string, unknown>);
+      expect(warned.some((f) => /diverge/.test(String(f["msg"])))).toBe(true);
+    });
+
+    it("resume(true) com o banco rejected ou expired: nunca executa", async () => {
+      for (const status of ["rejected", "expired"] as const) {
+        s = setup();
+        svc = s.make();
+        const threadId = newThread();
+        await turn(svc, threadId, "compre 100 ações de PETR4");
+        s.db.status = status;
+        const out = await asClient(() => svc.resume(threadId, true));
+        expect(out.execution).toEqual({ approvalId: APPROVAL, status: "rejected" });
+        const later = await asClient(() => svc.resume(threadId, true));
+        expect(later.execution.status).toBe("rejected");
+        expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+      }
+    });
+
+    it("executeOnce skipped (outro worker executou): reporta o status real de executed_action", async () => {
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
+      s.db.executed = { status: "started" };
+      const out = await asClient(() => svc.resume(threadId, true));
+      expect(out.execution).toEqual({ approvalId: APPROVAL, status: "started" });
+      expect(s.inbox.executionOf).toHaveBeenCalledWith(APPROVAL);
+    });
+
+    it("falha transitória no executeOnce: o thread continua pendente e a retomada repete", async () => {
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
+      s.inbox.executeOnce.mockRejectedValueOnce(new Error("db fora"));
+      await expect(asClient(() => svc.resume(threadId, true))).rejects.toThrow("db fora");
+      const out = await asClient(() => svc.resume(threadId, true));
+      expect(out.execution?.status).toBe("succeeded");
+      // O nó repetiu: a cerca do InboxService.executeOnce (testada no int) garante no máximo uma vez.
+      expect(s.inbox.executeOnce).toHaveBeenCalledTimes(2);
+      expect(s.executeCount()).toBe(1);
     });
 
     it("decisão que não é boolean é recusada antes do grafo", async () => {
@@ -388,17 +482,6 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
         asClient(() => svc.resume(threadId, "true" as unknown as boolean)),
       ).rejects.toThrow(ValidationError);
       expect(s.inbox.executeOnce).not.toHaveBeenCalled();
-    });
-
-    it("falha transitória no executeOnce: o thread continua pendente e a retomada repete", async () => {
-      const threadId = newThread();
-      await turn(svc, threadId, "compre 100 ações de PETR4");
-      s.inbox.executeOnce.mockRejectedValueOnce(new Error("db fora"));
-      await expect(asClient(() => svc.resume(threadId, true))).rejects.toThrow("db fora");
-      const out = await asClient(() => svc.resume(threadId, true));
-      expect(out.execution?.status).toBe("succeeded");
-      // O nó repetiu: a cerca do InboxService.executeOnce (testada no int) garante no máximo uma vez.
-      expect(s.inbox.executeOnce).toHaveBeenCalledTimes(2);
     });
 
     it("outro tenant (ou outro cliente) não retoma, não lê e não continua o thread", async () => {
@@ -478,7 +561,26 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(s.executed).not.toHaveBeenCalled();
     });
 
-    it("inbox.request falhando: sem interrupt, sem execução, erro registrado", async () => {
+    it("inbox.request falhando uma vez: nova tentativa idempotente e interrupt normal", async () => {
+      s.inbox.request.mockRejectedValueOnce(new Error("timeout"));
+      const threadId = newThread();
+      const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+      expect(events.at(-1)?.type).toBe("approval_required");
+      expect(s.inbox.request).toHaveBeenCalledTimes(2);
+      expect(s.inbox.request.mock.calls[0]).toEqual(s.inbox.request.mock.calls[1]);
+    });
+
+    it("inbox.request com ValidationError não repete", async () => {
+      s.inbox.request.mockRejectedValueOnce(new ValidationError("valor ruim"));
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      expect(s.inbox.request).toHaveBeenCalledTimes(1);
+      const state = await asClient(() => svc.finalState(threadId));
+      expect(state.errors["executor"]).toBe("approval_request_failed");
+    });
+
+    it("inbox.request falhando duas vezes: sem interrupt, sem execução, erro registrado", async () => {
+      s.inbox.request.mockRejectedValueOnce(new Error("db fora"));
       s.inbox.request.mockRejectedValueOnce(new Error("db fora"));
       const threadId = newThread();
       const events = await turn(svc, threadId, "compre 100 ações de PETR4");

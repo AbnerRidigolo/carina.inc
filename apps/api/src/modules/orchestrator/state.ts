@@ -16,7 +16,8 @@ export const MAX_HISTORY_MESSAGES = 20;
 /** Histórico guardado no checkpoint (o estado não cresce sem limite). */
 export const MAX_STORED_MESSAGES = 40;
 
-export type ExecutionStatus = "succeeded" | "failed" | "skipped" | "needs_review" | "rejected";
+export type ExecutionStatus =
+  "started" | "succeeded" | "failed" | "skipped" | "needs_review" | "rejected";
 
 export interface Execution {
   approvalId: string;

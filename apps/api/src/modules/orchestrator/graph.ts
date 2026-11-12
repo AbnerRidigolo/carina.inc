@@ -22,10 +22,12 @@
  * - `approval`: `interrupt({ approvalId })`. É um nó SEPARADO de propósito: na retomada o LangGraph
  *   reexecuta o nó interrompido desde o começo; se a proposta (LLM, não determinístico) estivesse
  *   no mesmo nó, rodaria de novo e poderia gerar outra proposta/aprovação. Aqui nada vem antes do
- *   `interrupt()`; a proposta já está no checkpoint. Depois da retomada: aprovado →
- *   `InboxService.executeOnce(approvalId)` (cerca `executed_action`: no máximo uma vez, mesmo com
- *   o nó reexecutado, retomada duplicada ou concorrente; e só executa se a aprovação está
- *   `approved` NO BANCO, não importa o que a retomada diga); rejeitado → `rejected`, nunca executa.
+ *   `interrupt()`; a proposta já está no checkpoint. Depois da retomada, o valor do resume é só
+ *   um sinal: a decisão é LIDA DO BANCO (`InboxService.get`). `approved` →
+ *   `InboxService.executeOnce` (cerca `executed_action`: no máximo uma vez, mesmo com o nó
+ *   reexecutado, retomada duplicada ou concorrente); se a cerca já existia (`skipped`), reporta o
+ *   status real de `executed_action`. `rejected`/`expired` → `rejected`, nunca executa.
+ *   `pending` → erro repetível (o thread continua retomável).
  *
  * Cada nó roda com o TenantContext do thread (`runInThread`). Logs: só ids e o erro, nunca a
  * pergunta, o conhecimento ou a saída do modelo.
@@ -51,7 +53,11 @@ import {
 } from "@carina/shared";
 import { z } from "zod";
 import { TenantContext } from "../../core/context/tenant-context.js";
-import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
+import {
+  AllProvidersFailedError,
+  ApprovalConflictError,
+  ValidationError,
+} from "../../core/errors/domain-errors.js";
 import { type AgentInput, QUESTION_MESSAGE_ID, agentFailure } from "../agents/agent.js";
 import type { AgentRegistry } from "../agents/agent-registry.js";
 import type { InboxService } from "../inbox/inbox.service.js";
@@ -92,7 +98,7 @@ export interface GraphDeps {
   models: Pick<ModelFactory, "chat">;
   agents: Pick<AgentRegistry, "get" | "navigator" | "executor">;
   knowledge: Pick<KnowledgeService, "search">;
-  inbox: Pick<InboxService, "request" | "executeOnce">;
+  inbox: Pick<InboxService, "request" | "executeOnce" | "get" | "executionOf">;
   executors: Pick<ExecutorRegistry, "get">;
   streams: Pick<StreamsService, "publish">;
   logger: OrchestratorLogger;
@@ -252,17 +258,31 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
 
       if (risk === "irreversible") {
         // Upsert idempotente (id = hash(thread, ação, payload)), sob o contexto do thread.
-        let approvalId: string;
-        try {
-          ({ approvalId } = await inbox.request({
+        // Upsert idempotente: se a 1ª chamada gravou a linha e só a resposta se perdeu (timeout),
+        // repetir devolve o MESMO id e o grafo segue para o interrupt, sem deixar uma aprovação
+        // órfã. ValidationError não muda numa nova tentativa e não repete.
+        const request = () =>
+          inbox.request({
             threadId,
             agent: "executor",
             action: proposal.action,
             payload: proposal.payload,
             valueBrl: proposal.valueBrl,
-          }));
+          });
+        let approvalId: string;
+        try {
+          try {
+            ({ approvalId } = await request());
+          } catch (err) {
+            if (err instanceof ValidationError) throw err;
+            logger.warn({ msg: "Falha ao registrar a aprovação; nova tentativa", err, threadId });
+            ({ approvalId } = await request());
+          }
         } catch (err) {
-          // Sem solicitação gravada não há o que aprovar nem executar.
+          // Sem o id não há o que aprovar nem executar. Se a linha chegou a ser gravada, ela fica
+          // `pending` sem thread esperando e a expiração (ReconciliationJob) a encerra; se alguém
+          // decidir antes, o `resume` do worker (Task 19) recebe NotFound ("thread sem aprovação
+          // pendente") e DEVE tratar NotFound como terminal (ack, sem retentar).
           logger.error({ msg: "Falha ao registrar a aprovação", err, threadId });
           return {
             results: { executor: { ...summary, status: "failed" } },
@@ -324,26 +344,44 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
     // NADA antes do interrupt: na retomada este nó roda de novo desde aqui.
     const raw: unknown = interrupt({ approvalId });
     return runInThread(threadOf(config), async (): Promise<GraphStateUpdate> => {
-      const decision = ResumeValueSchema.safeParse(raw);
-      let execution: Execution;
-      if (!decision.success || !decision.data.approved) {
-        execution = { approvalId, status: "rejected" };
-      } else {
-        try {
-          execution = { approvalId, ...(await inbox.executeOnce(approvalId)) };
-        } catch (err) {
-          // Falha antes/durante a execução: o thread continua pendente neste nó e a próxima
-          // retomada (reconciliação) tenta de novo; a cerca impede execução dupla.
-          logger.error({
-            msg: "executeOnce falhou na retomada",
-            err,
-            approvalId,
-            threadId: threadOf(config),
-          });
-          throw err;
-        }
+      const threadId = threadOf(config);
+      // O valor da retomada é só um SINAL para acordar; a decisão é a gravada no banco (travada
+      // pelo `decide`). Um evento atrasado, duplicado ou forjado não decide nada.
+      const view = await inbox.get(approvalId);
+      const signal = ResumeValueSchema.safeParse(raw);
+      if (view.status === "pending") {
+        // Acordou antes da decisão: erro repetível. A tarefa fica pendente no checkpoint e o
+        // thread continua retomável (OrchestratorService.resume olha `tasks`).
+        logger.warn({ msg: "Retomada com a aprovação ainda pendente", approvalId, threadId });
+        throw new ApprovalConflictError("A aprovação ainda está pendente");
       }
-      return { execution };
+      const approved = view.status === "approved";
+      if (!signal.success || signal.data.approved !== approved) {
+        logger.warn({
+          msg: "Decisão da retomada diverge do banco; vale o banco",
+          approvalId,
+          dbStatus: view.status,
+          threadId,
+        });
+      }
+      if (!approved) return { execution: { approvalId, status: "rejected" } };
+
+      let outcome: Omit<Execution, "approvalId">;
+      try {
+        outcome = await inbox.executeOnce(approvalId);
+        if (outcome.status === "skipped") {
+          // Aprovada mas a cerca já existia: outro worker executou (ou está executando).
+          // Reporta o estado real de executed_action, não um `skipped` ambíguo.
+          const real = await inbox.executionOf(approvalId);
+          if (real) outcome = real;
+        }
+      } catch (err) {
+        // Falha antes/durante a execução: o thread continua pendente neste nó e a próxima
+        // retomada (reconciliação) tenta de novo; a cerca impede execução dupla.
+        logger.error({ msg: "executeOnce falhou na retomada", err, approvalId, threadId });
+        throw err;
+      }
+      return { execution: { approvalId, ...outcome } };
     });
   };
 

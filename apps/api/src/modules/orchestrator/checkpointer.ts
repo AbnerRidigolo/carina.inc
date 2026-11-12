@@ -18,7 +18,7 @@ export const CHECKPOINT_SCHEMA = "langgraph";
 /**
  * Última versão de migração da biblioteca fixada (índice em `getMigrations`, v0..v5). Ao subir a
  * versão da biblioteca, conferir as migrações novas e escrever a migração Prisma correspondente;
- * o teste de paridade (checkpointer.int) compara o resultado com o `setup()` original.
+ * o teste de paridade (test/orchestrator/orchestrator.int.spec.ts) compara o resultado com o `setup()` original.
  */
 export const CHECKPOINT_MIGRATION_VERSION = 5;
 

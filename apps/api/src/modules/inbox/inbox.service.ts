@@ -97,6 +97,20 @@ export interface ExecuteResult {
   result?: unknown;
 }
 
+/** Linha de `executed_action` (estado real da execução de uma aprovação). */
+export interface ExecutionView {
+  status: "started" | "succeeded" | "failed" | "needs_review";
+  /** Só no `succeeded` (o resultado de falhas pode conter a mensagem do executor). */
+  result?: unknown;
+}
+
+const EXECUTION_STATUSES: ReadonlySet<string> = new Set([
+  "started",
+  "succeeded",
+  "failed",
+  "needs_review",
+]);
+
 const HOUR_MS = 3_600_000;
 const APPROVAL_ID_RE = /^[0-9a-f]{64}$/;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
@@ -290,6 +304,21 @@ export class InboxService {
     });
     if (!row) throw new NotFoundError(NOT_FOUND_MESSAGE);
     return toView(row, row.client.externalId);
+  }
+
+  /**
+   * Estado da execução de uma aprovação do tenant atual (`null` se ainda não há linha). Usado por
+   * quem recebeu `skipped` do `executeOnce` para reportar o status real (outro worker executou).
+   */
+  async executionOf(id: string): Promise<ExecutionView | null> {
+    if (!APPROVAL_ID_RE.test(id)) return null;
+    const row = await this.db.client.executedAction.findUnique({
+      where: { approvalRequestId: id },
+      select: { status: true, result: true },
+    });
+    if (!row || !EXECUTION_STATUSES.has(row.status)) return null;
+    const status = row.status as ExecutionView["status"];
+    return status === "succeeded" ? { status, result: row.result } : { status };
   }
 
   /**

@@ -10,7 +10,7 @@ import type { Redis } from "ioredis";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
-import { NotFoundError } from "../../src/core/errors/domain-errors.js";
+import { ApprovalConflictError, NotFoundError } from "../../src/core/errors/domain-errors.js";
 import { REDIS } from "../../src/core/redis/redis.module.js";
 import { ExecutorRegistry } from "../../src/modules/inbox/executors.js";
 import { InboxService } from "../../src/modules/inbox/inbox.service.js";
@@ -153,7 +153,8 @@ describe("Orquestrador (int)", () => {
     expect(placeTrade).toHaveBeenCalledTimes(1);
 
     const again = await as(A, () => svc(t1).resume(threadId, true));
-    expect(again.execution).toMatchObject({ approvalId, status: "skipped" });
+    // Thread já resolvido: devolve a execução gravada (status real), sem chamar o executor.
+    expect(again.execution).toEqual(out.execution);
     expect(placeTrade).toHaveBeenCalledTimes(1);
     expect(await executions(A, approvalId)).toEqual([{ status: "succeeded" }]);
 
@@ -161,7 +162,7 @@ describe("Orquestrador (int)", () => {
     expect(state.execution?.status).toBe("succeeded");
   });
 
-  it("retomadas concorrentes (duas instâncias) executam no máximo uma vez", async () => {
+  it("retomadas concorrentes (duas instâncias): executa uma vez e ninguém reporta skipped", async () => {
     t2 ??= await createTestApp({ imports: [OrchestratorModule], redisDb: REDIS_DB });
     t2.app.get(ExecutorRegistry).register("place_trade", placeTrade);
     const threadId = thread(A);
@@ -179,6 +180,8 @@ describe("Orquestrador (int)", () => {
       r.status === "fulfilled" ? [r.value.execution.status] : [],
     );
     expect(statuses).toContain("succeeded");
+    // O perdedor lê executed_action: succeeded (ou started, se o vencedor ainda estava rodando).
+    for (const st of statuses) expect(["succeeded", "started"]).toContain(st);
     expect(await executions(A, approvalId)).toEqual([{ status: "succeeded" }]);
   });
 
@@ -193,21 +196,53 @@ describe("Orquestrador (int)", () => {
     expect(out.execution).toEqual({ approvalId, status: "rejected" });
     // Mesmo uma retomada "aprovada" forjada depois não executa (thread já resolvido).
     const forged = await as(A, () => svc(t1).resume(threadId, true));
-    expect(forged.execution.status).toBe("skipped");
+    expect(forged.execution.status).toBe("rejected");
     expect(placeTrade).not.toHaveBeenCalled();
     expect(await executions(A, approvalId)).toHaveLength(0);
   });
 
-  it("retomada 'aprovada' sem aprovação no banco não executa (o banco decide)", async () => {
+  it("resume(true) cedo (banco pending): 409 e nada executa; após a decisão executa uma vez", async () => {
     const threadId = thread(B);
     const events = await turn(t1, B, threadId, "compre 5 ações de BBAS3");
     const last = events.at(-1);
     const approvalId = last?.type === "approval_required" ? last.approval.id : "";
-    const out = await as(B, () => svc(t1).resume(threadId, true));
-    expect(out.execution).toEqual({ approvalId, status: "skipped" });
+    await expect(as(B, () => svc(t1).resume(threadId, true))).rejects.toThrow(
+      ApprovalConflictError,
+    );
     expect(placeTrade).not.toHaveBeenCalled();
     expect(await executions(B, approvalId)).toHaveLength(0);
     expect((await approvals(B)).find((r) => r.id === approvalId)?.status).toBe("pending");
+
+    await decide(t1, B, approvalId, true);
+    const out = await as(B, () => svc(t1).resume(threadId, true));
+    expect(out.execution).toMatchObject({ approvalId, status: "succeeded" });
+    const again = await as(B, () => svc(t1).resume(threadId, true));
+    expect(again.execution.status).toBe("succeeded");
+    expect(placeTrade).toHaveBeenCalledTimes(1);
+    expect(await executions(B, approvalId)).toEqual([{ status: "succeeded" }]);
+  });
+
+  it("resume(false) com o banco approved: executa (o banco manda)", async () => {
+    const threadId = thread(B);
+    const events = await turn(t1, B, threadId, "compre 4 ações de ABEV3");
+    const last = events.at(-1);
+    const approvalId = last?.type === "approval_required" ? last.approval.id : "";
+    await decide(t1, B, approvalId, true);
+    const out = await as(B, () => svc(t1).resume(threadId, false));
+    expect(out.execution).toMatchObject({ approvalId, status: "succeeded" });
+    expect(placeTrade).toHaveBeenCalledTimes(1);
+  });
+
+  it("resume(true) com o banco rejected: não executa", async () => {
+    const threadId = thread(B);
+    const events = await turn(t1, B, threadId, "compre 2 ações de RENT3");
+    const last = events.at(-1);
+    const approvalId = last?.type === "approval_required" ? last.approval.id : "";
+    await decide(t1, B, approvalId, false);
+    const out = await as(B, () => svc(t1).resume(threadId, true));
+    expect(out.execution).toEqual({ approvalId, status: "rejected" });
+    expect(placeTrade).not.toHaveBeenCalled();
+    expect(await executions(B, approvalId)).toHaveLength(0);
   });
 
   it("outro tenant não retoma nem lê o thread", async () => {

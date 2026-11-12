@@ -27,7 +27,9 @@ const KEYWORDS: readonly (readonly [SpecialistName, readonly string[]])[] = [
 const EXECUTION_RE = /\b(compr|vend|transfir|transfer|resgat|aplicar|rebalanceie)/;
 
 const normalize = (query: unknown): string =>
-  typeof query === "string" ? query.slice(0, MAX_QUESTION_CHARS).toLowerCase() : "";
+  typeof query === "string"
+    ? query.slice(0, MAX_QUESTION_CHARS).normalize("NFC").toLowerCase()
+    : "";
 
 export function wantsExecution(query: string): boolean {
   return EXECUTION_RE.test(normalize(query));

@@ -44,6 +44,12 @@ describe("heuristicPlan", () => {
     });
   });
 
+  it("acentos decompostos (NFD) casam como os compostos (NFC)", () => {
+    const nfd = "previsão e composição".normalize("NFD");
+    expect(nfd).not.toBe("previsão e composição");
+    expect(heuristicPlan(nfd).agents).toEqual(["insight", "predictor"]);
+  });
+
   it("verbos de execução: só no começo de palavra", () => {
     for (const q of ["venda tudo", "transfira 10 mil", "resgate o CDB", "rebalanceie já"]) {
       expect(wantsExecution(q)).toBe(true);

@@ -9,8 +9,10 @@ import { ModulesContainer, Reflector } from "@nestjs/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BillingModule } from "../../src/modules/billing/billing.module.js";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
+import { InboxModule } from "../../src/modules/inbox/inbox.module.js";
 import {
   IS_PUBLIC_KEY,
+  REQUIRED_ANY_SCOPES_KEY,
   REQUIRED_SCOPES_KEY,
   SCOPES,
 } from "../../src/modules/tenancy/scopes.decorator.js";
@@ -21,6 +23,7 @@ interface RouteInfo {
   route: string;
   isPublic: boolean;
   scopes: string[];
+  anyScopes: string[];
 }
 
 function enumerateRoutes(app: TestApp["app"]): RouteInfo[] {
@@ -47,6 +50,9 @@ function enumerateRoutes(app: TestApp["app"]): RouteInfo[] {
             reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC_KEY, targets) === true,
           scopes:
             reflector.getAllAndOverride<string[] | undefined>(REQUIRED_SCOPES_KEY, targets) ?? [],
+          anyScopes:
+            reflector.getAllAndOverride<string[] | undefined>(REQUIRED_ANY_SCOPES_KEY, targets) ??
+            [],
         });
       }
     }
@@ -60,7 +66,7 @@ describe("Escopos das rotas registradas", () => {
 
   beforeAll(async () => {
     t = await createTestApp({
-      imports: [BillingModule, WatchtowerModule, DataIngestionModule],
+      imports: [BillingModule, WatchtowerModule, DataIngestionModule, InboxModule],
       redisDb: 10,
     });
     routes = enumerateRoutes(t.app);
@@ -75,27 +81,38 @@ describe("Escopos das rotas registradas", () => {
       [
         "GET /audit",
         "GET /clients",
+        "GET /clients/:clientId/inbox",
         "GET /clients/:clientId/positions",
         "GET /clients/:clientId/transactions",
         "GET /usage",
         "POST /clients/:clientId/positions",
+        "POST /inbox/:id/decision",
         "POST /clients/:clientId/transactions",
       ].sort(),
     );
   });
 
-  it("toda rota que não é @Public() declara ao menos um escopo válido", () => {
+  const scopeCount = (r: RouteInfo) => r.scopes.length + r.anyScopes.length;
+  const isValid = (s: string) => (SCOPES as readonly string[]).includes(s);
+
+  it("toda rota que não é @Public() declara ao menos um escopo válido (E ou OU)", () => {
     const offenders = routes.filter(
       (r) =>
         !r.isPublic &&
-        (r.scopes.length === 0 || r.scopes.some((s) => !(SCOPES as readonly string[]).includes(s))),
+        (scopeCount(r) === 0 || [...r.scopes, ...r.anyScopes].some((s) => !isValid(s))),
     );
     expect(offenders).toEqual([]);
   });
 
-  it("POST exige data:write; GET exige chat", () => {
+  it("escopo exigido de cada rota (inbox: listagem chat OU inbox:decide, decisão inbox:decide)", () => {
+    const expected = (r: RouteInfo): { all: string[]; any: string[] } => {
+      if (r.route === "GET /clients/:clientId/inbox")
+        return { all: [], any: ["chat", "inbox:decide"] };
+      if (r.route === "POST /inbox/:id/decision") return { all: ["inbox:decide"], any: [] };
+      return { all: [r.route.startsWith("POST ") ? "data:write" : "chat"], any: [] };
+    };
     for (const r of routes.filter((x) => !x.isPublic)) {
-      expect(r.scopes, r.route).toEqual([r.route.startsWith("POST ") ? "data:write" : "chat"]);
+      expect({ all: r.scopes, any: r.anyScopes }, r.route).toEqual(expected(r));
     }
   });
 });

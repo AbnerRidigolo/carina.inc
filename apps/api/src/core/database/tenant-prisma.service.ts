@@ -97,6 +97,18 @@ export class TenantPrismaService {
   }
 
   /**
+   * Ids dos tenants que têm trabalho pendente na inbox (aprovação pending, approved sem execução
+   * ou execução started), via `active_tenant_ids()` (SECURITY DEFINER, migrations/0004). Roda como
+   * carina_app, sem contexto de tenant e sem dar o papel migrator à aplicação: devolve só ids, e só
+   * de tenants com linha não terminal. Cada tenant é processado depois sob `TenantContext.run`.
+   */
+  async activeTenantIds(): Promise<string[]> {
+    const rows = await this.base.$queryRaw<{ active_tenant_ids: string }[]>`
+      SELECT active_tenant_ids() AS active_tenant_ids`;
+    return rows.map((r) => r.active_tenant_ids);
+  }
+
+  /**
    * Transação interativa com o contexto atual fixado antes de `fn`. O contexto é lido na chamada
    * (corpo síncrono do método async); `withClient` dentro de `fn` não muda o `tx`. Todo o
    * trabalho de `fn` usa a mesma conexão e o mesmo contexto.

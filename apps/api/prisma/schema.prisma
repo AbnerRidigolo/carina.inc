@@ -6,7 +6,8 @@
 // - Tudo o que o Prisma não expressa está escrito à mão em migrations/0001_init: coluna gerada
 //   tsv, índices HNSW e as FKs compostas com coluna opcional (usage_record.client_id,
 //   audit_event.client_id, kg_relation.chunk_id), que aqui aparecem como relações simples.
-//   RLS, grants e funções ficam em migrations/0002_rls.
+//   RLS, grants e funções ficam em migrations/0002_rls; a FK composta de decided_by_key_id está em
+//   0003_inbox_integrity e a função active_tenant_ids em 0004_reconciliation.
 // - FKs compostas (tenant_id, client_id, …) impedem que uma linha aponte para o cliente
 //   ou a entidade de outro tenant/cliente, mesmo que a aplicação erre o id.
 //
@@ -60,6 +61,8 @@ model ApiKey {
   tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   decidedApprovals ApprovalRequest[]
 
+  /// alvo da FK composta de approval_request.decided_by_key_id
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@map("api_key")
 }
@@ -112,9 +115,12 @@ model ApprovalRequest {
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   client         Client          @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  /// no banco: FK composta (tenant_id, decided_by_key_id) → api_key(tenant_id, id), ON DELETE SET NULL (decided_by_key_id)
   decidedByKey   ApiKey?         @relation(fields: [decidedByKeyId], references: [id], onDelete: SetNull)
   executedAction ExecutedAction?
 
+  /// alvo da FK composta de executed_action
+  @@unique([tenantId, clientId, id])
   @@index([tenantId, clientId])
   @@index([status, expiresAt])
   @@map("approval_request")
@@ -131,9 +137,11 @@ model ExecutedAction {
   startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   finishedAt        DateTime? @map("finished_at") @db.Timestamptz(6)
 
-  approvalRequest ApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+  approvalRequest ApprovalRequest @relation(fields: [tenantId, clientId, approvalRequestId], references: [tenantId, clientId, id], onDelete: Cascade)
   client          Client          @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
 
+  /// redundante com a PK; o Prisma exige uma chave única nos campos da FK composta (relação 1:1)
+  @@unique([tenantId, clientId, approvalRequestId])
   @@index([tenantId, clientId])
   @@map("executed_action")
 }

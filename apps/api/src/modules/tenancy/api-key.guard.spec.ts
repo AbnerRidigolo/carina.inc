@@ -13,7 +13,7 @@ import {
   type AuthTenant,
   type AuthenticatedRequest,
 } from "./api-key.guard.js";
-import { Public, RequireScopes } from "./scopes.decorator.js";
+import { Public, RequireAnyScope, RequireScopes } from "./scopes.decorator.js";
 
 const TENANT_ID = "6f1c1d1e-8a3b-4c2d-9e0f-0123456789ab";
 const KEY_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -25,6 +25,12 @@ class Handlers {
 
   @RequireScopes("chat", "inbox:decide")
   decide(): void {}
+
+  @RequireAnyScope("chat", "inbox:decide")
+  either(): void {}
+
+  @RequireAnyScope()
+  emptyAny(): void {}
 
   noScopes(): void {}
 
@@ -220,6 +226,22 @@ describe("ApiKeyGuard", () => {
         httpContext(req({ "x-api-key": KEY }), handlers.decide),
       ),
     ).resolves.toBe(true);
+  });
+
+  it("@RequireAnyScope: basta um dos escopos; nenhum dá 403; lista vazia nunca autoriza", async () => {
+    const check = (scopes: string[], h: () => void) =>
+      new ApiKeyGuard(fakePrisma([row(scopes)]).prisma, new Reflector()).canActivate(
+        httpContext(req({ "x-api-key": KEY }), h),
+      );
+    await expect(check(["chat"], handlers.either)).resolves.toBe(true);
+    await expect(check(["inbox:decide"], handlers.either)).resolves.toBe(true);
+    await expect(check(["data:write"], handlers.either)).rejects.toBeInstanceOf(
+      ForbiddenScopeError,
+    );
+    await expect(check([], handlers.either)).rejects.toBeInstanceOf(ForbiddenScopeError);
+    await expect(check(["chat", "admin"], handlers.emptyAny)).rejects.toBeInstanceOf(
+      ForbiddenScopeError,
+    );
   });
 
   it("@Public() no método ou na classe libera sem chave e sem consultar o banco", async () => {

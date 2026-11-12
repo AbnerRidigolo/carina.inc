@@ -27,7 +27,12 @@ import { TenantContext } from "../../core/context/tenant-context.js";
 import { PrismaService } from "../../core/database/prisma.service.js";
 import { ForbiddenScopeError, UnauthenticatedError } from "../../core/errors/domain-errors.js";
 import { hashApiKey } from "./api-key.js";
-import { IS_PUBLIC_KEY, REQUIRED_SCOPES_KEY, type Scope } from "./scopes.decorator.js";
+import {
+  IS_PUBLIC_KEY,
+  REQUIRED_ANY_SCOPES_KEY,
+  REQUIRED_SCOPES_KEY,
+  type Scope,
+} from "./scopes.decorator.js";
 
 export interface AuthTenant {
   keyId: string;
@@ -115,6 +120,15 @@ export class ApiKeyGuard implements CanActivate {
     const missing = required.filter((scope) => !tenant.scopes.includes(scope));
     if (missing.length > 0) {
       throw new ForbiddenScopeError(`A chave não tem o escopo exigido: ${missing.join(", ")}`);
+    }
+    const anyOf = this.reflector.getAllAndOverride<Scope[] | undefined>(
+      REQUIRED_ANY_SCOPES_KEY,
+      targets,
+    );
+    if (anyOf !== undefined && !anyOf.some((scope) => tenant.scopes.includes(scope))) {
+      throw new ForbiddenScopeError(
+        `A chave precisa de ao menos um dos escopos: ${anyOf.join(", ")}`,
+      );
     }
     return true;
   }

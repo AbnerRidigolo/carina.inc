@@ -29,7 +29,7 @@ export const CASH_FLOW_TITLE = "Fluxo de caixa 12 meses";
 
 /**
  * Posições listadas uma a uma. 30 cobre a carteira inteira de quase todo cliente pessoa física (o
- * perfil sintético mais diversificado tem 22 posições) e mantém o documento em ~3 mil caracteres
+ * gerador sintético produz 20 posições por carteira) e mantém o documento em ~3 mil caracteres
  * (~5 chunks); o restante entra numa linha "Demais N posições" e nos totais por classe, que são
  * sempre completos.
  */

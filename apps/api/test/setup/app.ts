@@ -7,9 +7,11 @@
  * RLS; o carina_app nem enxerga `api_key`).
  */
 import type { DynamicModule, INestApplication, Type } from "@nestjs/common";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { ConfigModule, ENV } from "../../src/core/config/config.module.js";
 import { loadEnv } from "../../src/core/config/env.js";
+import { configureBodyParser } from "../../src/core/http/body-parser.js";
 import { ProblemDetailsFilter } from "../../src/core/errors/problem-details.filter.js";
 import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
@@ -82,7 +84,8 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     builder = builder.overrideProvider(o.token).useValue(o.useValue);
   const moduleRef = await builder.compile();
 
-  const app = moduleRef.createNestApplication({ logger: false });
+  const app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
+  configureBodyParser(app);
   app.setGlobalPrefix("api");
   app.useGlobalFilters(new ProblemDetailsFilter());
   // Escuta numa porta efêmera: o supertest usa o endereço em vez de abrir um listen por request.

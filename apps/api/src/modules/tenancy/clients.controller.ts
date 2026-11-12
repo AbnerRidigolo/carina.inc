@@ -1,36 +1,20 @@
-import { Controller, Get, Inject, Param } from "@nestjs/common";
-import { TenantContext } from "../../core/context/tenant-context.js";
-import { TenantPrismaService } from "../../core/database/tenant-prisma.service.js";
+import { Controller, Get, Inject } from "@nestjs/common";
 import { ClientsService } from "./clients.service.js";
 import { RequireScopes } from "./scopes.decorator.js";
 
+/**
+ * Clientes do tenant. As rotas `/clients/:clientId/positions` e `/transactions` (leitura e
+ * ingestão) vivem no `IngestionController` do módulo data-ingestion: este módulo não pode depender
+ * dele (o data-ingestion é que importa o tenancy).
+ */
 @Controller("clients")
 export class ClientsController {
-  constructor(
-    @Inject(ClientsService) private readonly clients: ClientsService,
-    @Inject(TenantPrismaService) private readonly db: TenantPrismaService,
-  ) {}
+  constructor(@Inject(ClientsService) private readonly clients: ClientsService) {}
 
   /** Clientes do tenant da chave. */
   @Get()
   @RequireScopes("chat")
   list() {
     return this.clients.list();
-  }
-
-  /**
-   * Posições do cliente. Cliente inexistente ou de outro tenant → 404 (o RLS o esconde).
-   * Versão mínima: a Task 13 completa esta rota.
-   */
-  @Get(":clientId/positions")
-  @RequireScopes("chat")
-  async positions(@Param("clientId") externalId: string) {
-    const client = await this.clients.resolve(externalId);
-    return TenantContext.withClient(client.id, () =>
-      this.db.client.position.findMany({
-        where: { clientId: client.id },
-        orderBy: [{ assetClass: "asc" }, { name: "asc" }, { externalId: "asc" }],
-      }),
-    );
   }
 }

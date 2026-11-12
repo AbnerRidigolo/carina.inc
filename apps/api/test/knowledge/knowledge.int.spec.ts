@@ -5,7 +5,10 @@ import { PrismaService } from "../../src/core/database/prisma.service.js";
 import { TenantPrismaService } from "../../src/core/database/tenant-prisma.service.js";
 import { UnauthenticatedError, ValidationError } from "../../src/core/errors/domain-errors.js";
 import { KnowledgeModule } from "../../src/modules/knowledge/knowledge.module.js";
-import { KnowledgeRepository } from "../../src/modules/knowledge/knowledge.repository.js";
+import {
+  ENTITY_LIMIT,
+  KnowledgeRepository,
+} from "../../src/modules/knowledge/knowledge.repository.js";
 import { KnowledgeService } from "../../src/modules/knowledge/knowledge.service.js";
 import { HashEmbeddings } from "../../src/modules/llm/hash-embeddings.js";
 import type { ModelFactory } from "../../src/modules/llm/model-factory.js";
@@ -44,6 +47,7 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
   const clientA4 = randomUUID();
   const clientA5 = randomUUID();
   const clientA6 = randomUUID();
+  const clientA7 = randomUUID();
   const clientB1 = randomUUID();
   let prisma: PrismaService;
   let db: TenantPrismaService;
@@ -81,6 +85,7 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
       [clientA4, "a4"],
       [clientA5, "a5"],
       [clientA6, "a6"],
+      [clientA7, "a7"],
     ] as const) {
       await migratorSql(
         `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $2, $3)`,
@@ -667,6 +672,25 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
       expect(failures.map((f) => String((f as PromiseRejectedResult).reason))).toEqual([]);
     }
     expect(await count("kg_document", t, c)).toBe(4);
+  });
+
+  it(`search devolve no máximo ${ENTITY_LIMIT} entidades, as mais citadas primeiro`, async () => {
+    const t = tenantA;
+    const c = clientA7;
+    const names = Array.from({ length: ENTITY_LIMIT + 10 }, (_, i) => `zeta${i}`);
+    // "zeta0" aparece em dois chunks (o segundo é o título repetido), as demais em um só.
+    await as(t, c, () =>
+      knowledge.ingestDocument({
+        source: "limite",
+        title: "Muitas entidades",
+        text: names.join(" ") + "\n\n" + "zeta0 ".repeat(150).trim(),
+        entities: names.map((name) => ({ type: "simbolo", name })),
+      }),
+    );
+    const res = await as(t, c, () => knowledge.search("zeta0", { k: 50 }));
+    const own = res.entities.filter((e) => e.type === "simbolo");
+    expect(res.entities.length).toBeLessThanOrEqual(ENTITY_LIMIT);
+    expect(own.map((e) => e.name)).toContain("zeta0");
   });
 
   it("o KnowledgeModule monta com o ModelFactory real em modo mock", async () => {

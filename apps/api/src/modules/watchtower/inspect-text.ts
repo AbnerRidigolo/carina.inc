@@ -28,12 +28,33 @@ function py(source: string): RegExp {
 }
 
 /**
- * `\w` dentro de classe (`[\w.+-]`) não pode virar `[\p{L}\p{N}_]` aninhado; o conteúdo da classe
- * recebe `\p{L}\p{N}_` direto.
+ * E-mail: equivalente EXATO, em tempo linear, de `\b[\w.+-]+@[\w-]+\.[\w.]+\b` (Python).
+ *
+ * O padrão original é quadrático: cada fronteira de palavra inicia uma varredura O(n) de
+ * `[\w.+-]+` que nunca encontra `@` (blobs como "a.a.a." de 80 KB levavam ~4 s e travavam o event
+ * loop). A forma abaixo foi derivada do original, sem truncar o texto nem limitar tamanhos:
+ *
+ * - Parte local: `[\w.+-]+` entre uma fronteira `\b` e o `@`. Os caracteres que não são `\w` da
+ *   classe são só `.`, `+` e `-`. Existe um início com `\b` dentro da sequência maximal da classe
+ *   se e somente se ela contém algum caractere `\w` (o primeiro `\w` da sequência é precedido por
+ *   fim de sequência ou por `.+-`, ou seja, por não-palavra). Logo: a sequência maximal à esquerda
+ *   do `@` precisa conter um `\w`: `(?<!C)[.+-]*\w C*@`, com `C = [\w.+-]`. O lookbehind
+ *   `(?<!C)` faz a busca só começar no início de cada sequência maximal (custo O(1) nas demais
+ *   posições), e sequências à esquerda de `@`s distintos são disjuntas, então o total é O(n).
+ * - Domínio: `[\w-]+` seguido de `.` só casa se o rótulo for a sequência maximal de `[\w-]` (o
+ *   caractere seguinte a um prefixo seria da própria classe, nunca `.`). Depois do `.`, `[\w.]+\b`
+ *   casa se e somente se a sequência maximal de `[\w.]` contém um `\w` (o último `\w` dela tem
+ *   fronteira à direita): `\.\.*\w`. Cada varredura termina no próximo caractere fora da classe,
+ *   e `@` está fora das classes, então as varreduras de `@`s distintos também são disjuntas.
+ *
+ * Sem backtracking aninhado: cada quantificador é seguido de um delimitador que não pertence à
+ * sua classe. Não há divergência de comportamento em relação ao Python (parte local de qualquer
+ * tamanho continua sendo detectada).
  */
-function pyClass(source: string): RegExp {
-  return py(source.replaceAll(String.raw`[\w`, String.raw`[\p{L}\p{N}_`));
-}
+const EMAIL_PATTERN = new RegExp(
+  String.raw`(?<![\p{L}\p{N}_.+-])[.+-]*[\p{L}\p{N}_][\p{L}\p{N}_.+-]*@[\p{L}\p{N}_-]+\.\.*[\p{L}\p{N}_]`,
+  "u",
+);
 
 /** Afirmações de certeza em projeções financeiras (violação de suitability). */
 const CERTAINTY_PATTERNS: readonly RegExp[] = [
@@ -57,7 +78,7 @@ const RECOMMENDATION_PATTERNS: readonly RegExp[] = [
 /** PII estruturada que nunca deve aparecer em resposta (LGPD). */
 const PII_PATTERNS: readonly (readonly [kind: string, pattern: RegExp])[] = [
   ["cpf", py(String.raw`\b\d{3}\.\d{3}\.\d{3}-\d{2}\b`)],
-  ["email", pyClass(String.raw`\b[\w.+-]+@[\w-]+\.[\w.]+\b`)],
+  ["email", EMAIL_PATTERN],
 ];
 
 /** Termos que exigem disclaimer quando presentes na resposta. */

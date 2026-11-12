@@ -164,6 +164,57 @@ describe("inspectText: regras individuais do Python", () => {
   });
 });
 
+describe("inspectText: e-mail em tempo linear sem divergência do Python (R12)", () => {
+  // O padrão de e-mail foi reescrito para tempo linear SEM limitar tamanhos (ver inspect-text.ts):
+  // partes locais e domínios de qualquer comprimento continuam detectados, como no Python, e
+  // nenhuma divergência de comportamento foi aceita.
+  const email = (t: string) => codes(t).has("lgpd.pii_leak.email");
+
+  it("parte local longa (> 64 caracteres) continua detectada, como no Python", () => {
+    expect(email(`${"a".repeat(100)}@exemplo.com`)).toBe(true);
+    expect(email(`${"ab.".repeat(100)}cd@exemplo.com`)).toBe(true);
+    expect(email(`x ${"a".repeat(5000)}@exemplo.com y`)).toBe(true);
+  });
+
+  it("domínio longo (> 255 caracteres) continua detectado", () => {
+    expect(email(`a@${"b".repeat(400)}.com`)).toBe(true);
+    expect(email(`a@b.${"c.".repeat(300)}com`)).toBe(true);
+  });
+
+  it("a flag continua genérica mesmo com PII gigante", () => {
+    const value = `${"a".repeat(100)}@exemplo.com`;
+    const flag = inspectText(value).find((f) => f.code === "lgpd.pii_leak.email");
+    expect(flag).toEqual({
+      code: "lgpd.pii_leak.email",
+      severity: "violation",
+      detail: "padrão de email detectado na resposta",
+    });
+  });
+
+  it("casos de borda iguais ao Python (verificados contra Python 3.13)", () => {
+    const yes = ["..a@x.com", "a@b.c", "joão@exemplo.com", "a@b.c.", "x@y.é"];
+    const no = [
+      "a@b.-c",
+      ".@x.com",
+      "-+.@x.com",
+      "@x.com",
+      "a@.com",
+      "a@b.",
+      "a@b..",
+      "a@b.-",
+      "x@y",
+      "a@-b",
+    ];
+    for (const t of yes) expect([t, email(t)]).toEqual([t, true]);
+    for (const t of no) expect([t, email(t)]).toEqual([t, false]);
+  });
+
+  it("só o primeiro e-mail importa: uma flag por tipo, mesmo com vários e-mails", () => {
+    const flags = inspectText("a@b.com c@d.com e@f.com");
+    expect(flags.filter((f) => f.code === "lgpd.pii_leak.email")).toHaveLength(1);
+  });
+});
+
 describe("inspectText: paridade de \\b do Python (str unicode) em português", () => {
   // Em JS, `\b` é só ASCII: depois de uma letra acentuada ("já") não há fronteira antes de espaço
   // ou pontuação. O Python 3 trata 'á' como caractere de palavra.

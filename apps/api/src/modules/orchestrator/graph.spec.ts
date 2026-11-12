@@ -96,6 +96,7 @@ function setup(responders: Record<string, MockResponder> = {}) {
       return db.executed as { status: "succeeded"; result: unknown };
     }),
     executionOf: vi.fn(async () => db.executed),
+    expireIfDue: vi.fn(async () => false),
     get: vi.fn(async (id: string) => ({ ...approvalView(id), status: db.status })),
   };
   const agentLogger = { warn: vi.fn(), error: vi.fn() };
@@ -510,6 +511,27 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       const threadId = newThread();
       await turn(svc, threadId, "compre 100 ações de PETR4");
       await expect(turn(svc, threadId, "olá")).rejects.toThrow(ApprovalConflictError);
+    });
+
+    it("guard do stream: rejeitada com resume perdido fecha a espera (rejected) e segue o turno", async () => {
+      const threadId = newThread();
+      await turn(svc, threadId, "compre 100 ações de PETR4");
+      s.db.status = "approved";
+      await expect(turn(svc, threadId, "olá")).rejects.toThrow(/aprovada/);
+      for (const status of ["rejected", "expired"] as const) {
+        const other = newThread();
+        await turn(svc, other, "compre 100 ações de PETR4");
+        s.db.status = status;
+        const events = await turn(svc, other, "olá");
+        expect(events.some((e) => e.type === "approval_required")).toBe(false);
+        s.db.status = "pending";
+      }
+      expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+      expect(s.logger.warn).toHaveBeenCalledWith({
+        msg: expect.any(String),
+        approvalId: APPROVAL,
+        threadId: expect.any(String),
+      });
     });
 
     it("retomar thread sem aprovação é NotFound", async () => {

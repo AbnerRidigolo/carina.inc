@@ -72,7 +72,10 @@ export class OrchestratorService {
     @Inject(AgentRegistry) agents: Pick<AgentRegistry, "get" | "navigator" | "executor">,
     @Inject(KnowledgeService) knowledge: Pick<KnowledgeService, "search">,
     @Inject(InboxService)
-    private readonly inbox: Pick<InboxService, "request" | "executeOnce" | "get" | "executionOf">,
+    private readonly inbox: Pick<
+      InboxService,
+      "request" | "executeOnce" | "get" | "executionOf" | "expireIfDue"
+    >,
     @Inject(ExecutorRegistry) executors: Pick<ExecutorRegistry, "get">,
     @Inject(StreamsService) streams: Pick<StreamsService, "publish">,
     @Inject(ORCHESTRATOR_CHECKPOINTER) checkpointer: BaseCheckpointSaver,
@@ -97,7 +100,14 @@ export class OrchestratorService {
   /**
    * Um turno de chat. Eventos: `plan`, `agent_started`, `token` (só do Navigator), `agent_result`
    * e, se o executor pedir aprovação, `approval_required` (último evento). Não emite `done`.
-   * Thread aguardando aprovação: ApprovalConflictError (um turno novo abandonaria o interrupt).
+   *
+   * Thread aguardando aprovação (um turno novo abandonaria o interrupt): o guard lê a aprovação
+   * no banco (cura preguiçosa de um `resume` perdido, ex. que foi para a DLQ):
+   * - `rejected`/`expired` (ou `pending` já vencida pelo CLOCK, que é vencida aqui): fecha a
+   *   espera pelo mesmo caminho do `resume` (o grafo grava `rejected`, nada executa) e segue o
+   *   turno. Duas chamadas concorrentes reaproveitam a idempotência do `resume`.
+   * - `approved`: ApprovalConflictError; a execução é retomada pelo worker/reconciliação.
+   * - `pending` válida: ApprovalConflictError.
    */
   async *stream(input: { threadId: string; question: string }): AsyncIterable<ChatEvent> {
     const { threadId } = input;
@@ -107,7 +117,8 @@ export class OrchestratorService {
 
     const snapshot = await this.graph.getState(config);
     if (awaitingApproval(snapshot)) {
-      throw new ApprovalConflictError("O thread aguarda a decisão de uma aprovação");
+      const approvalId = (snapshot.values as Partial<GraphStateValue>).pending?.approvalId;
+      await this.closeResolvedWait(threadId, approvalId);
     }
 
     const chunks = (await this.graph.stream(
@@ -163,6 +174,40 @@ export class OrchestratorService {
       return { execution: { approvalId, status: "skipped" } };
     }
     return { execution };
+  }
+
+  /**
+   * Guard do `stream` para um thread parado no nó `approval` (ver `stream`): fecha a espera de
+   * uma aprovação rejeitada/vencida ou lança ApprovalConflictError. Só ids no log.
+   */
+  private async closeResolvedWait(threadId: string, approvalId: string | undefined): Promise<void> {
+    if (!approvalId) {
+      throw new ApprovalConflictError("O thread aguarda a decisão de uma aprovação");
+    }
+    let status = (await this.inbox.get(approvalId)).status;
+    if (status === "pending") {
+      // Vencida pelo CLOCK e o job ainda não passou: vence agora (condicional). Se outra chamada
+      // venceu antes, a releitura mostra `expired`.
+      status = (await this.inbox.expireIfDue(approvalId))
+        ? "expired"
+        : (await this.inbox.get(approvalId)).status;
+    }
+    if (status === "pending") {
+      throw new ApprovalConflictError("A aprovação ainda não foi decidida");
+    }
+    if (status === "approved") {
+      throw new ApprovalConflictError(
+        "A aprovação foi aprovada e a execução está sendo retomada; tente de novo em instantes",
+      );
+    }
+    // rejected / expired: o `resume` perdido nunca vai chegar (a reconciliação só republica
+    // aprovadas). Fecha a espera pelo caminho do resume; `approved: false` é só o sinal.
+    this.logger.warn({
+      msg: "Espera de aprovação fechada no novo turno (resume não entregue)",
+      approvalId,
+      threadId,
+    });
+    await this.resume(threadId, false);
   }
 
   /** Estado atual do thread (do tenant e cliente do contexto). */

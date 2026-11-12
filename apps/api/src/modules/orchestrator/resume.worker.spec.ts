@@ -51,6 +51,7 @@ function setup(
     resume?: (threadId: string, approved: boolean) => Promise<{ execution: Execution }>;
     workers?: "true" | "false";
     consume?: (o: ConsumeOptions) => Promise<void>;
+    stopTimeoutMs?: number;
   } = {},
 ) {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } satisfies ResumeLogger;
@@ -75,6 +76,7 @@ function setup(
     streams as never,
     orchestrator as never,
     logger,
+    opts.stopTimeoutMs,
   );
   return { worker, logger, orchestrator, streams, contexts };
 }
@@ -275,6 +277,39 @@ describe("ResumeWorker ciclo de vida", () => {
     const cb = (b.streams.consume.mock.calls[0]?.[0] as ConsumeOptions).consumer;
     expect(ca).not.toBe(cb);
     return Promise.all([a.worker.stop(), b.worker.stop()]);
+  });
+
+  it("stop não trava num handler preso: desiste após o limite (padrão 30 s), loga e segue", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [limit, expected] of [
+        [undefined, 30_000],
+        [500, 500],
+      ] as const) {
+        // consume que nunca termina, nem com o abort (executor travado)
+        const { worker, logger } = setup({
+          workers: "true",
+          consume: () => new Promise<void>(() => undefined),
+          ...(limit !== undefined ? { stopTimeoutMs: limit } : {}),
+        });
+        worker.start();
+        let stopped = false;
+        const stopping = worker.stop().then(() => {
+          stopped = true;
+        });
+        await vi.advanceTimersByTimeAsync(expected - 1);
+        expect(stopped).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await stopping;
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.objectContaining({ msg: expect.any(String) }),
+        );
+        expect(worker.running).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("consume que falha é reiniciado (com log) até o stop", async () => {

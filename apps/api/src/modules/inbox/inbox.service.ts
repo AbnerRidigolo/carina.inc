@@ -322,6 +322,24 @@ export class InboxService {
   }
 
   /**
+   * Vence a solicitação se ainda está `pending` e o prazo já passou pelo CLOCK (UPDATE condicional:
+   * entre chamadas concorrentes só uma vence). Devolve se ESTA chamada a venceu. Não publica
+   * `resume`: quem chama (o guard do `OrchestratorService.stream`) fecha a espera do thread na hora.
+   */
+  async expireIfDue(id: string): Promise<boolean> {
+    if (!APPROVAL_ID_RE.test(id)) return false;
+    const nowIso = new Date(this.clock()).toISOString();
+    const rows = await this.db.tx(
+      (tx) =>
+        tx.$queryRaw<{ id: string }[]>`
+        UPDATE approval_request SET status = 'expired'
+        WHERE id = ${id} AND status = 'pending' AND expires_at <= ${nowIso}::timestamptz
+        RETURNING id`,
+    );
+    return rows.length > 0;
+  }
+
+  /**
    * Decide uma solicitação pendente. Numa transação: `SELECT … FOR UPDATE` (a segunda decisão
    * concorrente espera e depois vê o status já decidido → conflito). Depois do commit, publica
    * `resume` em `jobs` (melhor esforço; a reconciliação republica decisões não retomadas).

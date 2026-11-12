@@ -28,6 +28,15 @@
  *   qualquer outro erro                     → log error e relança (mesma reentrega/DLQ)
  *   sucesso (inclusive thread já resolvido) → log info com o status e ACK
  *
+ * ── Recuperação de um `resume` que foi para a DLQ ──────────────────────────────────────────────
+ *   - de aprovação `approved`: a ReconciliationJob republica `resume` (approved sem
+ *     executed_action há > 2 min), então o thread é retomado e a execução acontece (uma vez);
+ *   - de aprovação `rejected`/`expired`: nada republica; quem cura é o guard do
+ *     `OrchestratorService.stream`, que no próximo turno lê o banco e fecha a espera pelo caminho
+ *     do `resume` (grava `rejected`, nada executa) antes de seguir;
+ *   - em qualquer caso, um replay manual da DLQ (republicar o evento em `jobs`) continua possível
+ *     e é seguro (a decisão vem do banco; a cerca impede execução dupla).
+ *
  * ── No máximo uma vez ──────────────────────────────────────────────────────────────────────────
  * Quem garante é a cerca do `InboxService.executeOnce` (INSERT em executed_action com PK por
  * aprovação, commitado antes do executor). Reentrega, eventos duplicados (mesmo eventId: o dedup
@@ -41,7 +50,9 @@
  * ── Ciclo de vida ──────────────────────────────────────────────────────────────────────────────
  * Liga em `onApplicationBootstrap` só com WORKERS_ENABLED !== "false"; para em `onModuleDestroy`
  * (antes do módulo fechar o checkpointer e do RedisModule global fechar a conexão) abortando o
- * consumo e esperando o loop, o que inclui a mensagem em andamento. Sem timers pendurados.
+ * consumo e esperando o loop, o que inclui a mensagem em andamento, por no máximo
+ * RESUME_STOP_TIMEOUT_MS (30 s, configurável pelo token RESUME_STOP_TIMEOUT). Sem timers
+ * pendurados.
  */
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
@@ -52,6 +63,7 @@ import {
   Injectable,
   Logger,
   type OnApplicationBootstrap,
+  Optional,
   type OnModuleDestroy,
 } from "@nestjs/common";
 import { ENV } from "../../core/config/config.module.js";
@@ -69,6 +81,10 @@ import { parseThreadId } from "./thread-id.js";
 export const RESUME_STREAM = "jobs";
 export const RESUME_GROUP = "resumers";
 const RESTART_DELAY_MS = 1000;
+/** Limite padrão de espera da mensagem em andamento no `stop` (shutdown). */
+export const RESUME_STOP_TIMEOUT_MS = 30_000;
+/** Token opcional para trocar o limite do `stop` (ms). */
+export const RESUME_STOP_TIMEOUT = Symbol("RESUME_STOP_TIMEOUT");
 
 /** Forma de OBJETO no 1º argumento (nestjs-pino): `err` no topo; só ids, nunca payload. */
 export interface ResumeLogFields {
@@ -119,6 +135,9 @@ export class ResumeWorker
     @Inject(OrchestratorService)
     private readonly orchestrator: Pick<OrchestratorService, "resume" | "finalState">,
     @Inject(RESUME_LOGGER) private readonly logger: ResumeLogger,
+    @Optional()
+    @Inject(RESUME_STOP_TIMEOUT)
+    private readonly stopTimeoutMs: number = RESUME_STOP_TIMEOUT_MS,
   ) {}
 
   /** O consumo do stream está ligado. */
@@ -147,14 +166,32 @@ export class ResumeWorker
     this.loop = this.consumeUntilAborted(abort.signal);
   }
 
-  /** Para o consumo e espera o loop (e a mensagem em andamento) terminar (idempotente). */
+  /**
+   * Para o consumo e espera o loop (e a mensagem em andamento) terminar (idempotente), por no
+   * máximo `stopTimeoutMs` (padrão 30 s): um executor travado não trava o shutdown. Estourado o
+   * limite, registra o erro e segue; a entrada não confirmada volta pelo XAUTOCLAIM em outra
+   * réplica, e a cerca do executeOnce impede execução dupla (`started` vira needs_review no job).
+   */
   async stop(): Promise<void> {
     const loop = this.loop;
     if (!loop) return;
     this.abort?.abort();
-    await loop;
-    this.loop = undefined;
-    this.abort = undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<true>((resolve) => {
+      timer = setTimeout(() => resolve(true), this.stopTimeoutMs);
+    });
+    try {
+      const outcome = await Promise.race([loop.then(() => false as const), timedOut]);
+      if (outcome) {
+        this.logger.error({
+          msg: "Worker de retomada não terminou a mensagem em andamento no prazo; encerrando assim mesmo",
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+      this.loop = undefined;
+      this.abort = undefined;
+    }
   }
 
   /** Handler do stream (ver a matriz no cabeçalho): resolve = ACK; rejeita = reentrega. */

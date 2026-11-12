@@ -13,6 +13,7 @@ import type { ChatEvent, StreamEvent } from "@carina/shared";
 import { Redis } from "ioredis";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
+import { ApprovalConflictError } from "../../src/core/errors/domain-errors.js";
 import { StreamsService } from "../../src/core/redis/streams.service.js";
 import { ExecutorRegistry } from "../../src/modules/inbox/executors.js";
 import { InboxService } from "../../src/modules/inbox/inbox.service.js";
@@ -530,5 +531,94 @@ describe("ResumeWorker (int)", () => {
     expect(await execution(A, approvalId)).toEqual({ status: "succeeded" });
     expect(await pendingResumers()).toBe(0);
     expect(placeTrade).toHaveBeenCalledTimes(1);
+  });
+
+  describe("resume perdido (ex.: foi para a DLQ): o guard do stream cura o thread", () => {
+    /** Thread pausado cujo `resume` nunca chega ao worker (o stream é esvaziado). */
+    async function lost(t: TestApp, p: Party) {
+      const paused1 = await paused(t, p);
+      await redis.del("jobs");
+      return paused1;
+    }
+
+    const awaiting = async (t: TestApp, p: Party, threadId: string) => {
+      const state = await as(p, () => t.app.get(OrchestratorService).finalState(threadId));
+      return state.pending !== null && state.execution === null;
+    };
+
+    async function healsAndRuns(t: TestApp, p: Party, threadId: string, approvalId: string) {
+      expect(await awaiting(t, p, threadId)).toBe(true); // bloqueado
+      // Dois turnos concorrentes: a cura (via resume) é idempotente e os dois seguem.
+      const results = await Promise.allSettled([
+        turn(t, p, threadId, "qual o saldo da minha carteira?"),
+        turn(t, p, threadId, "como está minha carteira?"),
+      ]);
+      for (const r of results) {
+        expect(r.status).toBe("fulfilled");
+        if (r.status === "fulfilled") {
+          expect(r.value.length).toBeGreaterThan(0);
+          expect(r.value.some((e) => e.type === "approval_required")).toBe(false);
+        }
+      }
+      // E o thread segue livre para mais turnos.
+      expect((await turn(t, p, threadId, "e agora?")).length).toBeGreaterThan(0);
+      expect(placeTrade).not.toHaveBeenCalled();
+      expect(await execution(p, approvalId)).toBeUndefined();
+      expect(await usage(p)).toEqual([]);
+    }
+
+    it("rejeitada com resume perdido: novo turno fecha a espera (rejected) e passa", async () => {
+      const t = await start();
+      const A = await party(t, "Cura rejeitada");
+      const { threadId, approvalId } = await lost(t, A);
+      await decide(t, A, approvalId, false);
+      await redis.del("jobs");
+      await healsAndRuns(t, A, threadId, approvalId);
+      expect(await approvalStatus(A, approvalId)).toBe("rejected");
+    });
+
+    it("expired no banco com resume perdido: novo turno cura e passa", async () => {
+      const t = await start();
+      const A = await party(t, "Cura expirada");
+      const { threadId, approvalId } = await lost(t, A);
+      offset = 25 * HOUR;
+      await t.app.get(ReconciliationJob).run({ onlyTenants: [A.tenantId] });
+      expect(await approvalStatus(A, approvalId)).toBe("expired");
+      await redis.del("jobs");
+      await healsAndRuns(t, A, threadId, approvalId);
+    });
+
+    it("pending já vencida pelo CLOCK (job ainda não rodou): novo turno a vence e passa", async () => {
+      const t = await start();
+      const A = await party(t, "Cura vencida");
+      const { threadId, approvalId } = await lost(t, A);
+      offset = 25 * HOUR;
+      await healsAndRuns(t, A, threadId, approvalId);
+      expect(await approvalStatus(A, approvalId)).toBe("expired");
+    });
+
+    it("pending válida: continua 409 e nada executa", async () => {
+      const t = await start();
+      const A = await party(t, "Cura pendente");
+      const { threadId, approvalId } = await lost(t, A);
+      await expect(turn(t, A, threadId, "olá")).rejects.toThrow(ApprovalConflictError);
+      await expect(turn(t, A, threadId, "olá")).rejects.toThrow(/ainda não foi decidida/);
+      expect(await awaiting(t, A, threadId)).toBe(true);
+      expect(await approvalStatus(A, approvalId)).toBe("pending");
+      expect(placeTrade).not.toHaveBeenCalled();
+      expect(await execution(A, approvalId)).toBeUndefined();
+    });
+
+    it("approved com resume perdido: 409 com a mensagem certa (o job republica a execução)", async () => {
+      const t = await start();
+      const A = await party(t, "Cura aprovada");
+      const { threadId, approvalId } = await lost(t, A);
+      await decide(t, A, approvalId, true);
+      await redis.del("jobs");
+      await expect(turn(t, A, threadId, "olá")).rejects.toThrow(/aprovada.*retomada/);
+      expect(await awaiting(t, A, threadId)).toBe(true);
+      expect(placeTrade).not.toHaveBeenCalled();
+      expect(await execution(A, approvalId)).toBeUndefined();
+    });
   });
 });

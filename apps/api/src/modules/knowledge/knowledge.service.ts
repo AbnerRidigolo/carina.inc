@@ -16,6 +16,7 @@ import { ValidationError } from "../../core/errors/domain-errors.js";
 import { ModelFactory } from "../llm/model-factory.js";
 import { chunkText } from "./chunker.js";
 import { KnowledgeRepository, type EntityRow, type NewRelation } from "./knowledge.repository.js";
+import { citesName, compareEntityKeys, foldText } from "./mention-match.js";
 
 export const DEFAULT_SEARCH_K = 6;
 export const MAX_SEARCH_K = 50;
@@ -96,8 +97,6 @@ function plainObject(field: string, value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-
 @Injectable()
 export class KnowledgeService {
   constructor(
@@ -146,7 +145,10 @@ export class KnowledgeService {
     if (chunks.length === 0) throw new ValidationError("text sem conteúdo");
 
     // Embeddings num único lote, fora da transação (não segura conexão esperando o provedor).
-    const entityList = [...entities.values()];
+    // Entidades em ordem canônica (type, name) por ponto de código: duas ingestões concorrentes do
+    // mesmo cliente bloqueiam as linhas de kg_entity sempre na mesma ordem (sem deadlock 40P01);
+    // o INSERT do repositório repete a ordem com COLLATE "C".
+    const entityList = [...entities.values()].sort(compareEntityKeys);
     const vectors = await this.models
       .embeddings()
       .embedDocuments([...chunks, ...entityList.map((e) => `${e.type} ${e.name}`)]);
@@ -189,12 +191,14 @@ export class KnowledgeService {
         return row;
       };
 
-      // Menções: nos chunks que citam o nome; se nenhum cita, no documento todo.
+      // Menções: nos chunks que citam o nome como palavra inteira; se nenhum cita, só no primeiro
+      // chunk (o documento menciona a entidade, mas sem espalhá-la por todos os chunks).
       const mentionRows = new Map<string, { chunkId: string; entityId: string }>();
+      const firstChunk = newChunks.slice(0, 1);
       for (const key of mentions) {
         const entity = resolve(key);
         const hits = this.chunksCiting(newChunks, [entity.name]);
-        for (const c of hits.length > 0 ? hits : newChunks) {
+        for (const c of hits.length > 0 ? hits : firstChunk) {
           mentionRows.set(`${c.id}|${entity.id}`, { chunkId: c.id, entityId: entity.id });
         }
       }
@@ -257,11 +261,12 @@ export class KnowledgeService {
     });
   }
 
+  /** Chunks que citam todos os nomes como palavras inteiras (ver `citesName`). */
   private chunksCiting<C extends { content: string }>(chunks: C[], names: string[]): C[] {
-    const needles = names.map(fold);
+    const needles = names.map(foldText);
     return chunks.filter((c) => {
-      const hay = fold(c.content);
-      return needles.every((n) => hay.includes(n));
+      const hay = foldText(c.content);
+      return needles.every((n) => citesName(hay, n));
     });
   }
 }

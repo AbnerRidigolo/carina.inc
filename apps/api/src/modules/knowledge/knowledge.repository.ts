@@ -12,6 +12,7 @@
 import { Injectable } from "@nestjs/common";
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import type { Prisma } from "../../generated/prisma/client.js";
+import { compareCodePoints } from "./mention-match.js";
 
 export const EMBEDDING_DIMENSIONS = 1024;
 /** Candidatos de cada ranker antes da fusão. */
@@ -20,6 +21,8 @@ export const RANKER_LIMIT = 8;
 export const RRF_K = 60;
 export const NEIGHBOR_LIMIT = 20;
 export const NEIGHBOR_HOPS = 2;
+/** Entidades devolvidas por busca (as mais citadas nos chunks encontrados). */
+export const ENTITY_LIMIT = 50;
 
 type Tx = Prisma.TransactionClient;
 
@@ -176,15 +179,25 @@ export class KnowledgeRepository {
     }));
   }
 
-  /** Entidades mencionadas nos chunks (via kg_mention). */
+  /**
+   * Entidades mencionadas nos chunks (via kg_mention): no máximo `ENTITY_LIMIT`, as mais citadas
+   * entre os chunks primeiro; saem em ordem `(type, name)` por bytes.
+   */
   async entitiesForChunks(tx: Tx, chunkIds: readonly string[]): Promise<EntityRow[]> {
     if (chunkIds.length === 0) return [];
     return tx.$queryRaw<EntityRow[]>`
-      SELECT DISTINCT e.id, e.type, e.name, e.properties
-      FROM kg_mention m
-      JOIN kg_entity e ON e.id = m.entity_id
-      WHERE m.chunk_id = ANY(${[...chunkIds]}::uuid[])
-      ORDER BY e.type, e.name`;
+      SELECT e.id, e.type, e.name, e.properties
+      FROM (
+        SELECT m.entity_id, count(*) AS hits
+        FROM kg_mention m
+        WHERE m.chunk_id = ANY(${[...chunkIds]}::uuid[])
+        GROUP BY m.entity_id
+      ) top
+      JOIN kg_entity e ON e.id = top.entity_id
+      ORDER BY top.hits DESC, e.type COLLATE "C", e.name COLLATE "C"
+      LIMIT ${ENTITY_LIMIT}`.then((rows) =>
+      rows.sort((a, b) => compareCodePoints(a.type, b.type) || compareCodePoints(a.name, b.name)),
+    );
   }
 
   /**
@@ -285,7 +298,9 @@ export class KnowledgeRepository {
 
   /**
    * Upsert por `(type, name)`: propriedades novas são mescladas às existentes (`||`) e o
-   * embedding é atualizado. A entrada não pode repetir `(type, name)`.
+   * embedding é atualizado. A entrada não pode repetir `(type, name)`. As linhas são inseridas (e
+   * bloqueadas) em ordem `(type, name)` por bytes (`COLLATE "C"`), independente da ordem de
+   * entrada e da collation do banco: ingestões concorrentes do mesmo cliente não se travam.
    */
   async upsertEntities(tx: Tx, entities: readonly NewEntity[]): Promise<EntityRow[]> {
     if (entities.length === 0) return [];
@@ -299,6 +314,7 @@ export class KnowledgeRepository {
              t.type, t.name, t.properties::jsonb, t.embedding::vector
       FROM unnest(${types}::text[], ${names}::text[], ${props}::text[], ${vectors}::text[])
         AS t(type, name, properties, embedding)
+      ORDER BY t.type COLLATE "C", t.name COLLATE "C"
       ON CONFLICT (tenant_id, client_id, type, name) DO UPDATE
         SET properties = kg_entity.properties || EXCLUDED.properties,
             embedding = EXCLUDED.embedding

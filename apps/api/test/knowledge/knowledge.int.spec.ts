@@ -42,6 +42,8 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
   const clientA2 = randomUUID();
   const clientA3 = randomUUID();
   const clientA4 = randomUUID();
+  const clientA5 = randomUUID();
+  const clientA6 = randomUUID();
   const clientB1 = randomUUID();
   let prisma: PrismaService;
   let db: TenantPrismaService;
@@ -77,6 +79,8 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
       [clientA2, "a2"],
       [clientA3, "a3"],
       [clientA4, "a4"],
+      [clientA5, "a5"],
+      [clientA6, "a6"],
     ] as const) {
       await migratorSql(
         `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $2, $3)`,
@@ -581,6 +585,88 @@ describe("KnowledgeService (carina_app, sob RLS)", () => {
       const res = await inA1(() => knowledge.search("PETR4"));
       expect(res.chunks[0]?.content).toBe("Carteira: 500 ações PETR4 na XP");
     }
+  });
+
+  it('menção é por palavra inteira: "XP" não casa em "expectativa"; sem citação, só o 1º chunk', async () => {
+    const t = tenantA;
+    const c = clientA5;
+    // 1º parágrafo enche o 1º chunk só com "expectativa" (sem XP isolado); o 2º cita XP e PETR4.
+    const filler = "A expectativa do mercado segue positiva para o trimestre. ".repeat(13).trim();
+    const text = `${filler}\n\nCustódia: 500 PETR4 na XP, conforme o extrato consolidado do mês.`;
+    const out = await as(t, c, () =>
+      knowledge.ingestDocument({
+        source: "precisao",
+        title: "Menções",
+        text,
+        entities: [
+          { type: "instituicao", name: "XP" },
+          { type: "ativo", name: "PETR4" },
+          { type: "ativo", name: "SEMCITACAO" },
+        ],
+        relations: [
+          { sourceRef: "ativo:PETR4", targetRef: "instituicao:XP", type: "CUSTODIADO_EM" },
+        ],
+      }),
+    );
+    expect(out.chunkIds.length).toBeGreaterThan(1);
+    const [first, ...rest] = out.chunkIds;
+    const rows = await migratorSql<{ chunk_id: string; name: string; content: string }>(
+      `SELECT m.chunk_id, e.name, ch.content
+         FROM kg_mention m
+         JOIN kg_entity e ON e.id = m.entity_id
+         JOIN kg_chunk ch ON ch.id = m.chunk_id
+        WHERE ch.document_id = $1`,
+      [out.documentId],
+      { tenantId: t, clientId: c },
+    );
+    const chunksOf = (name: string) =>
+      rows
+        .filter((r) => r.name === name)
+        .map((r) => r.chunk_id)
+        .sort();
+    // o 1º chunk só tem "expectativa": nenhuma menção a XP nele
+    const firstContent = rows.find((r) => r.chunk_id === first)?.content ?? "";
+    expect(firstContent).not.toMatch(/\bXP\b/);
+    expect(chunksOf("XP")).not.toContain(first);
+    expect(chunksOf("XP").length).toBeGreaterThan(0);
+    expect(chunksOf("XP").every((id) => rest.includes(id))).toBe(true);
+    // menção que nenhum chunk cita fica presa só ao primeiro chunk (não a todos)
+    expect(chunksOf("SEMCITACAO")).toEqual([first]);
+    // a relação fica no chunk que cita as duas pontas
+    const [rel] = await migratorSql<{ content: string }>(
+      `SELECT ch.content FROM kg_relation r JOIN kg_chunk ch ON ch.id = r.chunk_id
+        WHERE ch.document_id = $1`,
+      [out.documentId],
+      { tenantId: t, clientId: c },
+    );
+    expect(rel?.content).toContain("500 PETR4 na XP");
+  });
+
+  it("ingestões concorrentes com entidades em comum em ordens opostas não dão deadlock", async () => {
+    const t = tenantA;
+    const c = clientA6;
+    const ROUNDS = 10;
+    for (let round = 0; round < ROUNDS; round++) {
+      // Entidades novas a cada rodada (INSERT) e repetidas da anterior (UPDATE).
+      const names = Array.from({ length: 40 }, (_, i) => `e${round}-${i}`).concat(
+        round > 0 ? Array.from({ length: 10 }, (_, i) => `e${round - 1}-${i}`) : [],
+      );
+      const forward = names.map((name) => ({ type: "ativo", name }));
+      const backward = [...forward].reverse();
+      const ingest = (title: string, entities: typeof forward) =>
+        as(t, c, () =>
+          knowledge.ingestDocument({ source: "concorrente", title, text: title, entities }),
+        );
+      const results = await Promise.allSettled([
+        ingest("Doc A", forward),
+        ingest("Doc B", backward),
+        ingest("Doc C", forward),
+        ingest("Doc D", backward),
+      ]);
+      const failures = results.filter((r) => r.status === "rejected");
+      expect(failures.map((f) => String((f as PromiseRejectedResult).reason))).toEqual([]);
+    }
+    expect(await count("kg_document", t, c)).toBe(4);
   });
 
   it("o KnowledgeModule monta com o ModelFactory real em modo mock", async () => {

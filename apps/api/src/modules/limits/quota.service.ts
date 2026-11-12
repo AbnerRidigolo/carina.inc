@@ -12,8 +12,8 @@ import { QuotaExceededError } from "../../core/errors/domain-errors.js";
 import { REDIS } from "../../core/redis/redis.tokens.js";
 import type { AuthTenant } from "../tenancy/api-key.guard.js";
 import { CLOCK, type Clock } from "./clock.js";
+import { type LocalTime, localTime } from "./month.js";
 
-const TIME_ZONE = "America/Sao_Paulo";
 const KEY_TTL_SECONDS = 40 * 24 * 60 * 60;
 
 /**
@@ -39,46 +39,6 @@ if v > 0 then
 end
 return 0
 `;
-
-const formatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-});
-
-interface LocalTime {
-  year: number;
-  month: number; // 1-12
-  /** Instante em que o próximo mês começa (ms epoch), no fuso de São Paulo. */
-  nextMonthStartMs: number;
-}
-
-function localTime(nowMs: number): LocalTime {
-  const p: Record<string, number> = {};
-  for (const part of formatter.formatToParts(new Date(nowMs))) {
-    if (part.type !== "literal") p[part.type] = Number(part.value);
-  }
-  const year = p["year"] ?? 0;
-  const month = p["month"] ?? 1;
-  // Deslocamento do fuso neste instante: relógio local lido como UTC menos o instante real.
-  const localAsUtc = Date.UTC(
-    year,
-    month - 1,
-    p["day"] ?? 1,
-    p["hour"] ?? 0,
-    p["minute"] ?? 0,
-    p["second"] ?? 0,
-  );
-  const offsetMs = localAsUtc - Math.floor(nowMs / 1000) * 1000;
-  // Date.UTC normaliza mês 12 → janeiro do ano seguinte.
-  const nextMonthStartMs = Date.UTC(year, month, 1) - offsetMs;
-  return { year, month, nextMonthStartMs };
-}
 
 @Injectable()
 export class QuotaService {

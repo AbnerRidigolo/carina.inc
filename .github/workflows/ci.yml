@@ -94,5 +94,8 @@ jobs:
       - name: Testes de integração
         run: pnpm --filter @carina/api test:int
 
+      - name: Testes E2E
+        run: pnpm --filter @carina/api test:e2e
+
       - name: Build
         run: pnpm build

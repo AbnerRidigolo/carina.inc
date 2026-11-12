@@ -33,3 +33,17 @@ Thumbs.db
 
 # Modal
 .modal/
+
+# Worktrees locais do Claude Code
+.claude/worktrees/
+
+# Workspace do subagent-driven-development
+.superpowers/
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+coverage/
+
+# Cliente Prisma gerado
+apps/api/src/generated/

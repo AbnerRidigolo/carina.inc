@@ -1,0 +1,359 @@
+// Schema do CARINA (PostgreSQL 16+ com pgvector).
+//
+// - Ids uuid gerados pelo banco (gen_random_uuid()), para valerem também em SQL bruto.
+// - Dinheiro em numeric(18,2); quantidades em numeric(24,8); nunca float.
+// - Colunas vector/tsvector são Unsupported: as consultas ficam em SQL parametrizado.
+// - Tudo o que o Prisma não expressa está escrito à mão em migrations/0001_init: coluna gerada
+//   tsv, índices HNSW e as FKs compostas com coluna opcional (usage_record.client_id,
+//   audit_event.client_id, kg_relation.chunk_id), que aqui aparecem como relações simples.
+//   RLS, grants e funções ficam em migrations/0002_rls.
+// - FKs compostas (tenant_id, client_id, …) impedem que uma linha aponte para o cliente
+//   ou a entidade de outro tenant/cliente, mesmo que a aplicação erre o id.
+//
+// NÃO use `prisma migrate dev` nem `db push`: o diff do Prisma tentaria desfazer os itens
+// escritos à mão acima (DROP dos índices HNSW e das FKs compostas). Gere migrações novas com
+// `prisma migrate diff --from-migrations prisma/migrations --to-schema prisma/schema.prisma
+// --script` (shadow database via SHADOW_DATABASE_URL), remova esses DROP/ADD e escreva à mão os
+// GRANT, ENABLE/FORCE RLS e políticas de cada tabela nova.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Tenancy ────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name         String
+  plan         String
+  rpm          Int      @default(60)
+  /// 0 = ilimitada
+  monthlyQuota Int      @default(0) @map("monthly_quota")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  apiKeys     ApiKey[]
+  clients     Client[]
+  usage       UsageRecord[]
+  auditEvents AuditEvent[]
+
+  @@map("tenant")
+}
+
+model ApiKey {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  /// sha256 hex da chave; a chave em texto nunca é gravada
+  hash      String    @unique
+  prefix    String
+  /// chat, inbox:decide, data:write, admin
+  scopes    String[]
+  label     String?
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  decidedApprovals ApprovalRequest[]
+
+  @@index([tenantId])
+  @@map("api_key")
+}
+
+model Client {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  externalId String   @map("external_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  approvalRequests ApprovalRequest[]
+  executedActions  ExecutedAction[]
+  usage            UsageRecord[]
+  auditEvents      AuditEvent[]
+  positions        Position[]
+  transactions     Transaction[]
+  importJobs       ImportJob[]
+  kgDocuments      KgDocument[]
+  kgChunks         KgChunk[]
+  kgEntities       KgEntity[]
+  kgRelations      KgRelation[]
+  kgMentions       KgMention[]
+
+  @@unique([tenantId, externalId])
+  /// alvo das FKs compostas (tenant_id, client_id)
+  @@unique([tenantId, id])
+  @@map("client")
+}
+
+// ─── Inbox de aprovações ────────────────────────────────────────────────────
+
+model ApprovalRequest {
+  /// determinístico: hash(thread_id, ação, payload)
+  id             String    @id
+  tenantId       String    @map("tenant_id") @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  threadId       String    @map("thread_id")
+  agent          String
+  action         String
+  risk           String
+  payload        Json      @db.JsonB
+  valueBrl       Decimal   @default(0) @map("value_brl") @db.Decimal(18, 2)
+  /// pending, approved, rejected, expired
+  status         String    @default("pending")
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  decidedByKeyId String?   @map("decided_by_key_id") @db.Uuid
+  decidedAt      DateTime? @map("decided_at") @db.Timestamptz(6)
+  reason         String?
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client         Client          @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  decidedByKey   ApiKey?         @relation(fields: [decidedByKeyId], references: [id], onDelete: SetNull)
+  executedAction ExecutedAction?
+
+  @@index([tenantId, clientId])
+  @@index([status, expiresAt])
+  @@map("approval_request")
+}
+
+/// Garantia de execução no máximo uma vez: a PK impede dois workers de executarem a mesma aprovação.
+model ExecutedAction {
+  approvalRequestId String    @id @map("approval_request_id")
+  tenantId          String    @map("tenant_id") @db.Uuid
+  clientId          String    @map("client_id") @db.Uuid
+  /// started, succeeded, failed, needs_review
+  status            String
+  result            Json?     @db.JsonB
+  startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt        DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  approvalRequest ApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+  client          Client          @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  @@index([tenantId, clientId])
+  @@map("executed_action")
+}
+
+// ─── Uso e auditoria (append-only) ──────────────────────────────────────────
+
+model UsageRecord {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  clientId   String?  @map("client_id") @db.Uuid
+  workType   String   @map("work_type")
+  agents     String[] @default([])
+  priceBrl   Decimal  @map("price_brl") @db.Decimal(18, 2)
+  feeBrl     Decimal  @default(0) @map("fee_brl") @db.Decimal(18, 2)
+  valueBrl   Decimal  @default(0) @map("value_brl") @db.Decimal(18, 2)
+  durationMs Int      @map("duration_ms")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// no banco: FK composta (tenant_id, client_id) → client(tenant_id, id), ON DELETE SET NULL (client_id)
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@map("usage_record")
+}
+
+model AuditEvent {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  clientId       String?  @map("client_id") @db.Uuid
+  channel        String
+  query          String
+  flags          Json     @default("[]") @db.JsonB
+  agents         String[] @default([])
+  /// sha256 da resposta (o texto não é guardado)
+  responseDigest String?  @map("response_digest")
+  durationMs     Int      @default(0) @map("duration_ms")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// no banco: FK composta (tenant_id, client_id) → client(tenant_id, id), ON DELETE SET NULL (client_id)
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@map("audit_event")
+}
+
+// ─── Dados financeiros do cliente final ─────────────────────────────────────
+
+model Position {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  clientId    String   @map("client_id") @db.Uuid
+  /// api, import, synthetic
+  source      String
+  externalId  String   @map("external_id")
+  institution String
+  /// investment, cash
+  kind        String
+  assetClass  String   @map("asset_class")
+  assetCode   String?  @map("asset_code")
+  name        String
+  quantity    Decimal? @db.Decimal(24, 8)
+  valueBrl    Decimal  @map("value_brl") @db.Decimal(18, 2)
+  asOf        DateTime @map("as_of") @db.Date
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, clientId, source, externalId])
+  @@index([tenantId, clientId])
+  @@map("position")
+}
+
+model Transaction {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  clientId    String   @map("client_id") @db.Uuid
+  source      String
+  /// derivado (hash) quando o arquivo não traz id
+  externalId  String   @map("external_id")
+  institution String
+  account     String
+  date        DateTime @db.Date
+  description String
+  amountBrl   Decimal  @map("amount_brl") @db.Decimal(18, 2)
+  category    String?
+  /// debit, credit, buy, sell, dividend, fee, tax, …
+  kind        String
+  assetCode   String?  @map("asset_code")
+  quantity    Decimal? @db.Decimal(24, 8)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, clientId, source, externalId])
+  @@index([tenantId, clientId])
+  @@map("transaction")
+}
+
+/// Criada na fase 1; usada pela importação de arquivos na fase 2.
+model ImportJob {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  clientId   String   @map("client_id") @db.Uuid
+  format     String
+  fileName   String   @map("file_name")
+  fileSha256 String   @map("file_sha256")
+  /// queued, parsing, done, failed
+  status     String   @default("queued")
+  stats      Json     @default("{}") @db.JsonB
+  errors     Json     @default("[]") @db.JsonB
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  /// o mesmo arquivo não é processado duas vezes
+  @@unique([tenantId, clientId, fileSha256])
+  @@index([tenantId, clientId])
+  @@map("import_job")
+}
+
+// ─── Conhecimento (grafo + busca híbrida) ───────────────────────────────────
+
+model KgDocument {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  clientId  String   @map("client_id") @db.Uuid
+  source    String
+  title     String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client Client    @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  chunks KgChunk[]
+
+  @@unique([tenantId, clientId, id])
+  @@index([tenantId, clientId])
+  @@map("kg_document")
+}
+
+model KgChunk {
+  id         String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String                       @map("tenant_id") @db.Uuid
+  clientId   String                       @map("client_id") @db.Uuid
+  documentId String                       @map("document_id") @db.Uuid
+  content    String
+  embedding  Unsupported("vector(1024)")?
+  /// GENERATED ALWAYS AS (to_tsvector('portuguese', content)) STORED — ver 0001_init
+  tsv        Unsupported("tsvector")?
+
+  client    Client       @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  document  KgDocument   @relation(fields: [tenantId, clientId, documentId], references: [tenantId, clientId, id], onDelete: Cascade)
+  mentions  KgMention[]
+  relations KgRelation[]
+
+  @@unique([tenantId, clientId, id])
+  @@index([tenantId, clientId])
+  @@index([tenantId, clientId, documentId])
+  @@index([tsv], map: "kg_chunk_tsv_idx", type: Gin)
+  @@map("kg_chunk")
+}
+
+model KgEntity {
+  id         String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String                       @map("tenant_id") @db.Uuid
+  clientId   String                       @map("client_id") @db.Uuid
+  type       String
+  name       String
+  properties Json                         @default("{}") @db.JsonB
+  embedding  Unsupported("vector(1024)")?
+
+  client   Client       @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  outgoing KgRelation[] @relation("KgRelationSource")
+  incoming KgRelation[] @relation("KgRelationTarget")
+  mentions KgMention[]
+
+  @@unique([tenantId, clientId, type, name])
+  /// alvo das FKs compostas de kg_relation e kg_mention
+  @@unique([tenantId, clientId, id])
+  @@index([tenantId, clientId])
+  @@map("kg_entity")
+}
+
+model KgRelation {
+  id         String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String  @map("tenant_id") @db.Uuid
+  clientId   String  @map("client_id") @db.Uuid
+  sourceId   String  @map("source_id") @db.Uuid
+  targetId   String  @map("target_id") @db.Uuid
+  type       String
+  properties Json    @default("{}") @db.JsonB
+  chunkId    String? @map("chunk_id") @db.Uuid
+
+  client Client   @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  source KgEntity @relation("KgRelationSource", fields: [tenantId, clientId, sourceId], references: [tenantId, clientId, id], onDelete: Cascade)
+  target KgEntity @relation("KgRelationTarget", fields: [tenantId, clientId, targetId], references: [tenantId, clientId, id], onDelete: Cascade)
+  /// no banco: FK composta (tenant_id, client_id, chunk_id) → kg_chunk, ON DELETE SET NULL (chunk_id)
+  chunk  KgChunk? @relation(fields: [chunkId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, clientId])
+  @@index([tenantId, clientId, sourceId])
+  @@index([tenantId, clientId, targetId])
+  @@map("kg_relation")
+}
+
+/// Liga chunks às entidades citadas neles (a busca híbrida parte dos chunks para o grafo).
+model KgMention {
+  tenantId String @map("tenant_id") @db.Uuid
+  clientId String @map("client_id") @db.Uuid
+  chunkId  String @map("chunk_id") @db.Uuid
+  entityId String @map("entity_id") @db.Uuid
+
+  client Client   @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  chunk  KgChunk  @relation(fields: [tenantId, clientId, chunkId], references: [tenantId, clientId, id], onDelete: Cascade)
+  entity KgEntity @relation(fields: [tenantId, clientId, entityId], references: [tenantId, clientId, id], onDelete: Cascade)
+
+  @@id([chunkId, entityId])
+  @@index([tenantId, clientId])
+  @@index([tenantId, clientId, entityId])
+  @@map("kg_mention")
+}

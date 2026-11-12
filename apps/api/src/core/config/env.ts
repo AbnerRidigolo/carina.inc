@@ -21,6 +21,8 @@ export const EnvSchema = z
     DEFAULT_RPM: z.coerce.number().int().positive().default(60),
     APPROVAL_TTL_HOURS: z.coerce.number().positive().default(24),
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
+    /** Liga os workers de fundo (consumidores de streams, ex.: Sync) neste processo. */
+    WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
   })
   .refine((e) => e.LLM_MODE !== "live" || e.OPENROUTER_API_KEY !== undefined, {
     path: ["OPENROUTER_API_KEY"],

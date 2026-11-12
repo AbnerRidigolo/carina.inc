@@ -166,6 +166,18 @@ export class IngestionRepository {
   }
 
   /**
+   * O cliente (id interno) existe no tenant do TenantContext atual? Lido sob RLS: um cliente de
+   * outro tenant é invisível (false). O filtro por tenant é defesa em profundidade.
+   */
+  async clientExists(tenantId: string, clientId: string): Promise<boolean> {
+    const row = await this.db.client.client.findFirst({
+      where: { id: clientId, tenantId },
+      select: { id: true },
+    });
+    return row !== null;
+  }
+
+  /**
    * Uma página de posições do cliente fixado no TenantContext, por keyset em
    * `(externalId, source)` (ordem total: a unicidade é por `(tenant, client, source, externalId)`),
    * no contrato `NormalizedPosition`. Lê `take + 1` linhas para saber se há mais.

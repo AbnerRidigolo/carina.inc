@@ -63,6 +63,11 @@ export interface CreateTestAppOptions {
   overrides?: { token: unknown; useValue: unknown }[];
   /** DB lógico do Redis do app; cada arquivo de teste usa o seu para não colidir com os demais. */
   redisDb?: number;
+  /**
+   * Liga os workers de fundo (WORKERS_ENABLED). Padrão: desligados, para que nenhum consumidor
+   * do stream `jobs` rode nos testes que não pediram (eles leem e contam os eventos de lá).
+   */
+  workersEnabled?: boolean;
 }
 
 export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<TestApp> {
@@ -73,6 +78,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     MIGRATION_DATABASE_URL: migratorUrl(),
     REDIS_URL: opts.redisDb === undefined ? redisUrl() : redisDbUrl(opts.redisDb),
     LLM_MODE: "mock",
+    WORKERS_ENABLED: opts.workersEnabled === true ? "true" : "false",
   });
 
   let builder = Test.createTestingModule({

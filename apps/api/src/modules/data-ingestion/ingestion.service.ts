@@ -246,6 +246,16 @@ export class IngestionService {
   }
 
   /**
+   * O cliente (id interno, uuid) existe no tenant do TenantContext atual? Cliente de outro tenant
+   * ou inexistente → false. `clientId` que não é uuid → ValidationError.
+   */
+  async clientExists(clientId: string): Promise<boolean> {
+    assertUuid("clientId", clientId);
+    const { tenantId } = TenantContext.current();
+    return this.repo.clientExists(tenantId, clientId);
+  }
+
+  /**
    * Todas as posições do cliente (id INTERNO, uuid) em páginas por keyset, sem teto total: para
    * consumidores em processo (worker de Sync). Roda sob o TenantContext do chamador (o tenant já
    * fixado) e fixa o cliente por dentro, então o RLS vale: um `clientId` que não é do tenant atual

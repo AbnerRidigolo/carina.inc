@@ -18,6 +18,15 @@ describe("loadEnv", () => {
     expect(env.APPROVAL_TTL_HOURS).toBe(24);
     expect(env.WEB_ORIGIN).toBe("http://localhost:5173");
     expect(env.OPENROUTER_BASE_URL).toBe("https://openrouter.ai/api/v1");
+    expect(env.WORKERS_ENABLED).toBe("true");
+  });
+
+  it('WORKERS_ENABLED aceita só "true" ou "false"', () => {
+    expect(loadEnv({ ...min, WORKERS_ENABLED: "false" }).WORKERS_ENABLED).toBe("false");
+    expect(loadEnv({ ...min, WORKERS_ENABLED: "true" }).WORKERS_ENABLED).toBe("true");
+    for (const bad of ["0", "no", "TRUE", "yes"]) {
+      expect(() => loadEnv({ ...min, WORKERS_ENABLED: bad }), bad).toThrow(/WORKERS_ENABLED/);
+    }
   });
 
   it("exige OPENROUTER_API_KEY com LLM_MODE=live", () => {

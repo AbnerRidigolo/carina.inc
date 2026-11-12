@@ -1,0 +1,91 @@
+import { AuditEventViewSchema, ProblemSchema } from "@carina/shared";
+import request from "supertest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { TenantContext } from "../../src/core/context/tenant-context.js";
+import { WatchtowerModule } from "../../src/modules/watchtower/watchtower.module.js";
+import { WatchtowerService } from "../../src/modules/watchtower/watchtower.service.js";
+import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+
+describe("Watchtower E2E: GET /api/audit", () => {
+  let t: TestApp;
+  let server: Parameters<typeof request>[0];
+  let A: SeededTenant;
+  let B: SeededTenant;
+  let watchtower: WatchtowerService;
+
+  const seed = (tenant: SeededTenant, n: number, prefix: string) =>
+    TenantContext.run({ tenantId: tenant.tenantId }, async () => {
+      for (let i = 0; i < n; i++) {
+        await watchtower.review({
+          channel: "rest",
+          query: `${prefix}-${i}`,
+          agents: ["insight"],
+          responseText: i === 0 ? "Retorno garantido." : "Tudo certo.",
+          durationMs: i,
+        });
+      }
+    });
+
+  beforeAll(async () => {
+    t = await createTestApp({ imports: [WatchtowerModule], redisDb: 12 });
+    server = t.app.getHttpServer() as Parameters<typeof request>[0];
+    watchtower = t.app.get(WatchtowerService);
+    A = await t.seedTenant({ name: "A" });
+    B = await t.seedTenant({ name: "B" });
+    await seed(A, 3, "a");
+    await seed(B, 2, "b");
+  });
+
+  afterAll(async () => {
+    await t.close();
+  });
+
+  const get = (path: string, key?: string) =>
+    request(server)
+      .get(path)
+      .set(key ? { Authorization: `Bearer ${key}` } : {});
+
+  const parse = (body: unknown) => AuditEventViewSchema.array().parse(body);
+
+  it("devolve a trilha do tenant da chave, mais recentes primeiro", async () => {
+    const res = await get("/api/audit", A.keys.chat);
+    expect(res.status).toBe(200);
+    const events = parse(res.body);
+    expect(events.map((e) => e.query)).toEqual(["a-2", "a-1", "a-0"]);
+    expect(events[2]?.flags.map((f) => f.code)).toEqual(["suitability.certainty_claim"]);
+  });
+
+  it("isolamento: o tenant A nunca vê eventos do B, e vice-versa", async () => {
+    const a = parse((await get("/api/audit", A.keys.chat)).body);
+    const b = parse((await get("/api/audit", B.keys.chat)).body);
+    expect(a.some((e) => e.query.startsWith("b-"))).toBe(false);
+    expect(b.map((e) => e.query)).toEqual(["b-1", "b-0"]);
+  });
+
+  it("?limit= restringe a quantidade", async () => {
+    const res = await get("/api/audit?limit=2", A.keys.chat);
+    expect(res.status).toBe(200);
+    expect(parse(res.body).map((e) => e.query)).toEqual(["a-2", "a-1"]);
+  });
+
+  it("limit acima de 500 é aceito e limitado a 500", async () => {
+    const res = await get("/api/audit?limit=100000", A.keys.chat);
+    expect(res.status).toBe(200);
+    expect(parse(res.body)).toHaveLength(3);
+  });
+
+  it.each(["abc", "0", "-3", "1.5", "", "2x"])(
+    "limit inválido (%j) → 422 problem+json",
+    async (bad) => {
+      const res = await get(`/api/audit?limit=${encodeURIComponent(bad)}`, A.keys.chat);
+      expect(res.status).toBe(422);
+      expect(res.headers["content-type"]).toMatch(/^application\/problem\+json/);
+      expect(ProblemSchema.parse(res.body).status).toBe(422);
+    },
+  );
+
+  it("sem chave: 401; sem o escopo chat: 403", async () => {
+    expect((await get("/api/audit")).status).toBe(401);
+    expect((await get("/api/audit", A.keys.ingest)).status).toBe(403);
+  });
+});

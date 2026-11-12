@@ -260,7 +260,14 @@ export class LlmAgent<O> implements AgentDef<O> {
         this.logger.error({ msg: "Saída estruturada do agente inválida", agent: this.name });
         throw new AllProvidersFailedError();
       }
-      return this.spec.refine ? this.spec.refine(parsed.data) : parsed.data;
+      if (!this.spec.refine) return parsed.data;
+      try {
+        return this.spec.refine(parsed.data);
+      } catch {
+        // Limites/semântica violados: mesmo contrato de saída ruim (log só com o agente).
+        this.logger.error({ msg: "Saída estruturada do agente inválida", agent: this.name });
+        throw new AllProvidersFailedError();
+      }
     }
     const text = clamp(
       contentText((raw as { content?: unknown } | null)?.content).trim(),

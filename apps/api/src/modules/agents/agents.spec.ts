@@ -14,6 +14,7 @@ import type { SearchResult } from "../knowledge/knowledge.service.js";
 import { inspectText } from "../watchtower/inspect-text.js";
 import { agentFailure, buildSystemPrompt, MAX_QUESTION_CHARS, type AgentInput } from "./agent.js";
 import { AgentRegistry } from "./agent-registry.js";
+import { checkMoney } from "./output-limits.js";
 import { registerAgentMockResponders } from "./mock-responders.js";
 import { PROMPTS, SYNTHESIZE_PROMPT } from "./prompts.js";
 
@@ -378,7 +379,9 @@ describe("saída do modelo é não confiável", () => {
   it("texto vazio vira AllProvidersFailedError, sem vazar nada no log", async () => {
     const { registry, s } = withResponder("insight", "   ");
     await expect(registry.get("insight").run(input("q"))).rejects.toThrow(AllProvidersFailedError);
-    expect(JSON.stringify(s.logger.error.mock.calls)).not.toContain("   ");
+    expect(s.logger.error.mock.calls).toEqual([
+      [{ msg: "Agente devolveu resposta vazia", agent: "insight" }],
+    ]);
   });
 
   it("executor: ação com nome gigante ou valor negativo é recusada", async () => {
@@ -388,8 +391,23 @@ describe("saída do modelo é não confiável", () => {
       { action: "  ", payload: {}, valueBrl: "1.00", rationale: "r" },
     ]) {
       const { registry } = withResponder("executor", bad);
-      await expect(registry.get("executor").run(input("q"))).rejects.toThrow(ValidationError);
+      await expect(registry.get("executor").run(input("q"))).rejects.toThrow(
+        AllProvidersFailedError,
+      );
     }
+  });
+
+  it("proposta ruim loga exatamente { msg, agent }, sem conteúdo", async () => {
+    const { registry, s } = withResponder("executor", {
+      action: "create_alert",
+      payload: { segredo: "SEGREDO-123" },
+      valueBrl: "-1.00",
+      rationale: "r",
+    });
+    await expect(registry.get("executor").run(input("q"))).rejects.toThrow(AllProvidersFailedError);
+    expect(s.logger.error.mock.calls).toEqual([
+      [{ msg: "Saída estruturada do agente inválida", agent: "executor" }],
+    ]);
   });
 
   it("executor: place_trade com payload fora do formato é recusado", async () => {
@@ -406,7 +424,9 @@ describe("saída do modelo é não confiável", () => {
         valueBrl: "10.00",
         rationale: "r",
       });
-      await expect(registry.get("executor").run(input("q"))).rejects.toThrow(ValidationError);
+      await expect(registry.get("executor").run(input("q"))).rejects.toThrow(
+        AllProvidersFailedError,
+      );
     }
   });
 
@@ -428,5 +448,136 @@ describe("saída do modelo é não confiável", () => {
     });
     expect(res.approvalId).toBe("a".repeat(64));
     expect(res.proposal.action).toBe("transfer");
+  });
+});
+
+describe("limites das saídas de Predictor e Risk", () => {
+  const scenario = (over: Record<string, unknown> = {}) => ({
+    name: "base",
+    horizonMonths: 12,
+    assumptions: ["a"],
+    projectedNetFlowBrl: "100.00",
+    confidence: 0.5,
+    ...over,
+  });
+  const forecast = (over: Record<string, unknown> = {}) => ({
+    scenarios: [scenario()],
+    narrative: "estimativa com premissas",
+    ...over,
+  });
+  const risk = (over: Record<string, unknown> = {}) => ({
+    driftPct: 1,
+    valueAtRiskBrl: "10.00",
+    topCorrelations: [],
+    stressFindings: [],
+    rebalanceSuggestions: [],
+    ...over,
+  });
+
+  function run(key: "predictor" | "risk", reply: object) {
+    const s = setup();
+    const reg = new MockResponderRegistry();
+    reg.register(key, () => reply);
+    const factory = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
+    return new AgentRegistry(factory, s.inbox as never, s.logger).get(key).run(input("q"));
+  }
+
+  const str = (n: number) => "x".repeat(n);
+  const list = (n: number) => Array.from({ length: n }, () => "i");
+
+  const okForecasts: [string, object][] = [
+    [
+      "limites máximos",
+      forecast({
+        scenarios: Array.from({ length: 6 }, () =>
+          scenario({ name: str(500), assumptions: Array.from({ length: 20 }, () => str(500)) }),
+        ),
+        narrative: str(5000),
+      }),
+    ],
+    [
+      "valor máximo e negativo",
+      forecast({
+        scenarios: [
+          scenario({ projectedNetFlowBrl: "9999999999999999.99" }),
+          scenario({ projectedNetFlowBrl: "-9999999999999999.99" }),
+        ],
+      }),
+    ],
+  ];
+  const badForecasts: [string, object][] = [
+    ["7 cenários", forecast({ scenarios: Array.from({ length: 7 }, () => scenario()) })],
+    ["narrativa 5001", forecast({ narrative: str(5001) })],
+    ["nome 501", forecast({ scenarios: [scenario({ name: str(501) })] })],
+    ["premissa 501", forecast({ scenarios: [scenario({ assumptions: [str(501)] })] })],
+    ["21 premissas", forecast({ scenarios: [scenario({ assumptions: list(21) })] })],
+  ];
+  const okRisks: [string, object][] = [
+    [
+      "limites máximos",
+      risk({
+        driftPct: -1000,
+        valueAtRiskBrl: "9999999999999999.99",
+        topCorrelations: Array.from({ length: 20 }, () => str(500)),
+        stressFindings: Array.from({ length: 20 }, () => str(500)),
+        rebalanceSuggestions: Array.from({ length: 20 }, () => str(500)),
+      }),
+    ],
+    ["VaR zero", risk({ valueAtRiskBrl: "0.00" })],
+  ];
+  const badRisks: [string, object][] = [
+    ["drift 1000.01", risk({ driftPct: 1000.01 })],
+    ["drift -1000.01", risk({ driftPct: -1000.01 })],
+    ["VaR negativo", risk({ valueAtRiskBrl: "-0.01" })],
+    ["21 correlações", risk({ topCorrelations: list(21) })],
+    ["21 stress", risk({ stressFindings: list(21) })],
+    ["21 sugestões", risk({ rebalanceSuggestions: list(21) })],
+    ["sugestão 501", risk({ rebalanceSuggestions: [str(501)] })],
+    ["correlação 501", risk({ topCorrelations: [str(501)] })],
+    ["stress 501", risk({ stressFindings: [str(501)] })],
+  ];
+
+  it.each(okForecasts)("predictor aceita %s", async (_n, reply) => {
+    await expect(run("predictor", reply)).resolves.toBeTypeOf("object");
+  });
+  it.each(badForecasts)("predictor recusa %s", async (_n, reply) => {
+    await expect(run("predictor", reply)).rejects.toThrow(AllProvidersFailedError);
+  });
+  it.each(okRisks)("risk aceita %s", async (_n, reply) => {
+    await expect(run("risk", reply)).resolves.toBeTypeOf("object");
+  });
+  it.each(badRisks)("risk recusa %s", async (_n, reply) => {
+    await expect(run("risk", reply)).rejects.toThrow(AllProvidersFailedError);
+  });
+
+  it("drift não finito não passa (schema ou limite)", async () => {
+    for (const driftPct of [Number.POSITIVE_INFINITY, Number.NaN]) {
+      await expect(run("risk", risk({ driftPct }))).rejects.toThrow();
+    }
+  });
+
+  it("checkMoney recusa >= 1e16 (17 dígitos) e aceita 16 dígitos", () => {
+    expect(() => checkMoney("99999999999999999.00", { nonNegative: false })).toThrow(
+      AllProvidersFailedError,
+    );
+    expect(() => checkMoney("9999999999999999.99", { nonNegative: true })).not.toThrow();
+    expect(() => checkMoney("-0.01", { nonNegative: true })).toThrow(AllProvidersFailedError);
+  });
+
+  it("executor recusa valueBrl >= 1e16 e aceita o máximo", async () => {
+    const mk = (valueBrl: string) => {
+      const reg = new MockResponderRegistry();
+      reg.register("executor", () => ({
+        action: "create_alert",
+        payload: {},
+        valueBrl,
+        rationale: "r",
+      }));
+      const s = setup();
+      const f = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
+      return new AgentRegistry(f, s.inbox as never, s.logger).get("executor").run(input("q"));
+    };
+    await expect(mk("9999999999999999.99")).resolves.toBeTypeOf("object");
+    await expect(mk("99999999999999999.00")).rejects.toThrow();
   });
 });

@@ -6,14 +6,16 @@
  *
  * A saída do modelo é não confiável: além do schema (`ActionProposalSchema`, com `MoneySchema` em
  * `valueBrl`), checamos nome da ação (1 a 128), valor não negativo e, para `place_trade`, o
- * formato do payload. Falhou: `ValidationError` de mensagem fixa (sem eco da saída do modelo).
+ * formato do payload. Falhou: `AllProvidersFailedError` (mensagem fixa, sem eco da saída do
+ * modelo), o mesmo contrato das demais saídas ruins do modelo.
  */
 import { type ActionProposal, ActionProposalSchema, QuantitySchema } from "@carina/shared";
 import { z } from "zod";
-import { ValidationError } from "../../core/errors/domain-errors.js";
+import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
 import type { InboxService } from "../inbox/inbox.service.js";
 import type { ModelFactory } from "../llm/model-factory.js";
 import { type AgentInput, type AgentLogger, LlmAgent } from "./agent.js";
+import { checkMoney } from "./output-limits.js";
 import { PROMPTS } from "./prompts.js";
 
 export const MAX_ACTION_CHARS = 128;
@@ -31,12 +33,12 @@ const PlaceTradePayloadSchema = z
   })
   .passthrough();
 
-const invalid = (): ValidationError => new ValidationError("Proposta de ação inválida");
+const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
 
 export function refineProposal(p: ActionProposal): ActionProposal {
   const action = p.action.trim();
   if (action.length === 0 || action.length > MAX_ACTION_CHARS) throw invalid();
-  if (p.valueBrl.startsWith("-")) throw invalid();
+  checkMoney(p.valueBrl, { nonNegative: true });
   if (action === "place_trade" && !PlaceTradePayloadSchema.safeParse(p.payload).success) {
     throw invalid();
   }

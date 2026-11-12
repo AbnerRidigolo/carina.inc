@@ -57,10 +57,10 @@ const quantity = (d: Prisma.Decimal): string => d.toFixed();
  * Erro da classe 22 do SQLSTATE (data exception: data inválida, número fora da faixa, byte
  * inválido como o NUL em texto) = dado do lote que o banco não aceita → 422, não 500.
  */
-function mapDataException(err: unknown): never {
+function mapDataException(err: unknown, what = "O lote"): never {
   if (sqlState(err)?.startsWith("22")) {
     throw new ValidationError(
-      "O lote tem um valor que o banco não aceita (data, número ou texto inválido)",
+      `${what} tem um valor que o banco não aceita (data, número ou texto inválido)`,
     );
   }
   throw err;
@@ -174,21 +174,23 @@ export class IngestionRepository {
     clientId: string,
     q: { after?: PositionCursor; take: number },
   ): Promise<Page<NormalizedPosition, PositionCursor>> {
-    const rows = await this.db.client.position.findMany({
-      where: {
-        clientId,
-        ...(q.after
-          ? {
-              OR: [
-                { externalId: { gt: q.after.externalId } },
-                { externalId: q.after.externalId, source: { gt: q.after.source } },
-              ],
-            }
-          : {}),
-      },
-      orderBy: [{ externalId: "asc" }, { source: "asc" }],
-      take: q.take + 1,
-    });
+    const rows = await this.db.client.position
+      .findMany({
+        where: {
+          clientId,
+          ...(q.after
+            ? {
+                OR: [
+                  { externalId: { gt: q.after.externalId } },
+                  { externalId: q.after.externalId, source: { gt: q.after.source } },
+                ],
+              }
+            : {}),
+        },
+        orderBy: [{ externalId: "asc" }, { source: "asc" }],
+        take: q.take + 1,
+      })
+      .catch((err: unknown) => mapDataException(err, "A consulta"));
     const pageRows = rows.slice(0, q.take);
     const lastRow = pageRows.at(-1);
     return {
@@ -221,31 +223,33 @@ export class IngestionRepository {
       ...(q.to !== undefined ? { lte: startOfDay(q.to) } : {}),
     };
     const hasRange = q.from !== undefined || q.to !== undefined;
-    const rows = await this.db.client.transaction.findMany({
-      where: {
-        clientId,
-        AND: [
-          ...(hasRange ? [{ date: range }] : []),
-          ...(q.after
-            ? [
-                {
-                  OR: [
-                    { date: { lt: startOfDay(q.after.date) } },
-                    { date: startOfDay(q.after.date), externalId: { gt: q.after.externalId } },
-                    {
-                      date: startOfDay(q.after.date),
-                      externalId: q.after.externalId,
-                      source: { gt: q.after.source },
-                    },
-                  ],
-                },
-              ]
-            : []),
-        ],
-      },
-      orderBy: [{ date: "desc" }, { externalId: "asc" }, { source: "asc" }],
-      take: q.take + 1,
-    });
+    const rows = await this.db.client.transaction
+      .findMany({
+        where: {
+          clientId,
+          AND: [
+            ...(hasRange ? [{ date: range }] : []),
+            ...(q.after
+              ? [
+                  {
+                    OR: [
+                      { date: { lt: startOfDay(q.after.date) } },
+                      { date: startOfDay(q.after.date), externalId: { gt: q.after.externalId } },
+                      {
+                        date: startOfDay(q.after.date),
+                        externalId: q.after.externalId,
+                        source: { gt: q.after.source },
+                      },
+                    ],
+                  },
+                ]
+              : []),
+          ],
+        },
+        orderBy: [{ date: "desc" }, { externalId: "asc" }, { source: "asc" }],
+        take: q.take + 1,
+      })
+      .catch((err: unknown) => mapDataException(err, "A consulta"));
     const pageRows = rows.slice(0, q.take);
     const lastRow = pageRows.at(-1);
     return {

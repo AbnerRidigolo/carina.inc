@@ -542,6 +542,51 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
         expect((await page("?limit=1000")).positions).toHaveLength(2);
       });
 
+      it("cursor válido com externalId de 128 caracteres multibyte é aceito (200)", async () => {
+        await seed(1);
+        const after = Buffer.from(JSON.stringify(["😀".repeat(128), "api"])).toString("base64url");
+        expect((await page(`?after=${after}`)).positions).toEqual([]);
+      });
+
+      describe("cursor forjado → 422 (nunca 500)", () => {
+        const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64url");
+        const cursorOf = (value: unknown) => b64(JSON.stringify(value));
+        const cases: [string, string][] = [
+          ["NUL no externalId", cursorOf(["a\u0000b", "api"])],
+          ["NUL na source", cursorOf(["a", "api\u0000"])],
+          ["surrogate solto no externalId", cursorOf(["\ud800", "api"])],
+          ["quebra de linha no externalId", cursorOf(["a\nb", "api"])],
+          ["caractere de formatação (zero-width) no externalId", cursorOf(["a​b", "api"])],
+          ["externalId vazio", cursorOf(["", "api"])],
+          ["externalId com 129 caracteres", cursorOf(["x".repeat(129), "api"])],
+          ["source fora do enum", cursorOf(["a", "x"])],
+          ["source longa", cursorOf(["a", "api".repeat(100)])],
+          ["base64url de texto que não é JSON", b64("isto não é json")],
+          ["JSON de objeto", cursorOf({ externalId: "a", source: "api" })],
+          ["JSON de número", cursorOf(7)],
+          ["array com 1 elemento", cursorOf(["a"])],
+          ["array com 3 elementos", cursorOf(["a", "api", "x"])],
+          ["elementos que não são texto", cursorOf([1, 2])],
+          ["null", cursorOf(null)],
+        ];
+
+        it.each(cases)("%s", async (_name, cursor) => {
+          await seed(3);
+          const res = await get(
+            `/api/clients/c1/positions?after=${encodeURIComponent(cursor)}`,
+            A.keys.chat,
+          );
+          expectProblem(res, 422);
+          expect(res.text).not.toMatch(/22021|invalid byte sequence|prisma/i);
+        });
+
+        it("um cursor válido montado à mão (externalId e source do enum) funciona", async () => {
+          await seed(3);
+          const p = await page(`?after=${encodeURIComponent(cursorOf(["p0000", "api"]))}`);
+          expect(p.positions.map((x) => x.externalId)).toEqual(["p0001", "p0002"]);
+        });
+      });
+
       it("cliente inexistente ou de outro tenant → 404, também com after", async () => {
         await seed(2);
         const cursor = (await page("?limit=1")).nextCursor as string;

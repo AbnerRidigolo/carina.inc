@@ -24,7 +24,7 @@ import {
   type PositionCursor,
   type TransactionCursor,
 } from "./ingestion.repository.js";
-import type { Source } from "./provider.js";
+import { SOURCES, type Source } from "./provider.js";
 
 export const MAX_BATCH_ITEMS = 1000;
 export const DEFAULT_PAGE_LIMIT = 100;
@@ -93,6 +93,8 @@ function assertRange(from: string | undefined, to: string | undefined): void {
   }
 }
 
+const EXTERNAL_ID_RE = /^[^\p{C}]{1,128}$/u;
+
 /** Cursor opaco da paginação de posições: base64url de `[externalId, source]`. */
 function encodeCursor(c: PositionCursor): string {
   return Buffer.from(JSON.stringify([c.externalId, c.source]), "utf8").toString("base64url");
@@ -100,7 +102,7 @@ function encodeCursor(c: PositionCursor): string {
 
 function decodeCursor(raw: string): PositionCursor {
   const invalid = () => new ValidationError("after não é um cursor válido");
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(raw)) throw invalid();
+  if (!/^[A-Za-z0-9_-]{1,1024}$/.test(raw)) throw invalid();
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
@@ -115,7 +117,14 @@ function decodeCursor(raw: string): PositionCursor {
   ) {
     throw invalid();
   }
-  return { externalId: parsed[0], source: parsed[1] };
+  const [externalId, source] = parsed as [string, string];
+  // Mesma regra do `externalId` dos contratos e do cliente (1..128, sem \p{C}: NUL, controle,
+  // formatação, surrogate solto) e `source` só do enum: o cursor é entrada de quem chama e chega ao
+  // SQL como parâmetro; o banco recusa NUL em texto (22021), o que viraria 500.
+  if (!EXTERNAL_ID_RE.test(externalId) || !(SOURCES as readonly string[]).includes(source)) {
+    throw invalid();
+  }
+  return { externalId, source };
 }
 
 /**

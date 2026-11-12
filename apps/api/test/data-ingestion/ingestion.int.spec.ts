@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { UnauthenticatedError, ValidationError } from "../../src/core/errors/domain-errors.js";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
+import { IngestionRepository } from "../../src/modules/data-ingestion/ingestion.repository.js";
 import { IngestionService } from "../../src/modules/data-ingestion/ingestion.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql } from "../setup/db.js";
@@ -160,6 +161,123 @@ describe("IngestionService: iteradores por id interno (Sync)", () => {
       expect(() =>
         svc.iterateTransactions(aClient, { from: "2026-03-01", to: "2026-02-01" }),
       ).toThrow(ValidationError);
+    });
+  });
+
+  describe("keyset de transações com a mesma data e o mesmo externalId em fontes diferentes", () => {
+    // Ordem esperada: date desc, externalId asc, source asc (api < import < synthetic).
+    // A descrição de cada linha é a fonte, para identificá-la na visão (que não expõe `source`).
+    const rows: [date: string, externalId: string, source: string][] = [
+      ["2026-05-02", "t1", "synthetic"],
+      ["2026-05-02", "t1", "api"],
+      ["2026-05-02", "t1", "import"],
+      ["2026-05-02", "t0", "import"],
+      ["2026-05-02", "t2", "api"],
+      ["2026-05-01", "t5", "api"],
+      ["2026-05-01", "t5", "synthetic"],
+      ["2026-05-03", "t9", "import"],
+    ];
+    const expected = [...rows]
+      .sort(
+        (a, b) =>
+          (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0) ||
+          (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) ||
+          (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0),
+      )
+      .map(([date, externalId, source]) => `${date}|${externalId}|${source}`);
+    let client: string;
+
+    beforeAll(async () => {
+      client = await insertClient(A.tenantId, "mesma-data");
+      for (const [date, externalId, source] of rows) {
+        await migratorSql(
+          `INSERT INTO "transaction" (tenant_id, client_id, source, external_id, institution,
+             account, date, description, amount_brl, kind)
+           VALUES ($1, $2, $3, $4, 'Itaú', 'cc-1', $5::date, $3, -1, 'debit')`,
+          [A.tenantId, client, source, externalId, date],
+          { tenantId: A.tenantId },
+        );
+      }
+    });
+
+    it.each([1, 2, 3, 4, 1000])(
+      "pageSize %i: nenhuma linha perdida ou repetida, na ordem exata",
+      async (pageSize) => {
+        const pages = await asTenant(A.tenantId, () =>
+          collect(svc.iterateTransactions(client, { pageSize })),
+        );
+        expect(pages.every((p) => p.length <= pageSize)).toBe(true);
+        expect(pages.flat().map((x) => `${x.date}|${x.externalId}|${x.description}`)).toEqual(
+          expected,
+        );
+      },
+    );
+  });
+
+  describe("consumo assíncrono entre páginas", () => {
+    it("o TenantContext continua valendo na página seguinte depois de aguardar outro trabalho", async () => {
+      const total = await asTenant(A.tenantId, async () => {
+        let n = 0;
+        for await (const page of svc.iteratePositions(aClient, { pageSize: 700 })) {
+          await new Promise((resolve) => setTimeout(resolve, 15));
+          n += page.length;
+        }
+        return n;
+      });
+      expect(total).toBe(N + SYNTHETIC_DUPLICATES);
+    });
+
+    it("duas iterações concorrentes de tenants diferentes não misturam dados", async () => {
+      const count = (tenantId: string, clientId: string) =>
+        asTenant(tenantId, async () => {
+          let n = 0;
+          for await (const page of svc.iterateTransactions(clientId, { pageSize: 10 })) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            n += page.length;
+          }
+          return n;
+        });
+      const [a, b, aSeesB] = await Promise.all([
+        count(A.tenantId, aClient),
+        count(B.tenantId, bClient),
+        count(A.tenantId, bClient),
+      ]);
+      expect(a).toBe(N);
+      expect(b).toBe(30);
+      expect(aSeesB).toBe(0);
+    });
+  });
+
+  describe("leituras da página: erro de dado do banco vira 422 (defesa em profundidade)", () => {
+    it("cursor com NUL direto no repositório → ValidationError, não erro cru do banco", async () => {
+      const repo = t.app.get(IngestionRepository);
+      await asTenant(A.tenantId, async () => {
+        await expect(
+          TenantContext.withClient(aClient, () =>
+            repo.positionsPage(aClient, {
+              take: 5,
+              after: { externalId: "a\u0000b", source: "api" },
+            }),
+          ),
+        ).rejects.toBeInstanceOf(ValidationError);
+        await expect(
+          TenantContext.withClient(aClient, () =>
+            repo.transactionsPage(aClient, {
+              take: 5,
+              after: { date: "2026-01-01", externalId: "a\u0000b", source: "api" },
+            }),
+          ),
+        ).rejects.toBeInstanceOf(ValidationError);
+        // Data que o banco recusa (ano 0000) no cursor interno também.
+        await expect(
+          TenantContext.withClient(aClient, () =>
+            repo.transactionsPage(aClient, {
+              take: 5,
+              after: { date: "0000-01-01", externalId: "a", source: "api" },
+            }),
+          ),
+        ).rejects.toBeInstanceOf(ValidationError);
+      });
     });
   });
 

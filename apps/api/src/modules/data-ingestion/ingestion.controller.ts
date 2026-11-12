@@ -28,7 +28,7 @@ const LimitSchema = z
 /** `?limit=` e `?after=` (o `nextCursor` da página anterior; a validade do cursor é do serviço). */
 export const PositionsQuerySchema = z.object({
   limit: LimitSchema,
-  after: z.string().min(1).max(512).optional(),
+  after: z.string().min(1).max(1024).optional(),
 });
 type PositionsQuery = z.output<typeof PositionsQuerySchema>;
 

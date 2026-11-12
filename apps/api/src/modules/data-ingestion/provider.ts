@@ -1,7 +1,8 @@
 import type { NormalizedPosition, NormalizedTransaction } from "@carina/shared";
 
 /** Origem de um dado do cliente final (coluna `source` de `position` e `transaction`). */
-export type Source = "api" | "import" | "synthetic";
+export const SOURCES = ["api", "import", "synthetic"] as const;
+export type Source = (typeof SOURCES)[number];
 
 /**
  * Fonte de posições e transações de um cliente final (spec §6.4). Nenhum consumidor vê o formato

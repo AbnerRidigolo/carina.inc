@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ExternalIdSchema,
   NormalizedPositionSchema,
   NormalizedTransactionSchema,
   PositionBatchSchema,
@@ -105,5 +106,59 @@ describe("StreamEvent", () => {
     expect(ev({ eventId: "x", type: "data.ingested", source: "api" })).toBe(false);
     expect(ev({ type: "approval.executed", approvalId: "a", status: "ok" })).toBe(false);
     expect(ev({ type: "zzz" })).toBe(false);
+  });
+});
+
+describe("ExternalIdSchema", () => {
+  const ok = (v: string) => ExternalIdSchema.safeParse(v).success;
+
+  it("aceita ASCII com ponto, hífen, dois-pontos, barra e espaço", () => {
+    for (const id of ["p1", "a.b-c_d", "acc:123/456", "com espaço", "X".repeat(128)]) {
+      expect(ok(id), id).toBe(true);
+    }
+  });
+
+  it("aceita letras acentuadas, outros alfabetos e emoji sem ZWJ", () => {
+    for (const id of ["ação-é", "Çãõ", "日本語", "😀", "👍🏽", "❤\uFE0F", "🇧🇷"]) {
+      expect(ok(id), id).toBe(true);
+    }
+  });
+
+  it("conta caracteres (pontos de código): 128 emoji passam, 129 não", () => {
+    expect(ok("😀".repeat(128))).toBe(true);
+    expect(ok("😀".repeat(129))).toBe(false);
+  });
+
+  it.each([
+    ["vazio", ""],
+    ["129 caracteres", "x".repeat(129)],
+    ["NUL", "a\u0000b"],
+    ["TAB", "a\tb"],
+    ["quebra de linha", "a\nb"],
+    ["retorno de carro", "a\rb"],
+    ["DEL", "a\u007fb"],
+    ["controle C1", "a\u0085b"],
+    ["ZWJ (emoji de família)", "👨\u200d👩\u200d👧"],
+    ["zero-width space", "a\u200bb"],
+    ["hífen suave", "a\u00adb"],
+    ["BOM", "\ufeffa"],
+    ["marca bidi (RLM)", "a\u200fb"],
+    ["override bidi (RLO)", "a\u202eb"],
+    ["uso privado", "a\ue000b"],
+    ["não atribuído", "a\u0378b"],
+    ["surrogate solto (alto)", "a\ud800b"],
+    ["surrogate solto (baixo)", "\udc00"],
+  ])("rejeita %s", (_name, id) => {
+    expect(ok(id)).toBe(false);
+  });
+
+  it("vale para posições e transações, e o caminho do erro cita items.N.externalId", () => {
+    expect(pos({ externalId: "a\tb" })).toBe(false);
+    expect(tx({ externalId: "a\u200db" })).toBe(false);
+    const r = PositionBatchSchema.safeParse({
+      items: [validPosition, { ...validPosition, externalId: "a\nb" }],
+    });
+    expect(r.success).toBe(false);
+    expect(r.error?.issues[0]?.path.join(".")).toBe("items.1.externalId");
   });
 });

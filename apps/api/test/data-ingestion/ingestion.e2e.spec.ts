@@ -548,6 +548,73 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
         expect((await page(`?after=${after}`)).positions).toEqual([]);
       });
 
+      it("ida e volta: toda externalId gravável é paginável (150 chaves de classes variadas, limit=40)", async () => {
+        const prefixes = [
+          "ação ",
+          "x:",
+          "😀",
+          "é.",
+          "a b",
+          "日本",
+          "👍🏽-",
+          "❤️",
+          "Ünï/",
+          "id_",
+          "1.2-3",
+        ];
+        const allIds = Array.from(
+          { length: 150 },
+          (_, i) => `${prefixes[i % prefixes.length]}${String(i).padStart(3, "0")}`,
+        );
+        await post("/api/clients/c1/positions", A.keys.ingest, {
+          items: allIds.map((id) => pos(id, { valueBrl: "1.00" })),
+        }).expect(201);
+
+        // A ordem é a do banco (collation do Postgres), a mesma do ORDER BY da paginação.
+        const dbOrder = (
+          await migratorSql<{ external_id: string }>(
+            `SELECT external_id FROM position ORDER BY external_id, source`,
+            [],
+            { tenantId: A.tenantId },
+          )
+        ).map((r) => r.external_id);
+        expect(new Set(dbOrder)).toEqual(new Set(allIds));
+
+        const seen: string[] = [];
+        let cursor: string | null = null;
+        let pages = 0;
+        do {
+          const q: string = `?limit=40${cursor ? `&after=${encodeURIComponent(cursor)}` : ""}`;
+          const p: Page = await page(q); // page() exige 200: nenhum 422 no meio do caminho
+          seen.push(...p.positions.map((x) => x.externalId));
+          cursor = p.nextCursor;
+          pages++;
+        } while (cursor);
+        expect(pages).toBe(4);
+        expect(seen).toEqual(dbOrder);
+      });
+
+      it("externalId com TAB, ZWJ, hífen suave ou surrogate solto → 422 citando items.N.externalId, nada gravado", async () => {
+        const bad = ["a\tb", "👨‍👩‍👧", "a­b", "a\ud800b", "a\nb", "﻿a", "a‏b"];
+        for (const [n, id] of bad.entries()) {
+          const items = [pos("ok1"), pos("ok2"), ...Array.from({ length: n }, () => pos("ok3"))];
+          items.push(pos(id));
+          const res = await post("/api/clients/c1/positions", A.keys.ingest, { items });
+          const problem = expectProblem(res, 422);
+          expect(problem.detail, JSON.stringify(id)).toContain(
+            `items.${items.length - 1}.externalId`,
+          );
+          const tx = await post("/api/clients/c1/transactions", A.keys.ingest, {
+            items: [txn("t1"), txn(id)],
+          });
+          expect(expectProblem(tx, 422).detail).toContain("items.1.externalId");
+        }
+        expect(await countRows("position", A.tenantId)).toBe(0);
+        expect(await countRows("transaction", A.tenantId)).toBe(0);
+        expect(await usageRows(A.tenantId)).toEqual([]);
+        expect(await jobEvents()).toEqual([]);
+      });
+
       describe("cursor forjado → 422 (nunca 500)", () => {
         const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64url");
         const cursorOf = (value: unknown) => b64(JSON.stringify(value));

@@ -9,7 +9,12 @@
  * logado e o lote continua aceito (o worker de Sync pode refazer a sincronização completa).
  */
 import { randomUUID } from "node:crypto";
-import type { NormalizedPosition, NormalizedTransaction, WorkType } from "@carina/shared";
+import {
+  ExternalIdSchema,
+  type NormalizedPosition,
+  type NormalizedTransaction,
+  type WorkType,
+} from "@carina/shared";
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { TenantContext } from "../../core/context/tenant-context.js";
 import { TenantPrismaService } from "../../core/database/tenant-prisma.service.js";
@@ -93,8 +98,6 @@ function assertRange(from: string | undefined, to: string | undefined): void {
   }
 }
 
-const EXTERNAL_ID_RE = /^[^\p{C}]{1,128}$/u;
-
 /** Cursor opaco da paginação de posições: base64url de `[externalId, source]`. */
 function encodeCursor(c: PositionCursor): string {
   return Buffer.from(JSON.stringify([c.externalId, c.source]), "utf8").toString("base64url");
@@ -118,10 +121,13 @@ function decodeCursor(raw: string): PositionCursor {
     throw invalid();
   }
   const [externalId, source] = parsed as [string, string];
-  // Mesma regra do `externalId` dos contratos e do cliente (1..128, sem \p{C}: NUL, controle,
-  // formatação, surrogate solto) e `source` só do enum: o cursor é entrada de quem chama e chega ao
-  // SQL como parâmetro; o banco recusa NUL em texto (22021), o que viraria 500.
-  if (!EXTERNAL_ID_RE.test(externalId) || !(SOURCES as readonly string[]).includes(source)) {
+  // O cursor é entrada de quem chama e chega ao SQL como parâmetro (o banco recusa NUL em texto,
+  // 22021, o que viraria 500). `externalId` segue o MESMO schema do contrato de ingestão, então
+  // toda chave gravável é paginável; `source` só do enum.
+  if (
+    !ExternalIdSchema.safeParse(externalId).success ||
+    !(SOURCES as readonly string[]).includes(source)
+  ) {
     throw invalid();
   }
   return { externalId, source };

@@ -21,6 +21,12 @@ export const PRICE_BRL: Record<WorkType, string> = {
   backtest: "7.50",
 };
 
+/**
+ * Maior valor monetário que as colunas `numeric(18,2)` de `usage_record` guardam (16 dígitos
+ * inteiros e 2 decimais), o mesmo formato máximo que o `MoneySchema` de @carina/shared aceita.
+ */
+export const MAX_MONEY_BRL: Decimal = new Decimal("9999999999999999.99");
+
 /** Agentes cuja participação classifica a resolução como otimização. */
 const OPTIMIZATION_AGENTS: ReadonlySet<string> = new Set(["tax", "tax_optimizer", "rebalancer"]);
 

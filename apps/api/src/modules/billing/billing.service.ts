@@ -16,7 +16,7 @@ import { ValidationError } from "../../core/errors/domain-errors.js";
 import { Prisma, type UsageRecord } from "../../generated/prisma/client.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { monthKey, monthRange } from "../limits/month.js";
-import { computeExecutionPrice, PRICE_BRL } from "./pricing.js";
+import { computeExecutionPrice, MAX_MONEY_BRL, PRICE_BRL } from "./pricing.js";
 
 const Decimal = Prisma.Decimal;
 
@@ -33,6 +33,15 @@ export interface RecordInput {
   durationMs: number;
 }
 
+/** Garante que `value` cabe em `numeric(18,2)`; o erro sai antes de qualquer SQL. */
+function assertFitsColumn(field: string, value: Prisma.Decimal): void {
+  if (!value.isFinite() || value.abs().gt(MAX_MONEY_BRL)) {
+    throw new ValidationError(
+      `${field} fora do intervalo permitido (no máximo ${MAX_MONEY_BRL.toFixed(2)} BRL)`,
+    );
+  }
+}
+
 const money = (d: Prisma.Decimal): string => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2);
 
 @Injectable()
@@ -47,11 +56,18 @@ export class BillingService {
   async record(input: RecordInput): Promise<UsageRecordRow> {
     // Sem contexto de tenant rejeita (UnauthenticatedError) sem tocar no banco.
     const { tenantId } = TenantContext.current();
-    const valueBrl = (input.valueBrl ?? new Decimal(0)).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+    const rawValue = input.valueBrl ?? new Decimal(0);
+    // NaN/Infinity e valores acima da coluna viram 422 aqui, antes do INSERT: um erro do banco
+    // (inclusive dentro de `tx`) abortaria a transação do chamador, auditoria junto.
+    assertFitsColumn("valueBrl", rawValue);
+    const valueBrl = rawValue.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+    assertFitsColumn("valueBrl", valueBrl);
     const { priceBrl, feeBrl } =
       input.workType === "execution"
-        ? computeExecutionPrice(input.valueBrl ?? new Decimal(0), this.env.EXECUTION_FEE_PCT)
+        ? computeExecutionPrice(rawValue, this.env.EXECUTION_FEE_PCT)
         : { priceBrl: new Decimal(PRICE_BRL[input.workType]), feeBrl: new Decimal(0) };
+    assertFitsColumn("feeBrl", feeBrl);
+    assertFitsColumn("priceBrl", priceBrl);
 
     const usageRecord = input.tx ? input.tx.usageRecord : this.db.client.usageRecord;
     return usageRecord.create({

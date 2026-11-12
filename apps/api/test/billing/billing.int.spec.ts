@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { UsageSummarySchema } from "@carina/shared";
+import { MoneySchema, UsageSummarySchema } from "@carina/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { PrismaService } from "../../src/core/database/prisma.service.js";
@@ -7,6 +7,7 @@ import { TenantPrismaService } from "../../src/core/database/tenant-prisma.servi
 import { ValidationError } from "../../src/core/errors/domain-errors.js";
 import { Prisma } from "../../src/generated/prisma/client.js";
 import { BillingService } from "../../src/modules/billing/billing.service.js";
+import { MAX_MONEY_BRL } from "../../src/modules/billing/pricing.js";
 import { monthKey } from "../../src/modules/limits/month.js";
 import { appUrl, migratorSql } from "../setup/db.js";
 
@@ -163,6 +164,112 @@ describe("BillingService (carina_app, sob RLS)", () => {
       }),
     );
     expect(await countRecords(tenantA)).toBe(before + 1);
+  });
+
+  describe("limite de numeric(18,2)", () => {
+    const tenantD = randomUUID();
+    const inD = <T>(fn: () => Promise<T>) => inTenant(tenantD, fn);
+
+    beforeAll(async () => {
+      await migratorSql(`INSERT INTO tenant (id, name, plan) VALUES ($1, 'D', 'pro')`, [tenantD]);
+    });
+
+    it("MAX_MONEY_BRL é o maior valor de numeric(18,2) e passa no MoneySchema", () => {
+      expect(MAX_MONEY_BRL.toFixed(2)).toBe("9999999999999999.99");
+      expect(MoneySchema.safeParse(MAX_MONEY_BRL.toFixed(2)).success).toBe(true);
+    });
+
+    it.each([
+      ["1e16", new Decimal(1e16)],
+      ["1e300", new Decimal(1e300)],
+      ['"99999999999999999999"', new Decimal("99999999999999999999")],
+      ["10000000000000000.00", new Decimal("10000000000000000.00")],
+      ["9999999999999999.995 (arredonda para 1e16)", new Decimal("9999999999999999.995")],
+      ["-1e16", new Decimal("-1e16")],
+      ["NaN", new Decimal(Number.NaN)],
+      ["Infinity", new Decimal(Number.POSITIVE_INFINITY)],
+      ["-Infinity", new Decimal(Number.NEGATIVE_INFINITY)],
+    ])("valueBrl %s rejeita com ValidationError e não grava", async (_label, valueBrl) => {
+      for (const workType of ["query", "execution"] as const) {
+        await expect(
+          inD(() => billing.record({ workType, agents: [], valueBrl, durationMs: 1 })),
+        ).rejects.toBeInstanceOf(ValidationError);
+      }
+      expect(await countRecords(tenantD)).toBe(0);
+    });
+
+    it("com tx, o erro não envenena a transação do chamador: a gravação seguinte confirma", async () => {
+      await inD(() =>
+        db.tx(async (tx) => {
+          await expect(
+            billing.record({
+              tx,
+              workType: "execution",
+              agents: [],
+              valueBrl: new Decimal(1e300),
+              durationMs: 1,
+            }),
+          ).rejects.toBeInstanceOf(ValidationError);
+          await billing.record({ tx, workType: "query", agents: [], durationMs: 1 });
+        }),
+      );
+      expect(await countRecords(tenantD)).toBe(1);
+    });
+
+    it("o valor máximo representável ainda grava (tipo sem fee)", async () => {
+      const r = await inD(() =>
+        billing.record({
+          workType: "query",
+          agents: [],
+          valueBrl: new Decimal("9999999999999999.99"),
+          durationMs: 1,
+        }),
+      );
+      expect(r.valueBrl.toFixed(2)).toBe("9999999999999999.99");
+      expect(r.priceBrl.toFixed(2)).toBe("1.50");
+    });
+
+    it("execution no valor máximo com o fee padrão (0,5%) cabe e grava", async () => {
+      const r = await inD(() =>
+        billing.record({
+          workType: "execution",
+          agents: [],
+          valueBrl: new Decimal("9999999999999999.99"),
+          durationMs: 1,
+        }),
+      );
+      expect(r.feeBrl.toFixed(2)).toBe("50000000000000.00");
+      expect(r.priceBrl.toFixed(2)).toBe("50000000000075.00");
+    });
+
+    it("fee ou preço total acima do limite rejeitam (só com pct alto: com 0,5% é impossível)", async () => {
+      const before = await countRecords(tenantD);
+      // pct 100: fee = valor (cabe), mas 75,00 + fee passa de 9999999999999999.99.
+      const pct100 = new BillingService(db, { EXECUTION_FEE_PCT: 100 }, () => NOW);
+      await expect(
+        inD(() =>
+          pct100.record({
+            workType: "execution",
+            agents: [],
+            valueBrl: new Decimal("9999999999999999.99"),
+            durationMs: 1,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ValidationError);
+      // pct 200: o próprio fee estoura.
+      const pct200 = new BillingService(db, { EXECUTION_FEE_PCT: 200 }, () => NOW);
+      await expect(
+        inD(() =>
+          pct200.record({
+            workType: "execution",
+            agents: [],
+            valueBrl: new Decimal("9999999999999999.99"),
+            durationMs: 1,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ValidationError);
+      expect(await countRecords(tenantD)).toBe(before);
+    });
   });
 
   it("sem contexto de tenant não grava nem lê", async () => {

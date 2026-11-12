@@ -738,25 +738,78 @@ describe("Inbox (int)", () => {
       ).toEqual([]);
     });
 
-    it("uma execução que termina depois do needs_review não sobrescreve o estado (e não cobra)", async () => {
+    /** Executor lento: o job marca needs_review enquanto ele ainda roda; depois ele termina. */
+    async function lateFinish(outcome: "ok" | "erro", payloadKey: string) {
       let release!: () => void;
       const gate = new Promise<void>((r) => (release = r));
-      registry.register("place_trade", async () => {
+      const spy = vi.fn(async () => {
         await gate;
-        return { ok: true };
+        if (outcome === "erro") throw new Error("corretora recusou tarde");
+        return { orderId: "SIM-0000BEEF", status: "filled" };
       });
-      const id = await approved(A, { payload: { k: "lento" } });
-      const running = asTenantOnly(A, () => inbox.executeOnce(id)).catch((e: unknown) => e);
-      // espera o INSERT 'started'
+      registry.register("place_trade", spy);
+      const id = await approved(A, { payload: { k: payloadKey } });
+      const running = asTenantOnly(A, () => inbox.executeOnce(id));
       for (let i = 0; i < 100 && !(await exec(A, id)); i++)
         await new Promise((r) => setTimeout(r, 20));
       offset = 6 * MIN;
       await job.run();
-      expect(await exec(A, id)).toMatchObject({ status: "needs_review" });
+      expect(await exec(A, id)).toMatchObject({ status: "needs_review", result: null });
       release();
-      await running;
-      expect(await exec(A, id)).toMatchObject({ status: "needs_review" });
+      const res = await running;
+      return { id, res, spy };
+    }
+
+    it("sucesso tardio: needs_review preservado, resultado do executor gravado como evidência, sem cobrança nem reexecução", async () => {
+      const { id, res, spy } = await lateFinish("ok", "lento-ok");
+      expect(res.status).toBe("needs_review");
+      expect(res.result).toEqual({ orderId: "SIM-0000BEEF", status: "filled" });
+      expect(await exec(A, id)).toMatchObject({
+        status: "needs_review",
+        result: {
+          executorResult: { orderId: "SIM-0000BEEF", status: "filled" },
+          note: "concluiu após needs_review",
+        },
+      });
       expect(await usage(A)).toEqual([]);
+      expect(await audits(A)).toEqual([]);
+      expect((await events("inbox.events")).filter((e) => e.type === "approval.executed")).toEqual(
+        [],
+      );
+      await expect(asTenantOnly(A, () => inbox.executeOnce(id))).resolves.toEqual({
+        status: "skipped",
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // o log diz o que de fato aconteceu
+      expect(
+        logs.some(
+          (l) =>
+            typeof l.fields["msg"] === "string" &&
+            l.fields["msg"].includes("depois de needs_review") &&
+            l.fields["approvalId"] === id,
+        ),
+      ).toBe(true);
+      expect(logs.some((l) => String(l.fields["msg"]).includes("marcada needs_review"))).toBe(
+        false,
+      );
+    });
+
+    it("falha tardia: needs_review preservado, erro gravado como evidência, retorno needs_review, sem cobrança", async () => {
+      const { id, res, spy } = await lateFinish("erro", "lento-erro");
+      expect(res).toEqual({ status: "needs_review" });
+      const e = await exec(A, id);
+      expect(e).toMatchObject({
+        status: "needs_review",
+        result: { error: "corretora recusou tarde", note: "falhou após needs_review" },
+      });
+      expect(await usage(A)).toEqual([]);
+      expect((await events("inbox.events")).filter((x) => x.type === "approval.executed")).toEqual(
+        [],
+      );
+      await expect(asTenantOnly(A, () => inbox.executeOnce(id))).resolves.toEqual({
+        status: "skipped",
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
     });
 
     it("tick concorrente entre réplicas: o lock faz uma delas pular", async () => {

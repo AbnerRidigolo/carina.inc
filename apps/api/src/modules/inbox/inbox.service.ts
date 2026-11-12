@@ -92,7 +92,8 @@ export interface RequestInput {
 }
 
 export interface ExecuteResult {
-  status: "succeeded" | "failed" | "skipped";
+  /** `needs_review`: o job já tinha marcado a linha; o resultado ficou só como evidência. */
+  status: "succeeded" | "failed" | "skipped" | "needs_review";
   result?: unknown;
 }
 
@@ -411,8 +412,16 @@ export class InboxService {
         });
         return upd.count === 1;
       });
-      if (confirmed) await this.publishExecuted(tenantId, clientId, id, "failed");
-      return { status: "failed" };
+      if (confirmed) {
+        await this.publishExecuted(tenantId, clientId, id, "failed");
+        return { status: "failed" };
+      }
+      // A linha já saiu de `started` (o job a marcou needs_review): o estado real é needs_review.
+      await this.recordLateEvidence(tenantId, clientId, id, approval.action, {
+        error: errMessage(failure),
+        note: "falhou após needs_review",
+      });
+      return { status: "needs_review" };
     }
 
     // 3. Sucesso: status + cobrança + auditoria na MESMA transação.
@@ -446,6 +455,15 @@ export class InboxService {
         });
       });
     } catch (err) {
+      if (err instanceof ExecutionStateLostError) {
+        // O job já marcou needs_review enquanto o executor rodava: nada a cobrar, mas o efeito
+        // externo aconteceu, então o resultado é gravado como evidência (sem mudar o status).
+        await this.recordLateEvidence(tenantId, clientId, id, approval.action, {
+          executorResult: result ?? null,
+          note: "concluiu após needs_review",
+        });
+        return { status: "needs_review", result };
+      }
       // O efeito externo JÁ aconteceu e a transação desfez tudo: needs_review, com o resultado.
       await this.markNeedsReview(tenantId, clientId, id, approval.action, result, err);
       throw err;
@@ -453,6 +471,52 @@ export class InboxService {
 
     await this.publishExecuted(tenantId, clientId, id, "succeeded");
     return { status: "succeeded", result };
+  }
+
+  /**
+   * UPDATE só de evidência: guarda o desfecho do executor numa linha que já está `needs_review`
+   * (ou ainda `started`) e sem resultado. Não muda o status, não cobra, não audita. Só o
+   * `action` e ids vão para o log, nunca o payload.
+   */
+  private async recordLateEvidence(
+    tenantId: string,
+    clientId: string,
+    id: string,
+    action: string,
+    evidence: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const count = await this.db.tx(async (tx) => {
+        const upd = await tx.executedAction.updateMany({
+          where: {
+            approvalRequestId: id,
+            status: { in: ["started", "needs_review"] },
+            result: { equals: Prisma.DbNull },
+          },
+          data: { result: toJson(evidence) },
+        });
+        return upd.count;
+      });
+      this.logger.error({
+        msg:
+          count === 1
+            ? "Executor concluiu depois de needs_review; desfecho gravado como evidência (sem cobrança)"
+            : "Executor concluiu depois de needs_review e a linha já tem resultado; desfecho não gravado",
+        tenantId,
+        clientId,
+        approvalId: id,
+        action,
+      });
+    } catch (err) {
+      this.logger.error({
+        msg: "Executor concluiu depois de needs_review e a evidência não pôde ser gravada",
+        err,
+        tenantId,
+        clientId,
+        approvalId: id,
+        action,
+      });
+    }
   }
 
   /** Melhor esforço: se falhar, a linha segue `started` e a reconciliação a promove. */
@@ -464,25 +528,19 @@ export class InboxService {
     result: unknown,
     cause: unknown,
   ): Promise<void> {
-    this.logger.error({
-      msg: "Ação executada mas o registro do resultado falhou; marcada needs_review",
-      err: cause,
-      tenantId,
-      clientId,
-      approvalId: id,
-      action,
-    });
+    let marked = false;
     try {
-      await this.db.tx((tx) =>
-        tx.executedAction.updateMany({
+      marked = await this.db.tx(async (tx) => {
+        const upd = await tx.executedAction.updateMany({
           where: { approvalRequestId: id, status: "started" },
           data: {
             status: "needs_review",
             result: toJson({ executorResult: result ?? null, note: "efeito externo executado" }),
             finishedAt: new Date(this.clock()),
           },
-        }),
-      );
+        });
+        return upd.count === 1;
+      });
     } catch (err) {
       this.logger.error({
         msg: "Não foi possível marcar needs_review; a reconciliação fará isso",
@@ -490,6 +548,22 @@ export class InboxService {
         tenantId,
         clientId,
         approvalId: id,
+      });
+    }
+    if (marked) {
+      this.logger.error({
+        msg: "Ação executada mas o registro do resultado falhou; marcada needs_review",
+        err: cause,
+        tenantId,
+        clientId,
+        approvalId: id,
+        action,
+      });
+    } else {
+      // A linha já saiu de `started` (job) ou a marcação falhou: guarda ao menos a evidência.
+      await this.recordLateEvidence(tenantId, clientId, id, action, {
+        executorResult: result ?? null,
+        note: "concluiu após needs_review",
       });
     }
   }

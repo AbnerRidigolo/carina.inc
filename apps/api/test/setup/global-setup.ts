@@ -10,6 +10,13 @@
  * - Sem TEST_DATABASE_URL: sobe `pgvector/pgvector:pg17` via Testcontainers e faz o mesmo.
  * - Com TEST_REDIS_URL usa esse Redis; sem ele, sobe `redis:7-alpine`.
  *
+ * - TEST_DB_ICU_LOCALE (opcional, ex.: `en-US`; só vale com TEST_DATABASE_URL): cria o banco com
+ *   LOCALE_PROVIDER icu e esse ICU_LOCALE (PostgreSQL >= 15), para rodar as suítes sob uma
+ *   collation que não seja a binária C (o CI usa en_US.utf8 e ordena texto de outro jeito que
+ *   um Postgres local em C.UTF-8). Sem a variável nada muda. O caminho Testcontainers (sem
+ *   TEST_DATABASE_URL) ignora a variável. O valor é validado (letras, dígitos, `-` e `_`)
+ *   porque CREATE DATABASE não aceita parâmetros.
+ *
  * Os testes recebem TEST_DATABASE_URL_APP, TEST_DATABASE_URL_MIGRATOR e TEST_REDIS_URL por
  * `inject()` (ver test/setup/db.ts).
  */
@@ -87,12 +94,44 @@ async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Pro
   }
 }
 
-async function bootstrapDatabase(superuserUrl: string, database: string) {
+const ICU_LOCALE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
+
+/** Valida TEST_DB_ICU_LOCALE: vai direto no SQL (CREATE DATABASE não tem bind parameters). */
+export function parseIcuLocale(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if (!ICU_LOCALE_PATTERN.test(raw)) {
+    throw new Error(
+      `TEST_DB_ICU_LOCALE inválido (${JSON.stringify(raw)}): use só letras, dígitos, "-" e "_" ` +
+        "(2 a 32 caracteres), ex.: en-US.",
+    );
+  }
+  return raw;
+}
+
+async function createDatabaseSql(c: pg.Client, ident: string, icuLocale?: string) {
+  if (!icuLocale) return `CREATE DATABASE ${ident} OWNER carina_migrator`;
+  const { rows } = await c.query<{ major: number }>(
+    "SELECT current_setting('server_version_num')::int / 10000 AS major",
+  );
+  const major = rows[0]?.major ?? 0;
+  if (major < 15) {
+    throw new Error(
+      `TEST_DB_ICU_LOCALE exige PostgreSQL >= 15 (LOCALE_PROVIDER icu); o servidor é ${major}. ` +
+        "Remova a variável ou use um servidor mais novo.",
+    );
+  }
+  return (
+    `CREATE DATABASE ${ident} OWNER carina_migrator TEMPLATE template0 ENCODING 'UTF8' ` +
+    `LOCALE_PROVIDER icu ICU_LOCALE '${icuLocale}' LOCALE 'C.UTF-8'`
+  );
+}
+
+async function bootstrapDatabase(superuserUrl: string, database: string, icuLocale?: string) {
   await withClient(superuserUrl, async (c) => {
     await c.query(renderRolesSql(c, { migrator_pw: MIGRATOR_PASSWORD, app_pw: APP_PASSWORD }));
     const ident = c.escapeIdentifier(database);
     await c.query(`DROP DATABASE IF EXISTS ${ident} WITH (FORCE)`);
-    await c.query(`CREATE DATABASE ${ident} OWNER carina_migrator`);
+    await c.query(await createDatabaseSql(c, ident, icuLocale));
   });
   // Extensão não confiável: criada pelo superusuário, dentro do banco novo.
   await withClient(withDatabase(superuserUrl, database), (c) =>
@@ -134,6 +173,8 @@ export default async function setup(project: TestProject) {
 
   try {
     let superuserUrl = process.env["TEST_DATABASE_URL"];
+    // Só vale no caminho TEST_DATABASE_URL (ver o comentário no topo do arquivo).
+    const icuLocale = superuserUrl ? parseIcuLocale(process.env["TEST_DB_ICU_LOCALE"]) : undefined;
     if (!superuserUrl) {
       const { PostgreSqlContainer } = await import("@testcontainers/postgresql");
       const container = await new PostgreSqlContainer("pgvector/pgvector:pg17")
@@ -168,7 +209,7 @@ export default async function setup(project: TestProject) {
         c.query(`DROP DATABASE IF EXISTS ${c.escapeIdentifier(database)} WITH (FORCE)`),
       );
     });
-    const { migratorUrl, appUrl } = await bootstrapDatabase(admin, database);
+    const { migratorUrl, appUrl } = await bootstrapDatabase(admin, database, icuLocale);
 
     project.provide("TEST_DATABASE_URL_APP", appUrl);
     project.provide("TEST_DATABASE_URL_MIGRATOR", migratorUrl);

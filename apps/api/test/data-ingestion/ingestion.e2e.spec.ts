@@ -544,8 +544,17 @@ describe("Ingestão de dados E2E: /api/clients/:clientId/{positions,transactions
 
       it("cursor válido com externalId de 128 caracteres multibyte é aceito (200)", async () => {
         await seed(1);
-        const after = Buffer.from(JSON.stringify(["😀".repeat(128), "api"])).toString("base64url");
-        expect((await page(`?after=${after}`)).positions).toEqual([]);
+        const cursorId = "😀".repeat(128);
+        const after = Buffer.from(JSON.stringify([cursorId, "api"])).toString("base64url");
+        // O keyset é `external_id > cursor` na collation do banco: com C (binário) 'p0000' vem antes
+        // do emoji; com en_US/ICU o emoji ordena antes das letras. A expectativa sai do próprio
+        // Postgres, para valer em qualquer collation (e ainda provar que o cursor foi aplicado).
+        const [{ gt } = { gt: null }] = await migratorSql<{ gt: boolean }>(
+          "SELECT 'p0000'::text > $1::text AS gt",
+          [cursorId],
+        );
+        expect(typeof gt).toBe("boolean");
+        expect((await page(`?after=${after}`)).positions).toHaveLength(gt ? 1 : 0);
       });
 
       it("ida e volta: toda externalId gravável é paginável (150 chaves de classes variadas, limit=40)", async () => {

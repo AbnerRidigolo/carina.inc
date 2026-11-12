@@ -10,6 +10,7 @@ import { MockResponderRegistry } from "../llm/mock-models.js";
 import { createCheckpointer } from "./checkpointer.js";
 import { classifierMockResponder } from "./heuristic.js";
 import { ORCHESTRATOR_CHECKPOINTER, OrchestratorService } from "./orchestrator.service.js";
+import { ResumeWorker, resumeLoggerProvider } from "./resume.worker.js";
 
 /** Registra (idempotente) o responder do classificador no modo mock. */
 export function registerOrchestratorMockResponders(registry: MockResponderRegistry): void {
@@ -32,14 +33,18 @@ const checkpointerProvider = {
 };
 
 /**
- * Orquestrador (grafo LangGraph). Módulo de serviço, sem rotas: o ChatService (Task 20) usa
- * `stream`, e o worker de retomada (Task 19) usa `resume`. O checkpointer é o PostgresSaver no
- * schema `langgraph` (pool próprio, fechado no shutdown); testes de unidade injetam MemorySaver.
+ * Orquestrador (grafo LangGraph). Módulo de serviço, sem rotas (por isso não importa o
+ * TenancyModule/LimitsModule diretamente; o InboxModule já os traz na ordem certa): o ChatService
+ * (Task 20) usa `stream`, e o ResumeWorker (consumidor de `resume` em `jobs`, grupo `resumers`)
+ * usa `resume`; ele liga só com WORKERS_ENABLED !== "false" e para no onModuleDestroy dos
+ * providers, que o Nest chama ANTES do onModuleDestroy deste módulo (que fecha o checkpointer).
+ * O checkpointer é o PostgresSaver no schema `langgraph` (pool próprio, fechado no shutdown);
+ * testes de unidade injetam MemorySaver.
  */
 @Module({
   imports: [LlmModule, AgentsModule, KnowledgeModule, InboxModule],
-  providers: [checkpointerProvider, OrchestratorService],
-  exports: [OrchestratorService],
+  providers: [checkpointerProvider, OrchestratorService, ResumeWorker, resumeLoggerProvider],
+  exports: [OrchestratorService, ResumeWorker],
 })
 export class OrchestratorModule implements OnModuleInit, OnModuleDestroy {
   constructor(

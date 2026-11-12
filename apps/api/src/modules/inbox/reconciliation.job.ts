@@ -113,12 +113,18 @@ export class ReconciliationJob
     await this.inflight;
   }
 
-  /** Um tick completo (também chamado direto pelos testes). */
-  async run(): Promise<ReconciliationRun> {
+  /**
+   * Um tick completo (também chamado direto pelos testes). `onlyTenants` restringe o tick a esses
+   * tenants: os testes compartilham o banco e um tick com o relógio adiantado venceria (ou marcaria
+   * needs_review) as linhas de outros arquivos rodando em paralelo. O timer nunca o passa.
+   */
+  async run(opts: { onlyTenants?: readonly string[] } = {}): Promise<ReconciliationRun> {
     const lock = await this.locks.acquire(RECONCILIATION_LOCK_KEY, LOCK_TTL_MS);
     if (!lock) return { skipped: true, tenants: 0 };
     try {
-      const tenantIds = await this.db.activeTenantIds();
+      const only = opts.onlyTenants?.map((id) => id.toLowerCase());
+      const active = await this.db.activeTenantIds();
+      const tenantIds = only ? active.filter((id) => only.includes(id.toLowerCase())) : active;
       for (const tenantId of tenantIds) {
         await lock.assertHeld(); // perdeu o lock: aborta o tick (LockLostError)
         try {

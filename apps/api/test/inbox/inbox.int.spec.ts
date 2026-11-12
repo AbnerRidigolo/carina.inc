@@ -105,7 +105,14 @@ describe("Inbox (int)", () => {
     return rows.map(([, f]) => JSON.parse(f[1] as string) as StreamEvent);
   }
 
-  /** Eventos `resume` só dos tenants A e B deste teste (o job varre todos os tenants do banco). */
+  /**
+   * O job restrito aos tenants deste teste: o banco é compartilhado com outros arquivos rodando em
+   * paralelo, e um tick com o relógio adiantado venceria as pendentes (e marcaria needs_review as
+   * execuções em andamento) deles.
+   */
+  const onlyAB = () => ({ onlyTenants: [A.tenantId, B.tenantId] });
+
+  /** Eventos `resume` só dos tenants A e B deste teste. */
   const resumesAB = async () =>
     (await events("jobs")).filter(
       (e): e is Extract<StreamEvent, { type: "resume" }> =>
@@ -438,7 +445,7 @@ describe("Inbox (int)", () => {
       expect((await events("jobs")).filter((e) => e.type === "resume")).toEqual([]);
 
       offset = 3 * MIN;
-      await job.run();
+      await job.run(onlyAB());
       const resumes = await resumesAB();
       expect(resumes).toHaveLength(1);
       expect(resumes[0]).toMatchObject({ approvalId, approved: true });
@@ -679,7 +686,7 @@ describe("Inbox (int)", () => {
 
       // 6 min: started (agora) venceu os 5 min; fresh (agora+4) ainda não; stuck (>2 min) republica; pending ainda vale.
       offset = 6 * MIN;
-      await job.run();
+      await job.run(onlyAB());
       for (const p of [A, B]) {
         const o = must(out[p === A ? "A" : "B"]);
         expect(await exec(p, o.started)).toMatchObject({ status: "needs_review" });
@@ -700,7 +707,7 @@ describe("Inbox (int)", () => {
       // 25h: as pendentes vencem
       await redis.flushdb();
       offset = 25 * HOUR;
-      await job.run();
+      await job.run(onlyAB());
       for (const p of [A, B]) {
         const o = must(out[p === A ? "A" : "B"]);
         expect(await row(p, o.pending)).toMatchObject({ status: "expired" });
@@ -717,7 +724,7 @@ describe("Inbox (int)", () => {
 
       // Rodar de novo não repete nada do que já foi resolvido (expiradas e needs_review são terminais).
       await redis.flushdb();
-      await job.run();
+      await job.run(onlyAB());
       const again = (await resumesAB()).filter((e) => !e.approved);
       expect(again).toEqual([]);
       expect(spy).not.toHaveBeenCalled();
@@ -732,7 +739,7 @@ describe("Inbox (int)", () => {
       const id = await approved(A, { payload: { k: "recente" } });
       await redis.flushdb();
       offset = 90_000;
-      await job.run();
+      await job.run(onlyAB());
       expect(
         (await events("jobs")).filter((e) => e.type === "resume" && e.approvalId === id),
       ).toEqual([]);
@@ -753,7 +760,7 @@ describe("Inbox (int)", () => {
       for (let i = 0; i < 100 && !(await exec(A, id)); i++)
         await new Promise((r) => setTimeout(r, 20));
       offset = 6 * MIN;
-      await job.run();
+      await job.run(onlyAB());
       expect(await exec(A, id)).toMatchObject({ status: "needs_review", result: null });
       release();
       const res = await running;
@@ -812,10 +819,20 @@ describe("Inbox (int)", () => {
       expect(spy).toHaveBeenCalledTimes(1);
     });
 
+    it("onlyTenants restringe o tick: o tenant de fora não é tocado", async () => {
+      const a = await request(A, { payload: { k: "only-a" } });
+      const b = await request(B, { payload: { k: "only-b" } });
+      offset = 25 * HOUR;
+      await job.run({ onlyTenants: [A.tenantId.toUpperCase()] });
+      expect(await row(A, a.approvalId)).toMatchObject({ status: "expired" });
+      expect(await row(B, b.approvalId)).toMatchObject({ status: "pending" });
+      expect((await resumesAB()).map((e) => e.approvalId)).toEqual([a.approvalId]);
+    });
+
     it("tick concorrente entre réplicas: o lock faz uma delas pular", async () => {
       const id = await request(A, { payload: { k: "lock" } });
       offset = 25 * HOUR;
-      const results = await Promise.all([job.run(), job.run()]);
+      const results = await Promise.all([job.run(onlyAB()), job.run(onlyAB())]);
       expect(results.filter((r) => r.skipped)).toHaveLength(1);
       expect(
         (await events("jobs")).filter((e) => e.type === "resume" && e.approvalId === id.approvalId),

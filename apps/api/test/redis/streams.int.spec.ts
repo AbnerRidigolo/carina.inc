@@ -94,7 +94,12 @@ describe("StreamsService", () => {
     await c.stop();
     expect(calls).toBe(2);
     expect(ok).toBe(1);
-    expect(silent.error).toHaveBeenCalled();
+    // A falha do handler é registrada com o stack (R14).
+    expect(
+      silent.error.mock.calls.some(
+        (a) => String(a[0]).includes("falha transitória") && String(a[1]).includes("at "),
+      ),
+    ).toBe(true);
   });
 
   it("manda para jobs.dlq após 5 entregas", async () => {

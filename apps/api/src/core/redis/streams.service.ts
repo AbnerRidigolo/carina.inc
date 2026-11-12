@@ -53,6 +53,11 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Stack no 2º argumento (convenção do Logger do Nest), para a falha não perder a origem (R14). */
+function errStack(err: unknown): string | undefined {
+  return err instanceof Error ? err.stack : undefined;
+}
+
 @Injectable()
 export class StreamsService {
   private readonly claimIdleMs: number;
@@ -117,7 +122,7 @@ export class StreamsService {
           )) as ReadReply;
         } catch (err) {
           if (signal.aborted) break;
-          this.logger.error(`XREADGROUP em ${stream} falhou: ${errMessage(err)}`);
+          this.logger.error(`XREADGROUP em ${stream} falhou: ${errMessage(err)}`, errStack(err));
           await this.sleep(500, signal);
           continue;
         }
@@ -219,7 +224,10 @@ export class StreamsService {
             try {
               onEvent(parsed.event);
             } catch (err) {
-              this.logger.error(`Listener de tail em ${stream} falhou: ${errMessage(err)}`);
+              this.logger.error(
+                `Listener de tail em ${stream} falhou: ${errMessage(err)}`,
+                errStack(err),
+              );
             }
           }
         }
@@ -272,7 +280,7 @@ export class StreamsService {
           BATCH,
         )) as [string, RawEntry[], ...unknown[]];
       } catch (err) {
-        this.logger.error(`XAUTOCLAIM em ${stream} falhou: ${errMessage(err)}`);
+        this.logger.error(`XAUTOCLAIM em ${stream} falhou: ${errMessage(err)}`, errStack(err));
         return;
       }
       cursor = res[0];
@@ -300,7 +308,7 @@ export class StreamsService {
     } catch (err) {
       this.logger.error(
         `Falha ao processar a entrada ${id} de ${stream}; ficará pendente para nova tentativa: ${errMessage(err)}`,
-        err instanceof Error ? err.stack : undefined,
+        errStack(err),
       );
     }
   }
@@ -372,6 +380,7 @@ export class StreamsService {
     } catch (err) {
       this.logger.error(
         `Handler de ${stream} falhou para ${event.eventId} (entrega ${deliveries}/${this.maxDeliveries}): ${errMessage(err)}`,
+        errStack(err),
       );
       await this.redis.del(dedupKey);
       if (deliveries >= this.maxDeliveries) {

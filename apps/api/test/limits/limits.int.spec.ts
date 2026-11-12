@@ -222,6 +222,68 @@ describe("QuotaService", () => {
     expect(Number((await redis.get(key("2026-06"))) ?? 0)).toBe(0);
   });
 
+  it("reserve recusada, refund e reserve na sequência: a recusa não infla o contador (corrida INCR/DECR)", async () => {
+    const tn = tenant({ monthlyQuota: 10 });
+    for (let i = 0; i < 10; i++) await svc.reserve(tn);
+    // Disparadas no mesmo tick: o Redis as processa nesta ordem. Serialmente: A recusada (10 usados),
+    // refund (9), B passa (10). Com INCR+DECR separados, A levava o contador a 11 e B era recusada.
+    const [a, , b] = await Promise.allSettled([svc.reserve(tn), svc.refund(tn), svc.reserve(tn)]);
+    expect(a.status).toBe("rejected");
+    expect(b.status).toBe("fulfilled");
+    expect(await redis.get(key("2026-06"))).toBe("10");
+  });
+
+  it("sequências aleatórias de reserve/refund concorrentes seguem o modelo serial (nunca inflado nem negativo)", async () => {
+    let seed = 12345;
+    const rand = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    const limit = 5;
+    const tn = tenant({ monthlyQuota: limit });
+    for (let round = 0; round < 20; round++) {
+      await redis.flushdb();
+      let model = 0;
+      const ops: ("reserve" | "refund")[] = [];
+      const expected: boolean[] = [];
+      for (let i = 0; i < 40; i++) {
+        const op = rand() < 0.55 ? "reserve" : "refund";
+        ops.push(op);
+        if (op === "reserve") {
+          const ok = model < limit;
+          if (ok) model++;
+          expected.push(ok);
+        } else {
+          if (model > 0) model--;
+          expected.push(true);
+        }
+      }
+      const results = await Promise.allSettled(
+        ops.map((op) => (op === "reserve" ? svc.reserve(tn) : svc.refund(tn))),
+      );
+      expect(results.map((r) => r.status === "fulfilled")).toEqual(expected);
+      expect(Number((await redis.get(key("2026-06"))) ?? 0)).toBe(model);
+    }
+  });
+
+  it("falha do Redis ao executar o script não deixa o contador inflado e o erro aparece", async () => {
+    const blip = new Error("blip no EVAL");
+    let calls = 0;
+    const flaky = {
+      eval: (...args: Parameters<Redis["eval"]>) => {
+        if (calls++ === 0) return Promise.reject(blip);
+        return redis.eval(...args);
+      },
+    } as unknown as ConstructorParameters<typeof QuotaService>[0];
+    const flakySvc = new QuotaService(flaky, () => now);
+    const tn = tenant({ monthlyQuota: 3 });
+    await expect(flakySvc.reserve(tn)).rejects.toBe(blip);
+    expect(Number((await redis.get(key("2026-06"))) ?? 0)).toBe(0);
+    for (let i = 0; i < 3; i++) await flakySvc.reserve(tn);
+    await expect(flakySvc.reserve(tn)).rejects.toBeInstanceOf(QuotaExceededError);
+    expect(await redis.get(key("2026-06"))).toBe("3");
+  });
+
   it("cota 0 é ilimitada: nunca bloqueia e nunca grava no Redis", async () => {
     const tn = tenant({ monthlyQuota: 0 });
     await Promise.all(Array.from({ length: 100 }, () => svc.reserve(tn)));

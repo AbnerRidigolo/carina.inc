@@ -148,6 +148,12 @@ export class MockChatModel extends BaseChatModel {
 /**
  * Saída estruturada do mock: o objeto do responder (ou o JSON da string) é validado com o próprio
  * schema; inválido → `ValidationError`.
+ *
+ * Divergência conhecida e intencional com o modo live: lá, uma saída fora do schema vira
+ * `AllProvidersFailedError` (503, pelo ChainFailureMapper, como qualquer falha da cadeia); aqui um
+ * responder mock quebrado é bug de código/teste e aparece como `ValidationError`. As checagens de
+ * limites dos agentes depois do schema (`refine*`, `checkMoney` em agents/output-limits.ts) lançam
+ * `AllProvidersFailedError` nos dois modos.
  */
 export function mockStructured<T>(
   model: MockChatModel,

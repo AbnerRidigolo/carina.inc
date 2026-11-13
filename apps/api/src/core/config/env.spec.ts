@@ -69,6 +69,17 @@ describe("loadEnv", () => {
     expect(loadEnv({ ...min, LLM_MODE: "live", OPENROUTER_API_KEY: "k" }).LLM_MODE).toBe("live");
   });
 
+  it("produção exige LLM_MODE explícito (sem default silencioso para mock)", () => {
+    const prod = { ...min, NODE_ENV: "production" };
+    expect(() => loadEnv(prod)).toThrow(/LLM_MODE/);
+    expect(() => loadEnv({ ...prod, LLM_MODE: "" })).toThrow(/LLM_MODE/);
+    expect(loadEnv({ ...prod, LLM_MODE: "mock" }).LLM_MODE).toBe("mock");
+    expect(loadEnv({ ...prod, LLM_MODE: "live", OPENROUTER_API_KEY: "k" }).LLM_MODE).toBe("live");
+    // Fora de produção o padrão continua mock (desenvolvimento e testes sem chave).
+    expect(loadEnv({ ...min, NODE_ENV: "development" }).LLM_MODE).toBe("mock");
+    expect(loadEnv({ ...min, LLM_MODE: "" }).LLM_MODE).toBe("mock");
+  });
+
   it("falha sem DATABASE_URL", () => {
     expect(() => loadEnv({ ...min, DATABASE_URL: undefined })).toThrow(/DATABASE_URL/);
   });

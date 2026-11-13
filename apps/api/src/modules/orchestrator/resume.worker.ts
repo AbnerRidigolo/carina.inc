@@ -63,8 +63,8 @@ import {
   Injectable,
   Logger,
   type OnApplicationBootstrap,
-  Optional,
   type OnModuleDestroy,
+  Optional,
 } from "@nestjs/common";
 import { ENV } from "../../core/config/config.module.js";
 import type { Env } from "../../core/config/env.js";

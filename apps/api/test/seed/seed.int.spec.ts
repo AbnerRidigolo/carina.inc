@@ -15,6 +15,7 @@ import {
   DEFAULT_DEMO_APP_KEY,
   DEFAULT_DEMO_APPROVER_KEY,
   DEMO_CLIENTS,
+  DEMO_TENANT,
   SeedRefusedError,
   seed,
   type SeedLogger,
@@ -48,8 +49,11 @@ function captureLogger(): SeedLogger & { lines: string[] } {
   return { lines, info: push, warn: push };
 }
 
+/** O tenant do seed (id fixo); homônimos "demo" de outra origem não contam. */
 async function demoTenantIds(): Promise<string[]> {
-  const rows = await migratorSql<{ id: string }>(`SELECT id FROM tenant WHERE name = 'demo'`);
+  const rows = await migratorSql<{ id: string }>(`SELECT id FROM tenant WHERE id = $1`, [
+    DEMO_TENANT.id,
+  ]);
   return rows.map((r) => r.id);
 }
 
@@ -81,13 +85,51 @@ describe("seed de demo", () => {
 
   describe("rodando duas vezes", () => {
     let tenantId: string;
+    let homonymId: string;
     const logs = captureLogger();
 
     beforeAll(async () => {
+      // Um tenant "demo" que NÃO é o do seed (nome não é único), suspenso e com outro plano.
+      const [homonym] = await migratorSql<{ id: string }>(
+        `INSERT INTO tenant (name, plan, rpm, monthly_quota, suspended_at)
+         VALUES ('demo', 'outro', 7, 3, now()) RETURNING id`,
+      );
+      homonymId = must(homonym).id;
       await seed({ env: seedEnv(), logger: logs });
       await redis.flushdb();
       const second = await seed({ env: seedEnv(), logger: logs });
       tenantId = second.tenantId;
+    }, 120_000);
+
+    it("acha o tenant pelo id fixo: um homônimo 'demo' fica intocado (suspenso, sem chaves)", async () => {
+      expect(tenantId).toBe(DEMO_TENANT.id);
+      const [homonym] = await migratorSql<{
+        plan: string;
+        rpm: number;
+        suspended: boolean;
+        keys: number;
+      }>(
+        `SELECT plan, rpm, suspended_at IS NOT NULL AS suspended,
+           (SELECT count(*)::int FROM api_key WHERE tenant_id = tenant.id) AS keys
+         FROM tenant WHERE id = $1`,
+        [homonymId],
+      );
+      expect(homonym).toEqual({ plan: "outro", rpm: 7, suspended: true, keys: 0 });
+    });
+
+    it("reativa e reescopa o PRÓPRIO tenant de demo se ele foi suspenso", async () => {
+      await migratorSql(`UPDATE tenant SET suspended_at = now(), rpm = 1 WHERE id = $1`, [
+        tenantId,
+      ]);
+      await redis.flushdb();
+      const again = await seed({ env: seedEnv(), logger: captureLogger() });
+      expect(again.tenantId).toBe(tenantId);
+      expect(again.clients.every((c) => c.skipped)).toBe(true);
+      const [t] = await migratorSql<{ rpm: number; suspended: boolean }>(
+        `SELECT rpm, suspended_at IS NOT NULL AS suspended FROM tenant WHERE id = $1`,
+        [tenantId],
+      );
+      expect(t).toEqual({ rpm: 120, suspended: false });
     }, 120_000);
 
     it("deixa 1 tenant demo (rpm 120, cota 0), 2 chaves e 3 clientes", async () => {

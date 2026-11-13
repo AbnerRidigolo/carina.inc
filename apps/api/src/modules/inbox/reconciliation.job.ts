@@ -117,6 +117,8 @@ export class ReconciliationJob
    * Um tick completo (também chamado direto pelos testes). `onlyTenants` restringe o tick a esses
    * tenants: os testes compartilham o banco e um tick com o relógio adiantado venceria (ou marcaria
    * needs_review) as linhas de outros arquivos rodando em paralelo. O timer nunca o passa.
+   *
+   * @internal `onlyTenants` existe só para os testes; código de produção chama `run()` sem opções.
    */
   async run(opts: { onlyTenants?: readonly string[] } = {}): Promise<ReconciliationRun> {
     const lock = await this.locks.acquire(RECONCILIATION_LOCK_KEY, LOCK_TTL_MS);

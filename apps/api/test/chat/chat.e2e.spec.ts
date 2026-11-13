@@ -187,6 +187,8 @@ describe("Chat REST", () => {
       ["sem corpo", undefined],
       ["clientId inválido", { clientId: "a b", message: "olá" }],
       ["threadId absurdo", { clientId: "cli-1", message: "olá", threadId: "t".repeat(300) }],
+      // Mesmo contrato estrito do WebSocket: campo desconhecido não é ignorado em silêncio.
+      ["campo desconhecido", { clientId: "cli-1", message: "olá", tenantId: "outro" }],
     ];
     for (const [name, body] of invalid) {
       it(name, async () => {

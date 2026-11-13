@@ -5,11 +5,12 @@
  */
 import { Logger } from "@nestjs/common";
 import { createWorkerContext } from "./bootstrap.js";
+import { formatBootError } from "./core/errors/boot-error.js";
 
 try {
   await createWorkerContext();
   new Logger("Bootstrap").log({ msg: "Workers no ar" });
 } catch (err) {
-  console.error("Falha ao iniciar os workers:", err instanceof Error ? err.message : err);
+  console.error(`Falha ao iniciar os workers: ${formatBootError(err)}`);
   process.exit(1);
 }

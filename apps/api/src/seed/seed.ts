@@ -3,8 +3,9 @@
  * `seed`). Idempotente: rodar de novo deixa o mesmo estado.
  *
  * 1. Com o papel carina_migrator (MIGRATION_DATABASE_URL; `tenant` e `api_key` não têm RLS e o
- *    carina_app nem enxerga `api_key`): tenant `demo` (rpm 120, cota 0 = ilimitada) e as duas
- *    chaves, gravadas só como sha256 (o mesmo `hashApiKey` do ApiKeyGuard):
+ *    carina_app nem enxerga `api_key`): tenant `demo` de id FIXO (`DEMO_TENANT.id`; rpm 120,
+ *    cota 0 = ilimitada) e as duas chaves, gravadas só como sha256 (o mesmo `hashApiKey` do
+ *    ApiKeyGuard):
  *    - DEMO_APP_KEY: `chat` + `data:write` (o app parceiro: conversa e envia dados);
  *    - DEMO_APPROVER_KEY: `chat` + `inbox:decide` (quem aprova ações irreversíveis).
  *    Uma chave antiga com o mesmo rótulo e outro valor (o env mudou) é revogada.
@@ -27,6 +28,7 @@ import pino from "pino";
 import { z } from "zod";
 import { ConfigModule } from "../core/config/config.module.js";
 import { type Env, loadEnv } from "../core/config/env.js";
+import { formatBootError } from "../core/errors/boot-error.js";
 import { TenantContext } from "../core/context/tenant-context.js";
 import { TenantPrismaService } from "../core/database/tenant-prisma.service.js";
 import { RedisModule } from "../core/redis/redis.module.js";
@@ -41,7 +43,17 @@ import { ClientsService } from "../modules/tenancy/clients.service.js";
 export const DEFAULT_DEMO_APP_KEY = "sk-live-demoapp0000000000000000000000000";
 export const DEFAULT_DEMO_APPROVER_KEY = "sk-live-demoapprover00000000000000000000";
 
-export const DEMO_TENANT = { name: "demo", plan: "demo", rpm: 120, monthlyQuota: 0 } as const;
+/**
+ * O tenant de demo é achado pelo id FIXO, nunca pelo nome (`tenant.name` não é único): um tenant
+ * homônimo "demo" de outra origem nunca é reescopado nem reativado pelo seed.
+ */
+export const DEMO_TENANT = {
+  id: "de300000-0000-4000-8000-000000000001",
+  name: "demo",
+  plan: "demo",
+  rpm: 120,
+  monthlyQuota: 0,
+} as const;
 
 export const DEMO_CLIENTS: readonly { externalId: string; profile: Profile; seed: number }[] = [
   { externalId: "cliente-conservador", profile: "conservador", seed: 1 },
@@ -156,24 +168,24 @@ async function upsertTenantAndKeys(
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock($1)", [SEED_LOCK_ID]);
-    const found = await client.query<{ id: string }>(
-      "SELECT id FROM tenant WHERE name = $1 ORDER BY created_at LIMIT 1",
-      [DEMO_TENANT.name],
+    // Upsert pelo id fixo: cria na primeira vez; depois reaplica nome, plano e limites e reativa
+    // (o tenant de demo é deste seed por construção).
+    const upsertedTenant = await client.query<{ id: string }>(
+      `INSERT INTO tenant (id, name, plan, rpm, monthly_quota) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO UPDATE
+         SET name = EXCLUDED.name, plan = EXCLUDED.plan, rpm = EXCLUDED.rpm,
+             monthly_quota = EXCLUDED.monthly_quota, suspended_at = NULL
+       RETURNING id`,
+      [
+        DEMO_TENANT.id,
+        DEMO_TENANT.name,
+        DEMO_TENANT.plan,
+        DEMO_TENANT.rpm,
+        DEMO_TENANT.monthlyQuota,
+      ],
     );
-    let tenantId = found.rows[0]?.id;
-    if (tenantId === undefined) {
-      const created = await client.query<{ id: string }>(
-        "INSERT INTO tenant (name, plan, rpm, monthly_quota) VALUES ($1, $2, $3, $4) RETURNING id",
-        [DEMO_TENANT.name, DEMO_TENANT.plan, DEMO_TENANT.rpm, DEMO_TENANT.monthlyQuota],
-      );
-      tenantId = created.rows[0]?.id;
-      if (tenantId === undefined) throw new Error("INSERT INTO tenant não devolveu id");
-    } else {
-      await client.query(
-        "UPDATE tenant SET plan = $2, rpm = $3, monthly_quota = $4, suspended_at = NULL WHERE id = $1",
-        [tenantId, DEMO_TENANT.plan, DEMO_TENANT.rpm, DEMO_TENANT.monthlyQuota],
-      );
-    }
+    const tenantId = upsertedTenant.rows[0]?.id;
+    if (tenantId === undefined) throw new Error("upsert do tenant de demo não devolveu id");
 
     const ids: Record<string, string> = {};
     for (const spec of DEMO_KEYS) {
@@ -321,7 +333,7 @@ if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
   try {
     await seed();
   } catch (err) {
-    console.error("Seed falhou:", err instanceof Error ? err.message : err);
+    console.error(`Seed falhou: ${formatBootError(err)}`);
     process.exit(1);
   }
 }

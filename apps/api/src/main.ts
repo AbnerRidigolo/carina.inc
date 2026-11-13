@@ -7,6 +7,7 @@ import { Logger } from "@nestjs/common";
 import { createApiApp } from "./bootstrap.js";
 import { ENV } from "./core/config/config.module.js";
 import type { Env } from "./core/config/env.js";
+import { formatBootError } from "./core/errors/boot-error.js";
 
 try {
   const app = await createApiApp();
@@ -19,8 +20,8 @@ try {
     llmMode: env.LLM_MODE,
   });
 } catch (err) {
-  // Antes do pino existir (ex.: Env inválido) só resta o stderr; a mensagem do loadEnv lista os
-  // nomes das variáveis inválidas, nunca os valores.
-  console.error("Falha ao iniciar a API:", err instanceof Error ? err.message : err);
+  // Antes do pino existir (ex.: Env inválido) só resta o stderr: stack e causas completas; a
+  // mensagem do loadEnv lista os nomes das variáveis inválidas, nunca os valores.
+  console.error(`Falha ao iniciar a API: ${formatBootError(err)}`);
   process.exit(1);
 }

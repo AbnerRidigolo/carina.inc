@@ -15,7 +15,12 @@ export const EnvSchema = z
      */
     MIGRATION_DATABASE_URL: optionalSecret,
     REDIS_URL: z.string().min(1),
-    LLM_MODE: z.enum(["live", "mock"]).default("mock"),
+    /**
+     * `mock` (padrão fora de produção) ou `live`. Com NODE_ENV=production é OBRIGATÓRIA: uma API
+     * de produção nunca cai em modelos falsos por esquecimento (o docker compose de demo define
+     * `mock` explicitamente).
+     */
+    LLM_MODE: z.preprocess(emptyToUndefined, z.enum(["live", "mock"]).optional()),
     OPENROUTER_API_KEY: optionalSecret,
     GROQ_API_KEY: optionalSecret,
     NVIDIA_API_KEY: optionalSecret,
@@ -47,7 +52,12 @@ export const EnvSchema = z
   .refine((e) => e.LLM_MODE !== "live" || e.OPENROUTER_API_KEY !== undefined, {
     path: ["OPENROUTER_API_KEY"],
     message: "OPENROUTER_API_KEY é obrigatória com LLM_MODE=live",
-  });
+  })
+  .refine((e) => e.NODE_ENV !== "production" || e.LLM_MODE !== undefined, {
+    path: ["LLM_MODE"],
+    message: "LLM_MODE (live|mock) é obrigatória com NODE_ENV=production",
+  })
+  .transform((e) => ({ ...e, LLM_MODE: e.LLM_MODE ?? ("mock" as const) }));
 
 export type Env = z.infer<typeof EnvSchema>;
 

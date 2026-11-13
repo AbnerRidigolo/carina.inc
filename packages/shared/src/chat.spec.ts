@@ -25,6 +25,11 @@ describe("ChatRequestSchema", () => {
     const r = ChatRequestSchema.parse({ clientId: "c1", message: "  oi  " });
     expect(r.message).toBe("oi");
   });
+  it("é estrito: campo desconhecido é rejeitado (REST e WebSocket usam o mesmo contrato)", () => {
+    expect(
+      ChatRequestSchema.safeParse({ clientId: "c1", message: "oi", tenantId: "t" }).success,
+    ).toBe(false);
+  });
   it("rejeita mensagem só com espaços", () => {
     expect(ChatRequestSchema.safeParse({ clientId: "c1", message: "   " }).success).toBe(false);
   });

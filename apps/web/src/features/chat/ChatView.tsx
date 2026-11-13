@@ -110,7 +110,8 @@ export function ChatView({ clientId, bus }: Props) {
     connectionProblem(status) ??
     sendError ??
     (last?.error
-      ? `${messageForCode(last.error.code)} (rastreio: ${last.error.traceId})`
+      ? // Sem traceId (ex.: queda local da conexão), sem o sufixo de rastreio.
+        `${messageForCode(last.error.code)}${last.error.traceId ? ` (rastreio: ${last.error.traceId})` : ""}`
       : undefined) ??
     (protocolError ? "Uma mensagem inválida do servidor foi ignorada." : undefined);
 

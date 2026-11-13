@@ -57,6 +57,12 @@ function mount() {
 }
 
 describe("UsagePanel", () => {
+  it("deixa claro que uso e auditoria são do tenant inteiro, não do cliente selecionado", async () => {
+    mount();
+    const panel = await screen.findByRole("region", { name: /uso e auditoria/i });
+    expect(within(panel).getByText(/todos os clientes/i)).toBeInTheDocument();
+  });
+
   it("mostra totais do mês em R$ e a divisão por tipo de trabalho", async () => {
     mount();
     expect(await screen.findByText(/R\$\s22,50/)).toBeInTheDocument();

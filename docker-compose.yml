@@ -24,6 +24,7 @@ x-runtime-env: &runtime-env
   NODE_ENV: production
   DATABASE_URL: postgres://carina_app:${CARINA_APP_PASSWORD:-carina_app_dev}@postgres:5432/carina
   REDIS_URL: redis://redis:6379
+  # Explícita: com NODE_ENV=production a API recusa subir sem LLM_MODE (nunca cai em mock sem querer).
   LLM_MODE: ${LLM_MODE:-mock}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -38,8 +39,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       CARINA_MIGRATOR_PASSWORD: ${CARINA_MIGRATOR_PASSWORD:-carina_migrator_dev}
       CARINA_APP_PASSWORD: ${CARINA_APP_PASSWORD:-carina_app_dev}
+    # Só no loopback do host (acesso local de dev/testes); os outros serviços usam a rede do
+    # compose (postgres:5432), que não depende desta publicação.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Cria os papéis carina_migrator/carina_app, o banco carina e a extensão vector (Ruling R2).
@@ -59,7 +62,7 @@ services:
     # passa a recusar escritas, e a aplicação vê o erro).
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -114,8 +117,9 @@ services:
       PORT: "3000"
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:5173}
       WORKERS_ENABLED: "false"
+    # Loopback: as chaves de demo são públicas, então a API da demo não fica exposta na rede.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     healthcheck:
       test:
         - CMD
@@ -156,7 +160,7 @@ services:
       dockerfile: apps/web/Dockerfile
     image: carina-web:local
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     depends_on:
       api:
         condition: service_healthy

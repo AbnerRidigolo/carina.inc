@@ -38,7 +38,10 @@ const SEVERITY_CLASS = {
 const clip = (text: string) =>
   text.length > MAX_QUERY_CHARS ? `${text.slice(0, MAX_QUERY_CHARS)}…` : text;
 
-/** Uso do mês e últimos eventos de auditoria; recarrega quando um turno do chat termina. */
+/**
+ * Uso do mês e últimos eventos de auditoria do TENANT da chave (todos os clientes; a API não filtra
+ * por cliente); recarrega quando um turno do chat termina.
+ */
 export function UsagePanel({ bus }: { bus: SignalBus }) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [audit, setAudit] = useState<AuditEventView[] | null>(null);
@@ -89,6 +92,9 @@ export function UsagePanel({ bus }: { bus: SignalBus }) {
           {error}
         </div>
       ) : null}
+      <p className={ui.muted}>
+        Visão do tenant da chave: soma todos os clientes, não só o cliente selecionado no chat.
+      </p>
       {!usage && !error ? <p className={ui.muted}>Carregando…</p> : null}
 
       {usage ? (

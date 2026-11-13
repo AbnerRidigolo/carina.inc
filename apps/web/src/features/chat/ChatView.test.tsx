@@ -204,6 +204,8 @@ describe("ChatView", () => {
     act(() => socket.serverClose(1006));
     expect(await screen.findByRole("alert")).toHaveTextContent(/conexão caiu/i);
     expect(screen.getByRole("alert")).toHaveTextContent(/caixa de entrada/i);
+    // A queda é local (não veio do servidor): não há traceId, e o sufixo vazio não aparece.
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/rastreio/i);
     const second = await openSocket(1);
     await screen.findByText(/conectado/i);
     expect(screen.getByLabelText("Mensagem")).toBeEnabled();

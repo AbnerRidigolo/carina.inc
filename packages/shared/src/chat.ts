@@ -10,11 +10,14 @@ export const MAX_CHAT_MESSAGE_CHARS = 8000;
 /** `tenantId:clientId:<id>` (36 + 1 + 36 + 1 + até 128); o limite só barra entradas absurdas. */
 export const MAX_THREAD_ID_CHARS = 256;
 
-export const ChatRequestSchema = z.object({
-  clientId: ChatClientIdSchema,
-  message: z.string().trim().min(1).max(MAX_CHAT_MESSAGE_CHARS),
-  threadId: z.string().max(MAX_THREAD_ID_CHARS).optional(),
-});
+/** Corpo de `POST /api/chat` e mensagem do WebSocket: estrito (campo desconhecido → 422). */
+export const ChatRequestSchema = z
+  .object({
+    clientId: ChatClientIdSchema,
+    message: z.string().trim().min(1).max(MAX_CHAT_MESSAGE_CHARS),
+    threadId: z.string().max(MAX_THREAD_ID_CHARS).optional(),
+  })
+  .strict();
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
 /** Status de um turno (o `awaiting_approval` vem do banco: aprovação pendente e não vencida). */

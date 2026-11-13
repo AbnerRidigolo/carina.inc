@@ -8,10 +8,14 @@ export type StreamName = "inbox.events" | "notifications" | "jobs";
 
 export const STREAMS_OPTIONS = Symbol("STREAMS_OPTIONS");
 
+/**
+ * Registros no formato objeto do pino, `{ msg, err, stream, ... }`, com o Error em `err` no topo:
+ * pelo Logger do Nest apontado para o nestjs-pino, o serializador grava `err.message` e
+ * `err.stack` (R14). Nunca texto de erro concatenado na mensagem.
+ */
 export interface StreamsLogger {
-  error(message: string, ...rest: unknown[]): void;
-  /** Aceita também o objeto estruturado `{ msg, err, stream, ... }` (como o Logger do Nest). */
-  warn(message: unknown, ...rest: unknown[]): void;
+  error(fields: Record<string, unknown>): void;
+  warn(fields: Record<string, unknown>): void;
 }
 
 export interface StreamsOptions {
@@ -51,11 +55,6 @@ function fieldOf(fields: string[] | null, name: string): string | undefined {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Stack no 2º argumento (convenção do Logger do Nest), para a falha não perder a origem (R14). */
-function errStack(err: unknown): string | undefined {
-  return err instanceof Error ? err.stack : undefined;
 }
 
 @Injectable()
@@ -122,7 +121,7 @@ export class StreamsService {
           )) as ReadReply;
         } catch (err) {
           if (signal.aborted) break;
-          this.logger.error(`XREADGROUP em ${stream} falhou: ${errMessage(err)}`, errStack(err));
+          this.logger.error({ msg: "XREADGROUP falhou; nova tentativa", err, stream, group });
           await this.sleep(500, signal);
           continue;
         }
@@ -224,10 +223,7 @@ export class StreamsService {
             try {
               onEvent(parsed.event);
             } catch (err) {
-              this.logger.error(
-                `Listener de tail em ${stream} falhou: ${errMessage(err)}`,
-                errStack(err),
-              );
+              this.logger.error({ msg: "Listener do tail falhou", err, stream, entryId: id });
             }
           }
         }
@@ -280,7 +276,7 @@ export class StreamsService {
           BATCH,
         )) as [string, RawEntry[], ...unknown[]];
       } catch (err) {
-        this.logger.error(`XAUTOCLAIM em ${stream} falhou: ${errMessage(err)}`, errStack(err));
+        this.logger.error({ msg: "XAUTOCLAIM falhou", err, stream, group });
         return;
       }
       cursor = res[0];
@@ -306,10 +302,12 @@ export class StreamsService {
     try {
       await fn();
     } catch (err) {
-      this.logger.error(
-        `Falha ao processar a entrada ${id} de ${stream}; ficará pendente para nova tentativa: ${errMessage(err)}`,
-        errStack(err),
-      );
+      this.logger.error({
+        msg: "Falha ao processar a entrada; ficará pendente para nova tentativa",
+        err,
+        stream,
+        entryId: id,
+      });
     }
   }
 
@@ -354,7 +352,12 @@ export class StreamsService {
     const { stream, group, handler } = opts;
     const parsed = this.parse(fields);
     if (!parsed.ok) {
-      this.logger.error(`Entrada inválida em ${stream} (${id}) enviada à DLQ: ${parsed.error}`);
+      this.logger.error({
+        msg: "Entrada inválida enviada à DLQ",
+        stream,
+        entryId: id,
+        reason: parsed.error,
+      });
       await this.deadLetter(stream, group, id, parsed.raw, parsed.error);
       return;
     }
@@ -378,10 +381,19 @@ export class StreamsService {
     try {
       await handler(event);
     } catch (err) {
-      this.logger.error(
-        `Handler de ${stream} falhou para ${event.eventId} (entrega ${deliveries}/${this.maxDeliveries}): ${errMessage(err)}`,
-        errStack(err),
-      );
+      this.logger.error({
+        msg: "Handler do stream falhou",
+        err,
+        stream,
+        group,
+        entryId: id,
+        eventId: event.eventId,
+        eventType: event.type,
+        tenantId: event.tenantId,
+        clientId: event.clientId,
+        deliveries,
+        maxDeliveries: this.maxDeliveries,
+      });
       await this.redis.del(dedupKey);
       if (deliveries >= this.maxDeliveries) {
         await this.deadLetter(stream, group, id, event, errMessage(err));

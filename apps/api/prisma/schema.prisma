@@ -18,9 +18,13 @@
 // GRANT, ENABLE/FORCE RLS e políticas de cada tabela nova.
 
 generator client {
-  provider     = "prisma-client"
-  output       = "../src/generated/prisma"
-  moduleFormat = "esm"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  // Explícito: sem isto o Prisma deduz a extensão dos imports pelo tsconfig, e um `prisma generate`
+  // sem tsconfig à vista (ex.: postinstall na imagem Docker) gera imports `.ts` que o Node não
+  // carrega a partir do dist.
+  importFileExtension = "js"
 }
 
 datasource db {

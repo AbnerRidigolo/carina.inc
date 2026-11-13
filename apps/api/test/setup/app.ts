@@ -1,19 +1,18 @@
 /**
  * App Nest para testes E2E, conectado ao banco de teste do global-setup como carina_app.
  *
- * Monta o mesmo pipeline HTTP do main.ts (prefixo `/api`, ProblemDetailsFilter e o adaptador `ws`
- * dos gateways) sobre o TenancyModule (ApiKeyGuard + TenantContextInterceptor globais) e os
- * módulos extras que cada teste passar. Tenants e chaves são criados como carina_migrator
- * (`tenant` e `api_key` não têm RLS; o carina_app nem enxerga `api_key`).
+ * Monta o MESMO pipeline HTTP do main.ts (`configureHttpApp` do bootstrap: body parser de 5 MB,
+ * adaptador `ws`, prefixo `/api`, CORS e ProblemDetailsFilter) sobre o TenancyModule (ApiKeyGuard +
+ * TenantContextInterceptor globais) e os módulos extras que cada teste passar. Tenants e chaves
+ * são criados como carina_migrator (`tenant` e `api_key` não têm RLS; o carina_app nem enxerga
+ * `api_key`).
  */
 import type { DynamicModule, INestApplication, Type } from "@nestjs/common";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { ConfigModule, ENV } from "../../src/core/config/config.module.js";
 import { loadEnv } from "../../src/core/config/env.js";
-import { configureBodyParser } from "../../src/core/http/body-parser.js";
-import { configureWebSockets } from "../../src/core/http/websocket.js";
-import { ProblemDetailsFilter } from "../../src/core/errors/problem-details.filter.js";
+import { configureHttpApp } from "../../src/bootstrap.js";
 import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
 import { appUrl, migratorSql, migratorUrl, redisDbUrl, redisUrl } from "./db.js";
@@ -82,6 +81,8 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     REDIS_URL: opts.redisDb === undefined ? redisUrl() : redisDbUrl(opts.redisDb),
     LLM_MODE: "mock",
     WORKERS_ENABLED: opts.workersEnabled === true ? "true" : "false",
+    // Módulos que trazem o LoggingModule (ex.: AppModule) não poluem a saída dos testes.
+    LOG_LEVEL: "silent",
     ...opts.env,
   });
 
@@ -95,10 +96,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
   const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
-  configureBodyParser(app);
-  configureWebSockets(app);
-  app.setGlobalPrefix("api");
-  app.useGlobalFilters(new ProblemDetailsFilter());
+  configureHttpApp(app, env);
   // Escuta numa porta efêmera: o supertest usa o endereço em vez de abrir um listen por request.
   await app.listen(0, "127.0.0.1");
 

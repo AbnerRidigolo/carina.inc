@@ -8,7 +8,12 @@ export const EnvSchema = z
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     PORT: z.coerce.number().int().positive().default(3000),
     DATABASE_URL: z.string().min(1),
-    MIGRATION_DATABASE_URL: z.string().min(1),
+    /**
+     * Papel dono (carina_migrator). Só o seed o usa (tenant e chaves de demo); `prisma migrate
+     * deploy` lê a variável direto (prisma.config.ts). Opcional de propósito: a API e o worker
+     * rodam sem a credencial do migrator (só carina_app, spec §5.3).
+     */
+    MIGRATION_DATABASE_URL: optionalSecret,
     REDIS_URL: z.string().min(1),
     LLM_MODE: z.enum(["live", "mock"]).default("mock"),
     OPENROUTER_API_KEY: optionalSecret,
@@ -20,7 +25,12 @@ export const EnvSchema = z
     EXECUTION_FEE_PCT: z.coerce.number().nonnegative().default(0.5),
     DEFAULT_RPM: z.coerce.number().int().positive().default(60),
     APPROVAL_TTL_HOURS: z.coerce.number().positive().default(24),
+    /** Única origem aceita pelo CORS da API (o frontend). Sem curinga. */
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
+    /** Nível do pino. `silent` desliga os logs (testes). */
+    LOG_LEVEL: z
+      .enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"])
+      .default("info"),
     /** Liga os workers de fundo (consumidores de streams, ex.: Sync) neste processo. */
     WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
     /**

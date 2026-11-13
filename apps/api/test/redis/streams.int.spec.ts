@@ -15,6 +15,30 @@ function dbUrl(): string {
 }
 const silent = { error: vi.fn(), warn: vi.fn() };
 
+/**
+ * Registro no formato objeto do pino (R14): `{ msg, err, stream, ... }` com o Error no topo (o
+ * serializador do pino só trata `err` no topo e grava message + stack). Devolve o registro cujo
+ * `err` tem `text` na mensagem e um stack de verdade.
+ */
+function loggedError(calls: unknown[][], text: string): Record<string, unknown> | undefined {
+  for (const [first] of calls) {
+    if (typeof first !== "object" || first === null) continue;
+    const rec = first as Record<string, unknown>;
+    const err = rec["err"];
+    if (
+      err instanceof Error &&
+      err.message.includes(text) &&
+      typeof err.stack === "string" &&
+      err.stack.includes("at ") &&
+      typeof rec["msg"] === "string" &&
+      typeof rec["stream"] === "string"
+    ) {
+      return rec;
+    }
+  }
+  return undefined;
+}
+
 function ev(): StreamEvent {
   return {
     eventId: randomUUID(),
@@ -94,12 +118,11 @@ describe("StreamsService", () => {
     await c.stop();
     expect(calls).toBe(2);
     expect(ok).toBe(1);
-    // A falha do handler é registrada com o stack (R14).
-    expect(
-      silent.error.mock.calls.some(
-        (a) => String(a[0]).includes("falha transitória") && String(a[1]).includes("at "),
-      ),
-    ).toBe(true);
+    // A falha do handler é registrada com o stack, no formato objeto (R14).
+    expect(loggedError(silent.error.mock.calls, "falha transitória")).toMatchObject({
+      stream: "notifications",
+      eventId: expect.any(String),
+    });
   });
 
   it("manda para jobs.dlq após 5 entregas", async () => {
@@ -483,10 +506,10 @@ describe("StreamsService", () => {
       expect(c.state()).toBe("pending");
       await c.stop();
       expect(c.state()).toBe("resolved");
-      const withStack = c.logger.error.mock.calls.find((args) =>
-        args.some((a) => typeof a === "string" && a.includes("blip no DEL") && a.includes("at ")),
-      );
-      expect(withStack).toBeDefined();
+      expect(loggedError(c.logger.error.mock.calls, "blip no DEL")).toMatchObject({
+        stream: "jobs",
+        entryId: expect.any(String),
+      });
     });
 
     it("XADD da DLQ falhando de verdade (WRONGTYPE) deixa a entrada pendente até a DLQ voltar", async () => {
@@ -497,11 +520,7 @@ describe("StreamsService", () => {
         throw new Error("sempre falha");
       });
       await svc.publish("jobs", ev());
-      await until(() =>
-        c.logger.error.mock.calls.some(
-          (a) => String(a[0]).includes("WRONGTYPE") && String(a[1]).includes("at "),
-        ),
-      );
+      await until(() => loggedError(c.logger.error.mock.calls, "WRONGTYPE") !== undefined);
       // Algumas tentativas de reprocessar a movimentação, sempre falhando: nada é confirmado.
       await new Promise((r) => setTimeout(r, 500));
       expect(c.state()).toBe("pending");

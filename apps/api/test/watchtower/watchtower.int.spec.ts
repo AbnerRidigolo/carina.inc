@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Logger } from "@nestjs/common";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { PrismaService } from "../../src/core/database/prisma.service.js";
 import { TenantPrismaService } from "../../src/core/database/tenant-prisma.service.js";
@@ -19,6 +20,10 @@ describe("WatchtowerService (carina_app, sob RLS)", () => {
   const inB = <T>(fn: () => Promise<T>) => TenantContext.run({ tenantId: tenantB }, fn);
 
   beforeAll(async () => {
+    // O serviço registra watchtower.flags/clean pelo Logger do Nest: fora de um app Nest, sem isto
+    // os registros iriam para o console do teste.
+    vi.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
     await migratorSql(
       `INSERT INTO tenant (id, name, plan) VALUES ($1, 'A', 'pro'), ($2, 'B', 'pro')`,
       [tenantA, tenantB],
@@ -34,6 +39,7 @@ describe("WatchtowerService (carina_app, sob RLS)", () => {
   });
 
   afterAll(async () => {
+    vi.restoreAllMocks();
     await prisma.$disconnect();
   });
 

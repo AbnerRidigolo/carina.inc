@@ -1,19 +1,18 @@
 import { Module } from "@nestjs/common";
-import { DatabaseModule } from "../../core/database/database.module.js";
 import { LimitsModule } from "../limits/limits.module.js";
 import { TenancyModule } from "../tenancy/tenancy.module.js";
 import { WatchtowerController } from "./watchtower.controller.js";
-import { WatchtowerService } from "./watchtower.service.js";
+import { WatchtowerCoreModule } from "./watchtower-core.module.js";
 
 /**
- * Watchtower (compliance e trilha de auditoria). Importa o TenancyModule antes do LimitsModule
- * (que traz o RateLimitGuard global) para que a ordem dos guards globais fique correta
- * (ApiKeyGuard → RateLimitGuard), qualquer que seja a ordem em que o módulo raiz importe este.
+ * Watchtower (compliance e trilha de auditoria), com rotas. Importa o TenancyModule antes do
+ * LimitsModule (que traz o RateLimitGuard global) para que a ordem dos guards globais fique
+ * correta (ApiKeyGuard → RateLimitGuard), qualquer que seja a ordem em que o módulo raiz importe
+ * este. O serviço vem do WatchtowerCoreModule (reexportado).
  */
 @Module({
-  imports: [DatabaseModule, TenancyModule, LimitsModule],
+  imports: [TenancyModule, LimitsModule, WatchtowerCoreModule],
   controllers: [WatchtowerController],
-  providers: [WatchtowerService],
-  exports: [WatchtowerService],
+  exports: [WatchtowerCoreModule],
 })
 export class WatchtowerModule {}

@@ -1,5 +1,35 @@
-# CARINA — infraestrutura local. Os serviços api e web entram depois (Task 21).
+# CARINA — demo local completa: `docker compose up --build` (sem nenhuma chave de API: LLM_MODE=mock).
+#
+# Ordem de subida: postgres/redis (healthy) → migrate (uma vez) → seed (uma vez) → api (healthy)
+# → web; o worker sobe logo depois do migrate.
+#
+# Divisão dos workers de fundo (cada job roda em UM lugar por padrão):
+# - api    (main.ts, WORKERS_ENABLED=false): REST + WebSocket + InboxBroadcast (um tail de
+#          `inbox.events` por processo HTTP, que repassa aos sockets dele; não é consumidor de grupo).
+# - worker (main.worker.ts, WORKERS_ENABLED forçado a true): SyncWorker (grupo `sync`),
+#          ResumeWorker (grupo `resumers`) e ReconciliationJob (timer com lock Redis por tenant).
+#   Réplicas extras do worker são seguras (grupos de consumo do Redis + locks), só não são
+#   necessárias para a demo.
+#
 # Senhas de desenvolvimento têm padrão; em qualquer outro ambiente, defina-as no .env.
+# As chaves DEMO_* padrão são PÚBLICAS (estão no repositório) e servem só para esta demo local.
+
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+  target: runtime
+
+# Ambiente comum da API e do worker: só o papel carina_app (sem a credencial do migrator).
+x-runtime-env: &runtime-env
+  NODE_ENV: production
+  DATABASE_URL: postgres://carina_app:${CARINA_APP_PASSWORD:-carina_app_dev}@postgres:5432/carina
+  REDIS_URL: redis://redis:6379
+  LLM_MODE: ${LLM_MODE:-mock}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -12,6 +42,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Cria os papéis carina_migrator/carina_app, o banco carina e a extensão vector (Ruling R2).
       - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-carina.sh:ro
       # Fora de docker-entrypoint-initdb.d: o entrypoint executaria o .sql sem as variáveis.
       - ./docker/postgres/roles.sql:/opt/carina/roles.sql:ro
@@ -23,13 +54,114 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Streams (jobs, inbox.events) são estado da aplicação: AOF para sobreviver a restart e
+    # `noeviction` (nunca descartar chaves de stream/lock/cota por falta de memória; o Redis
+    # passa a recusar escritas, e a aplicação vê o erro).
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
 
+  # Migrações 0001–0006 (escritas à mão) com `prisma migrate deploy` como carina_migrator: o mesmo
+  # procedimento do harness de testes. Roda uma vez e sai.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    image: carina-migrate:local
+    environment:
+      MIGRATION_DATABASE_URL: postgres://carina_migrator:${CARINA_MIGRATOR_PASSWORD:-carina_migrator_dev}@postgres:5432/carina
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Tenant demo, chaves DEMO_* e três clientes sintéticos já sincronizados. Idempotente; roda uma
+  # vez depois do migrate. SEED_ALLOW_DEMO_KEYS=true: a imagem roda com NODE_ENV=production, e o
+  # seed recusa as chaves fixas de demo em produção sem essa liberação explícita.
+  seed:
+    build: *api-build
+    image: carina-api:local
+    command: ["node", "dist/seed/seed.js"]
+    environment:
+      <<: *runtime-env
+      MIGRATION_DATABASE_URL: postgres://carina_migrator:${CARINA_MIGRATOR_PASSWORD:-carina_migrator_dev}@postgres:5432/carina
+      DEMO_APP_KEY: ${DEMO_APP_KEY:-}
+      DEMO_APPROVER_KEY: ${DEMO_APPROVER_KEY:-}
+      SEED_ALLOW_DEMO_KEYS: "true"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api:
+    build: *api-build
+    image: carina-api:local
+    command: ["node", "dist/main.js"]
+    environment:
+      <<: *runtime-env
+      PORT: "3000"
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:5173}
+      WORKERS_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: *api-build
+    image: carina-api:local
+    command: ["node", "dist/main.worker.js"]
+    environment:
+      <<: *runtime-env
+    # Sem HTTP: o HEALTHCHECK da imagem (GET /api/ready) não se aplica.
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Stub estático até a Task 22 (build do Vite).
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: carina-web:local
+    ports:
+      - "5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  redisdata:

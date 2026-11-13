@@ -23,6 +23,21 @@ describe("loadEnv", () => {
     expect(env.API_KEY_REVALIDATE_TTL_MS).toBe(60_000);
   });
 
+  it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {
+    expect(loadEnv(min).LOG_LEVEL).toBe("info");
+    expect(loadEnv({ ...min, LOG_LEVEL: "silent" }).LOG_LEVEL).toBe("silent");
+    expect(() => loadEnv({ ...min, LOG_LEVEL: "verbose" })).toThrow(/LOG_LEVEL/);
+  });
+
+  it("MIGRATION_DATABASE_URL é opcional: a API e o worker não recebem a credencial do migrator", () => {
+    const { MIGRATION_DATABASE_URL: _omit, ...withoutMigrator } = min;
+    expect(_omit).toBeDefined();
+    expect(loadEnv(withoutMigrator).MIGRATION_DATABASE_URL).toBeUndefined();
+    expect(loadEnv({ ...withoutMigrator, MIGRATION_DATABASE_URL: "" }).MIGRATION_DATABASE_URL).toBe(
+      undefined,
+    );
+  });
+
   it("WS_MAX_CONNECTION_MS: inteiro entre 1 s e 24 h", () => {
     expect(loadEnv({ ...min, WS_MAX_CONNECTION_MS: "1000" }).WS_MAX_CONNECTION_MS).toBe(1000);
     for (const bad of ["999", "86400001", "1.5", "abc", "-1"]) {

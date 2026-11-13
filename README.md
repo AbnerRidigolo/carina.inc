@@ -5,6 +5,27 @@ com **12 agentes especializados** coordenados, **deploy 100% gratuito na nuvem**
 processamento ou banco no notebook), camada de modelos flexível com fallback e conhecimento
 via **GraphRAG-SDK** sobre **FalkorDB Cloud**.
 
+## Demo local da versão TypeScript (docker compose)
+
+```bash
+docker compose up --build   # sem nenhuma chave de API: LLM_MODE=mock
+```
+
+Sobe Postgres (pgvector) e Redis, aplica as migrações (`migrate`), roda o seed de demo (`seed`),
+a API em http://localhost:3000 (`/api/health`, `/api/ready`), o worker (Sync, retomada de
+aprovações e reconciliação) e o web em http://localhost:5173. O seed cria o tenant `demo`, três
+clientes sintéticos já sincronizados e duas chaves:
+
+| Chave | Valor padrão | Escopos |
+| --- | --- | --- |
+| `DEMO_APP_KEY` | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write` |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide` |
+
+**Essas chaves são públicas e servem só para a demo local.** Fora dela, defina `DEMO_APP_KEY` e
+`DEMO_APPROVER_KEY` com chaves novas; com `NODE_ENV=production` o seed recusa as chaves fixas,
+a menos que `SEED_ALLOW_DEMO_KEYS=true` (que só o compose de demo liga). Todas as variáveis estão
+documentadas em [.env.example](.env.example).
+
 ## Princípios inegociáveis
 
 1. **Nada roda na máquina do dev em produção** — inference, embeddings e banco são serviços na nuvem.

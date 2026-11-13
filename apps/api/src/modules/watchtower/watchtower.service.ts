@@ -80,11 +80,13 @@ export class WatchtowerService {
 
     // Só ids e códigos no log: nunca o texto da resposta nem a PII.
     if (flags.length > 0) {
-      this.log.warn(
-        `watchtower.flags auditId=${row.id} codes=${flags.map((f) => f.code).join(",")}`,
-      );
+      this.log.warn({
+        msg: "watchtower.flags",
+        auditId: row.id,
+        codes: flags.map((f) => f.code),
+      });
     } else {
-      this.log.log(`watchtower.clean auditId=${row.id}`);
+      this.log.log({ msg: "watchtower.clean", auditId: row.id });
     }
     return { auditId: row.id, flags };
   }

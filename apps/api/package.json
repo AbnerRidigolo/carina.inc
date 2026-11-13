@@ -6,6 +6,9 @@
   "scripts": {
     "postinstall": "prisma generate",
     "build": "tsc -p tsconfig.build.json",
+    "start": "node --env-file-if-exists=../../.env dist/main.js",
+    "start:worker": "node --env-file-if-exists=../../.env dist/main.worker.js",
+    "seed": "node --env-file-if-exists=../../.env dist/seed/seed.js",
     "typecheck": "tsc --noEmit",
     "test": "pnpm test:unit",
     "test:unit": "vitest run --project unit --passWithNoTests",

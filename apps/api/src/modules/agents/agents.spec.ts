@@ -441,6 +441,7 @@ describe("saída do modelo é não confiável", () => {
     const res = await registry.executor().request(input("q"), "t:c:1");
     expect(s.inbox.request).toHaveBeenCalledWith({
       threadId: "t:c:1",
+      turn: 1,
       agent: "executor",
       action: "transfer",
       payload: { to: "x" },

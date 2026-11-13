@@ -1,9 +1,13 @@
 /**
- * Id determinístico da solicitação de aprovação: `sha256(threadId|action|stableStringify(payload))`.
+ * Id determinístico da solicitação de aprovação:
+ * `sha256(threadId|turn|action|stableStringify(payload))`.
  *
- * Determinístico porque o nó executor roda de novo ao retomar o grafo: o mesmo pedido gera o mesmo
- * id e o upsert é idempotente. `threadId` (`tenantId:clientId:uuid`) não contém `|`; o
- * InboxService.request valida esse formato, o que também impede colisão entre tenants.
+ * Determinístico DENTRO do turno: a nova tentativa do nó executor (resposta perdida, timeout)
+ * devolve o mesmo id e o upsert é idempotente. O `turn` (contador do thread, incrementado pelo
+ * `classify` a cada turno) distingue a MESMA ordem pedida de novo num turno seguinte: ela é um
+ * pedido novo, com aprovação própria, e não reaproveita uma aprovação já decidida. `threadId`
+ * (`tenantId:clientId:uuid`) não contém `|`; o InboxService.request valida esse formato, o que
+ * também impede colisão entre tenants.
  */
 import { createHash } from "node:crypto";
 
@@ -28,8 +32,13 @@ function sortKeys(value: unknown): unknown {
   return out;
 }
 
-export function approvalId(threadId: string, action: string, payload: unknown): string {
+export function approvalId(
+  threadId: string,
+  turn: number,
+  action: string,
+  payload: unknown,
+): string {
   return createHash("sha256")
-    .update(`${threadId}|${action}|${stableStringify(payload)}`, "utf8")
+    .update(`${threadId}|${String(turn)}|${action}|${stableStringify(payload)}`, "utf8")
     .digest("hex");
 }

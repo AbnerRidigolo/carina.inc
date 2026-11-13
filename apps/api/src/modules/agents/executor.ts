@@ -64,10 +64,12 @@ export class ExecutorAgent extends LlmAgent<ActionProposal> {
   async request(
     input: AgentInput,
     threadId: string,
+    turn = 1,
   ): Promise<{ proposal: ActionProposal; approvalId: string; created: boolean }> {
     const proposal = (await this.run(input)) as ActionProposal;
     const { approvalId, created } = await this.inbox.request({
       threadId,
+      turn,
       agent: "executor",
       action: proposal.action,
       payload: proposal.payload,

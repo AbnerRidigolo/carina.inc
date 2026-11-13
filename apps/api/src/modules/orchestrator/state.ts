@@ -39,6 +39,11 @@ export const GraphState = Annotation.Root({
     default: () => [],
   }),
   question: last<string>(""),
+  /**
+   * Contador de turnos do thread, incrementado pelo `classify`. Entra no id da aprovação: a mesma
+   * ordem pedida em outro turno gera outra aprovação (checkpoints antigos começam em 0).
+   */
+  turn: last<number>(0),
   plan: last<Plan | null>(null),
   knowledge: last<SearchResult | null>(null),
   results: Annotation<Record<string, unknown>>({ reducer: merge, default: () => ({}) }),

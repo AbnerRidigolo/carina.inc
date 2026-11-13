@@ -246,6 +246,76 @@ describe("Orquestrador (int)", () => {
     expect(await executions(B, approvalId)).toHaveLength(0);
   });
 
+  describe("a mesma ordem repetida no mesmo thread (um pedido novo por turno)", () => {
+    const BUY = "compre 100 ações de PETR4";
+    const approvalOf = (events: ChatEvent[]) => {
+      const last = events.at(-1);
+      if (last?.type !== "approval_required") throw new Error("esperava approval_required");
+      return last.approval;
+    };
+
+    it("depois de aprovada e executada: a 2ª cria OUTRA aprovação pendente e só executa depois da decisão", async () => {
+      const threadId = thread(A);
+      const first = approvalOf(await turn(t1, A, threadId, BUY));
+      await decide(t1, A, first.id, true);
+      await as(A, () => svc(t1).resume(threadId, true));
+      expect(placeTrade).toHaveBeenCalledTimes(1);
+
+      const second = approvalOf(await turn(t1, A, threadId, BUY));
+      expect(second.id).not.toBe(first.id);
+      expect(second.status).toBe("pending");
+      expect(placeTrade).toHaveBeenCalledTimes(1);
+      const pending = await as(A, () => t1.app.get(InboxService).listPending("cli-1"));
+      expect(pending.map((a) => a.id)).toContain(second.id);
+
+      await decide(t1, A, second.id, true);
+      const out = await as(A, () => svc(t1).resume(threadId, true));
+      expect(out.execution).toMatchObject({ approvalId: second.id, status: "succeeded" });
+      expect(placeTrade).toHaveBeenCalledTimes(2);
+      expect(await executions(A, first.id)).toEqual([{ status: "succeeded" }]);
+      expect(await executions(A, second.id)).toEqual([{ status: "succeeded" }]);
+      // O thread não fica preso: um turno comum passa.
+      expect((await turn(t1, A, threadId, "como está minha carteira?")).length).toBeGreaterThan(0);
+    });
+
+    it("depois de rejeitada: a 2ª é um pedido novo pendente, nunca fechado sem decisão humana", async () => {
+      const threadId = thread(A);
+      const first = approvalOf(await turn(t1, A, threadId, BUY));
+      await decide(t1, A, first.id, false);
+      await as(A, () => svc(t1).resume(threadId, false));
+
+      const second = approvalOf(await turn(t1, A, threadId, BUY));
+      expect(second.id).not.toBe(first.id);
+      expect(second.status).toBe("pending");
+      // O próximo turno não fecha a 2ª como rejeitada: ela segue pendente (409 até a decisão).
+      await expect(turn(t1, A, threadId, "olá")).rejects.toThrow(/ainda não foi decidida/);
+      const rows = await approvals(A);
+      expect(rows.find((r) => r.id === second.id)?.status).toBe("pending");
+      expect(rows.find((r) => r.id === first.id)?.status).toBe("rejected");
+      expect(placeTrade).not.toHaveBeenCalled();
+    });
+
+    it("idempotência dentro do turno: o pedido repetido no MESMO turno devolve o mesmo id", async () => {
+      const inbox = t1.app.get(InboxService);
+      const threadId = thread(A);
+      const input = {
+        threadId,
+        turn: 3,
+        agent: "executor",
+        action: "place_trade",
+        payload: { side: "buy", assetCode: "PETR4", quantity: 100 },
+        valueBrl: "3000.00",
+      };
+      const a = await as(A, () => inbox.request(input));
+      const b = await as(A, () => inbox.request(input));
+      expect(a).toEqual({ approvalId: a.approvalId, created: true });
+      expect(b).toEqual({ approvalId: a.approvalId, created: false });
+      const c = await as(A, () => inbox.request({ ...input, turn: 4 }));
+      expect(c.created).toBe(true);
+      expect(c.approvalId).not.toBe(a.approvalId);
+    });
+  });
+
   it("outro tenant não retoma nem lê o thread", async () => {
     const threadId = thread(A);
     const events = await turn(t1, A, threadId, "compre 9 ações de WEGE3");

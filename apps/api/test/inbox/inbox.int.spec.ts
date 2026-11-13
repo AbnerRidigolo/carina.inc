@@ -84,6 +84,7 @@ describe("Inbox (int)", () => {
 
   const reqInput = (p: Party, over: Record<string, unknown> = {}) => ({
     threadId: `${p.tenantId}:${p.clientId}:${randomUUID()}`,
+    turn: 1,
     agent: "executor",
     action: "place_trade",
     payload: { symbol: "PETR4", qty: 100 },

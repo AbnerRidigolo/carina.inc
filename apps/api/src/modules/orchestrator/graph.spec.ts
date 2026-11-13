@@ -346,6 +346,7 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(s.inbox.request).toHaveBeenCalledTimes(1);
       expect(s.inbox.request).toHaveBeenCalledWith({
         threadId,
+        turn: 1,
         agent: "executor",
         action: "place_trade",
         payload: { side: "buy", assetCode: "PETR4", quantity: 100 },

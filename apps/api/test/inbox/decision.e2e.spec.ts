@@ -7,7 +7,7 @@ import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js"
 import { migratorSql, must } from "../setup/db.js";
 import { redisDbOf } from "../setup/redis-dbs.js";
 
-const hex = () => approvalId(crypto.randomUUID(), "place_trade", { n: Math.random() });
+const hex = () => approvalId(crypto.randomUUID(), 1, "place_trade", { n: Math.random() });
 
 describe("Inbox HTTP: listagem e decisão", () => {
   let t: TestApp;

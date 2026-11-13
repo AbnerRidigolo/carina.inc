@@ -85,6 +85,8 @@ export const inboxLoggerProvider = {
 
 export interface RequestInput {
   threadId: string;
+  /** Turno do thread (≥ 1) em que o pedido nasceu: a mesma ordem em outro turno é outro pedido. */
+  turn: number;
   agent: string;
   action: string;
   payload: Record<string, unknown>;
@@ -225,6 +227,9 @@ export class InboxService {
     ) {
       throw new ValidationError("threadId precisa ser tenantId:clientId:<id> do contexto atual");
     }
+    if (!Number.isSafeInteger(input.turn) || input.turn < 1) {
+      throw new ValidationError("turn precisa ser um inteiro positivo");
+    }
     if (
       typeof input.valueBrl !== "string" ||
       !MoneySchema.safeParse(input.valueBrl).success ||
@@ -244,7 +249,7 @@ export class InboxService {
       throw new ValidationError("payload grande demais ou com caractere inválido");
     }
 
-    const id = approvalId(input.threadId, input.action, input.payload);
+    const id = approvalId(input.threadId, input.turn, input.action, input.payload);
     const risk = classifyRisk(input.action);
     const expiresAt = new Date(this.clock() + this.env.APPROVAL_TTL_HOURS * HOUR_MS).toISOString();
 

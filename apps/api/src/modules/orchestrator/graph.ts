@@ -149,6 +149,7 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
       }
       // Começo do turno: zera tudo o que é do turno (os reducers de merge recebem Overwrite).
       return {
+        turn: state.turn + 1,
         plan: plan ?? heuristicPlan(state.question),
         knowledge: null,
         results: new Overwrite({}) as never,
@@ -257,13 +258,14 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
       };
 
       if (risk === "irreversible") {
-        // Upsert idempotente (id = hash(thread, ação, payload)), sob o contexto do thread.
+        // Upsert idempotente (id = hash(thread, turno, ação, payload)), sob o contexto do thread.
         // Upsert idempotente: se a 1ª chamada gravou a linha e só a resposta se perdeu (timeout),
         // repetir devolve o MESMO id e o grafo segue para o interrupt, sem deixar uma aprovação
         // órfã. ValidationError não muda numa nova tentativa e não repete.
         const request = () =>
           inbox.request({
             threadId,
+            turn: state.turn,
             agent: "executor",
             action: proposal.action,
             payload: proposal.payload,

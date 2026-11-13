@@ -48,14 +48,29 @@ export interface AuthenticatedRequest {
   tenant?: AuthTenant;
 }
 
-/** Linha de `resolve_api_key`; `scopes` é NULL quando a coluna (anulável) está NULL. */
-interface ResolvedKeyRow {
+/**
+ * Linha de `resolve_api_key` / `resolve_api_key_by_id` (chave ativa de tenant não suspenso);
+ * `scopes` é NULL quando a coluna (anulável) está NULL.
+ */
+export interface ResolvedKeyRow {
   key_id: string;
   tenant_id: string;
   tenant_name: string;
   scopes: string[] | null;
   rpm: number;
   monthly_quota: number;
+}
+
+export function toAuthTenant(row: ResolvedKeyRow): AuthTenant {
+  return {
+    keyId: row.key_id,
+    tenantId: row.tenant_id,
+    tenantName: row.tenant_name,
+    // scopes NULL (coluna anulável) = nenhum escopo; nunca "todos".
+    scopes: Array.isArray(row.scopes) ? row.scopes.filter((s) => typeof s === "string") : [],
+    rpm: row.rpm,
+    monthlyQuota: row.monthly_quota,
+  };
 }
 
 /** Uma só mensagem para todos os casos de 401: não revela se a chave existe ou foi revogada. */
@@ -138,16 +153,7 @@ export class ApiKeyGuard implements CanActivate {
       SELECT key_id, tenant_id, tenant_name, scopes, rpm, monthly_quota
       FROM resolve_api_key(${hash})`;
     const row = rows[0];
-    if (!row) return undefined;
-    return {
-      keyId: row.key_id,
-      tenantId: row.tenant_id,
-      tenantName: row.tenant_name,
-      // scopes NULL (coluna anulável) = nenhum escopo; nunca "todos".
-      scopes: Array.isArray(row.scopes) ? row.scopes.filter((s) => typeof s === "string") : [],
-      rpm: row.rpm,
-      monthlyQuota: row.monthly_quota,
-    };
+    return row ? toAuthTenant(row) : undefined;
   }
 }
 

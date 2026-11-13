@@ -19,6 +19,26 @@ describe("loadEnv", () => {
     expect(env.WEB_ORIGIN).toBe("http://localhost:5173");
     expect(env.OPENROUTER_BASE_URL).toBe("https://openrouter.ai/api/v1");
     expect(env.WORKERS_ENABLED).toBe("true");
+    expect(env.WS_MAX_CONNECTION_MS).toBe(1_800_000);
+    expect(env.API_KEY_REVALIDATE_TTL_MS).toBe(60_000);
+  });
+
+  it("WS_MAX_CONNECTION_MS: inteiro entre 1 s e 24 h", () => {
+    expect(loadEnv({ ...min, WS_MAX_CONNECTION_MS: "1000" }).WS_MAX_CONNECTION_MS).toBe(1000);
+    for (const bad of ["999", "86400001", "1.5", "abc", "-1"]) {
+      expect(() => loadEnv({ ...min, WS_MAX_CONNECTION_MS: bad }), bad).toThrow(
+        /WS_MAX_CONNECTION_MS/,
+      );
+    }
+  });
+
+  it("API_KEY_REVALIDATE_TTL_MS: de 0 a 60 s (a janela máxima entre a revogação e o efeito)", () => {
+    expect(loadEnv({ ...min, API_KEY_REVALIDATE_TTL_MS: "0" }).API_KEY_REVALIDATE_TTL_MS).toBe(0);
+    for (const bad of ["60001", "-1", "x"]) {
+      expect(() => loadEnv({ ...min, API_KEY_REVALIDATE_TTL_MS: bad }), bad).toThrow(
+        /API_KEY_REVALIDATE_TTL_MS/,
+      );
+    }
   });
 
   it('WORKERS_ENABLED aceita só "true" ou "false"', () => {

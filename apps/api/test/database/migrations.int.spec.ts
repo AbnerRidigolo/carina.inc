@@ -111,6 +111,44 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
     });
   });
 
+  it("resolve_api_key_by_id: chave ativa pelo id; revogada, inexistente ou de tenant suspenso → nada", async () => {
+    const suspended = randomUUID();
+    const suspendedHash = sha256(`sk-live-${randomUUID()}`);
+    await migratorSql(
+      `INSERT INTO tenant (id, name, plan, rpm, monthly_quota) VALUES ($1, 'Suspenso', 'pro', 60, 0)`,
+      [suspended],
+    );
+    await migratorSql(
+      `INSERT INTO api_key (tenant_id, hash, prefix, scopes) VALUES ($1, $2, 'sk-live-cccc', ARRAY['chat'])`,
+      [suspended, suspendedHash],
+    );
+    const ids = await migratorSql<{ id: string; hash: string }>(
+      `SELECT id, hash FROM api_key WHERE hash = ANY($1::text[])`,
+      [[keyHash, revokedHash, suspendedHash]],
+    );
+    const idOf = (h: string) => ids.find((r) => r.hash === h)?.id;
+    await asApp(async (c) => {
+      const active = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(keyHash)]);
+      expect(active.rows).toHaveLength(1);
+      expect(active.rows[0]).toMatchObject({ tenant_id: tenantA, rpm: 120, monthly_quota: 1000 });
+      const revoked = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(revokedHash)]);
+      expect(revoked.rows).toHaveLength(0);
+      const missing = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [randomUUID()]);
+      expect(missing.rows).toHaveLength(0);
+      // Ainda não suspenso: as duas funções resolvem.
+      expect(
+        (await c.query("SELECT * FROM resolve_api_key($1)", [suspendedHash])).rows,
+      ).toHaveLength(1);
+    });
+    await migratorSql(`UPDATE tenant SET suspended_at = now() WHERE id = $1`, [suspended]);
+    await asApp(async (c) => {
+      const byId = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(suspendedHash)]);
+      expect(byId.rows).toHaveLength(0);
+      const byHash = await c.query("SELECT * FROM resolve_api_key($1)", [suspendedHash]);
+      expect(byHash.rows).toHaveLength(0);
+    });
+  });
+
   it("resolve_api_key não é sombreada por tabelas temporárias de carina_app", async () => {
     const forgedTenant = randomUUID();
     const forgedHash = sha256(`sk-live-${randomUUID()}`);

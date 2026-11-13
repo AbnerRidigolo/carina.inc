@@ -12,13 +12,20 @@
  *    ser conferido, esperam a conferência (não se perdem).
  *  - Servidor → cliente: cada `ChatEvent` como JSON. Por mensagem: os eventos do turno até `done`
  *    ou `error { code, traceId }` (códigos de domínio, ou `validation_error`, `client_mismatch`,
- *    `turn_in_progress`, `rate_limited`, `internal_error`; nunca texto interno). A qualquer momento:
+ *    `turn_in_progress`, `rate_limited`, `unauthenticated`, `connection_expired`,
+ *    `internal_error`; nunca texto interno). A qualquer momento:
  *    `approval_required` / `approval_executed` do próprio tenant e cliente (InboxBroadcast), sem
  *    repetir um `approval_required` já enviado nesta conexão.
  *  - Um turno por conexão de cada vez (outra mensagem no meio → `turn_in_progress`); a serialização
  *    por thread entre conexões e réplicas é o lock do ChatService.
  *  - Limite por minuto do tenant por mensagem (a mesma janela `rl:<tenantId>` do RateLimitGuard do
  *    REST) e cota mensal (ChatService).
+ *  - Antes de CADA turno a chave é revalidada (`ChatService.authorize`, `resolve_api_key_by_id`,
+ *    cache de até `API_KEY_REVALIDATE_TTL_MS` ≤ 60 s — a janela máxima entre revogar a chave, tirar
+ *    o escopo `chat` ou suspender o tenant e o efeito aqui): falhou → `error unauthenticated` e
+ *    fecha com 4401, sem turno e sem cobrança. O rpm e a cota usados são os vivos, não os do ticket.
+ *  - Vida máxima (`WS_MAX_CONNECTION_MS`, padrão 30 min): fecha com 4401 ("connection expired") e o
+ *    cliente emite um ticket novo. Um turno em andamento termina antes do fechamento.
  *  - Heartbeat: ping a cada `pingIntervalMs`; sem pong até o próximo, `terminate()`. Ociosa (sem
  *    mensagem do cliente e sem turno em andamento) por `idleTimeoutMs` → fecha com 4408.
  *  - Desconexão no meio do turno: cancelamento (o turno termina em segundo plano; ver ChatService).
@@ -35,6 +42,9 @@ import { Inject, Logger, type OnModuleDestroy, type OnModuleInit, Optional } fro
 import { type OnGatewayConnection, WebSocketGateway } from "@nestjs/websockets";
 import type { Redis } from "ioredis";
 import WebSocket, { type RawData } from "ws";
+import { ENV } from "../../core/config/config.module.js";
+import type { Env } from "../../core/config/env.js";
+import { UnauthenticatedError } from "../../core/errors/domain-errors.js";
 import { REDIS } from "../../core/redis/redis.tokens.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { RATE_LIMIT_WINDOW_MS } from "../limits/rate-limit.guard.js";
@@ -56,6 +66,8 @@ export const CHAT_GATEWAY_OPTIONS = Symbol("CHAT_GATEWAY_OPTIONS");
 export interface ChatGatewayOptions {
   pingIntervalMs?: number;
   idleTimeoutMs?: number;
+  /** Padrão: `WS_MAX_CONNECTION_MS` do Env (30 min). */
+  maxLifetimeMs?: number;
 }
 
 const DEFAULT_PING_INTERVAL_MS = 30_000;
@@ -81,12 +93,13 @@ function textOf(data: RawData): string {
 }
 
 interface ConnectionDeps {
-  chat: Pick<ChatService, "run">;
+  chat: Pick<ChatService, "run" | "authorize">;
   tickets: Pick<WsTicketService, "consume">;
   broadcast: Pick<InboxBroadcast, "subscribe">;
   redis: Pick<Redis, "eval">;
   clock: Clock;
   logger: ChatLogger;
+  maxLifetimeMs: number;
 }
 
 /** Estado de uma conexão autenticada (ou em autenticação). */
@@ -98,12 +111,27 @@ class ChatConnection {
   private readonly abort = new AbortController();
   private unsubscribe: (() => void) | undefined;
   private readonly sentApprovals = new Set<string>();
+  private readonly openedAt: number;
+  /** A vida máxima venceu com um turno em andamento: fecha quando o turno terminar. */
+  private expiring = false;
 
   constructor(
     readonly socket: WebSocket,
     private readonly deps: ConnectionDeps,
   ) {
-    this.lastActivity = deps.clock();
+    this.openedAt = deps.clock();
+    this.lastActivity = this.openedAt;
+  }
+
+  private expired(now: number): boolean {
+    return now - this.openedAt >= this.deps.maxLifetimeMs;
+  }
+
+  /** Fecha por vida máxima vencida (4401: o cliente emite um ticket novo e reconecta). */
+  private closeExpired(): void {
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close(WS_CLOSE_UNAUTHORIZED, "connection expired");
+    }
   }
 
   start(ticket: string | undefined): void {
@@ -134,11 +162,17 @@ class ChatConnection {
       });
   }
 
-  /** Heartbeat e ociosidade (chamado pelo timer do gateway). */
+  /** Heartbeat, vida máxima e ociosidade (chamado pelo timer do gateway). */
   tick(now: number, idleTimeoutMs: number): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
     if (!this.alive) {
       this.socket.terminate();
+      return;
+    }
+    if (this.expired(now)) {
+      // Turno em andamento termina antes (o grafo nunca é abandonado no meio de um nó).
+      if (this.busy) this.expiring = true;
+      else this.closeExpired();
       return;
     }
     this.alive = false;
@@ -191,9 +225,23 @@ class ChatConnection {
     }
     // Checado e marcado sem await no meio: duas mensagens nunca passam juntas.
     if (this.busy) return this.sendError("turn_in_progress", traceId);
+    if (this.expired(this.deps.clock())) {
+      this.sendError("connection_expired", traceId);
+      return this.closeExpired();
+    }
     this.busy = true;
     try {
-      const { tenant } = grant;
+      // Revalida a chave antes de CADA turno (cache ≤ 60 s): revogada, sem `chat` ou tenant
+      // suspenso → error unauthenticated e 4401, sem turno e sem cobrança. rpm e cota: os vivos.
+      let tenant;
+      try {
+        tenant = await this.deps.chat.authorize(grant.tenant);
+      } catch (err) {
+        if (!(err instanceof UnauthenticatedError)) throw err;
+        this.sendError("unauthenticated", traceId);
+        this.socket.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+        return;
+      }
       const { allowed } = await slidingWindowAcquire(
         this.deps.redis,
         `rl:${tenant.tenantId}`,
@@ -207,10 +255,15 @@ class ChatConnection {
         signal: this.abort.signal,
       })) {
         this.send(event);
+        // Revogada entre a checagem acima e o turno (o ChatService revalida de novo).
+        if (event.type === "error" && event.code === "unauthenticated") {
+          this.socket.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+        }
       }
     } finally {
       this.busy = false;
       this.lastActivity = this.deps.clock();
+      if (this.expiring || this.expired(this.deps.clock())) this.closeExpired();
     }
   }
 
@@ -243,6 +296,7 @@ export class ChatGateway implements OnGatewayConnection, OnModuleInit, OnModuleD
     @Inject(InboxBroadcast) broadcast: InboxBroadcast,
     @Inject(REDIS) redis: Redis,
     @Inject(CLOCK) clock: Clock,
+    @Inject(ENV) env: Pick<Env, "WS_MAX_CONNECTION_MS">,
     @Optional() @Inject(CHAT_GATEWAY_OPTIONS) opts: ChatGatewayOptions | null = null,
     @Optional()
     @Inject(CHAT_LOGGER)
@@ -250,7 +304,8 @@ export class ChatGateway implements OnGatewayConnection, OnModuleInit, OnModuleD
   ) {
     this.pingIntervalMs = opts?.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
     this.idleTimeoutMs = opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-    this.deps = { chat, tickets, broadcast, redis, clock, logger };
+    const maxLifetimeMs = opts?.maxLifetimeMs ?? env.WS_MAX_CONNECTION_MS;
+    this.deps = { chat, tickets, broadcast, redis, clock, logger, maxLifetimeMs };
   }
 
   onModuleInit(): void {

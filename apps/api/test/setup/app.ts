@@ -69,6 +69,8 @@ export interface CreateTestAppOptions {
    * do stream `jobs` rode nos testes que não pediram (eles leem e contam os eventos de lá).
    */
   workersEnabled?: boolean;
+  /** Variáveis de ambiente extras (validadas pelo loadEnv), ex.: limites curtos para testes. */
+  env?: Record<string, string>;
 }
 
 export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<TestApp> {
@@ -80,6 +82,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     REDIS_URL: opts.redisDb === undefined ? redisUrl() : redisDbUrl(opts.redisDb),
     LLM_MODE: "mock",
     WORKERS_ENABLED: opts.workersEnabled === true ? "true" : "false",
+    ...opts.env,
   });
 
   let builder = Test.createTestingModule({

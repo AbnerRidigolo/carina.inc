@@ -30,13 +30,15 @@ datasource db {
 // ─── Tenancy ────────────────────────────────────────────────────────────────
 
 model Tenant {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name         String
   plan         String
-  rpm          Int      @default(60)
+  rpm          Int       @default(60)
   /// 0 = ilimitada
-  monthlyQuota Int      @default(0) @map("monthly_quota")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  monthlyQuota Int       @default(0) @map("monthly_quota")
+  /// tenant suspenso: as chaves dele não autenticam (resolve_api_key/resolve_api_key_by_id)
+  suspendedAt  DateTime? @map("suspended_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   apiKeys     ApiKey[]
   clients     Client[]

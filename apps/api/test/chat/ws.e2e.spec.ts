@@ -17,6 +17,7 @@ import { CHAT_GATEWAY_OPTIONS } from "../../src/modules/chat/chat.gateway.js";
 import { monthKey } from "../../src/modules/limits/month.js";
 import { MockResponderRegistry } from "../../src/modules/llm/mock-models.js";
 import { OrchestratorService } from "../../src/modules/orchestrator/orchestrator.service.js";
+import { hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
 import { FailingMockRegistry, eventually, gateOrchestrator } from "./helpers.js";
@@ -508,5 +509,153 @@ describe("Chat WebSocket: heartbeat, ociosidade e encerramento", () => {
     closed = true;
     await t.close();
     expect((await s.waitClose(3000)).code).toBe(1001);
+  });
+});
+
+describe("Chat WebSocket: revalidação da chave e tempo máximo de vida", () => {
+  let t: TestApp;
+  let redis: Redis;
+  const sockets: TestSocket[] = [];
+  const MAX_LIFE_MS = 1000;
+
+  beforeAll(async () => {
+    t = await createTestApp({
+      imports: [ChatModule],
+      redisDb: REDIS_DB,
+      // Sem cache na revalidação (efeito imediato) e vida curta; heartbeat curto para a checagem.
+      env: { API_KEY_REVALIDATE_TTL_MS: "0", WS_MAX_CONNECTION_MS: String(MAX_LIFE_MS) },
+      overrides: [{ token: CHAT_GATEWAY_OPTIONS, useValue: { pingIntervalMs: 100 } }],
+    });
+    redis = new Redis(redisDbUrl(REDIS_DB));
+  });
+
+  afterAll(async () => {
+    for (const s of sockets) s.close();
+    await t?.close();
+    await redis?.quit();
+  });
+
+  afterEach(async () => {
+    for (const s of sockets.splice(0)) {
+      s.close();
+      await s.waitClose().catch(() => undefined);
+    }
+  });
+
+  const connect = async (key: string): Promise<TestSocket> => {
+    const res = await request(t.app.getHttpServer() as http.Server)
+      .post("/api/ws/ticket")
+      .set("Authorization", `Bearer ${key}`)
+      .send({ clientId: "cli-1" });
+    expect(res.status).toBe(201);
+    const ticket = WsTicketSchema.parse(res.body).ticket;
+    const s = new TestSocket(
+      new WebSocket(`ws://127.0.0.1:${portOf(t)}/ws/chat?ticket=${ticket}`, { autoPong: true }),
+    );
+    sockets.push(s);
+    await s.opened;
+    return s;
+  };
+
+  const usageCount = async (tenantId: string) =>
+    Number(
+      must(
+        (
+          await migratorSql<{ n: string }>(`SELECT count(*)::text AS n FROM usage_record`, [], {
+            tenantId,
+          })
+        )[0],
+      ).n,
+    );
+
+  /** Turno recusado pela revalidação: error unauthenticated, 4401, nada cobrado nem reservado. */
+  const expectRefused = async (tenant: SeededTenant, s: TestSocket) => {
+    const quotaKey = `quota:${tenant.tenantId}:${monthKey(Date.now())}`;
+    await redis.set(quotaKey, "3");
+    const usage0 = await usageCount(tenant.tenantId);
+    s.send({ clientId: "cli-1", message: "olá" });
+    const closed = await s.waitClose();
+    expect(closed.code).toBe(4401);
+    expect(s.events.map((e) => e.type)).toEqual(["error"]);
+    expect(s.of("error")[0]?.code).toBe("unauthenticated");
+    expect(await usageCount(tenant.tenantId)).toBe(usage0);
+    expect(await redis.get(quotaKey)).toBe("3");
+  };
+
+  it("chave revogada com o socket aberto: o próximo turno é recusado e o socket fecha com 4401", async () => {
+    const tenant = await t.seedTenant({ name: "Rev", monthlyQuota: 100 });
+    const s = await connect(tenant.keys.chat);
+    await t.revokeKey(tenant.keys.chat);
+    await expectRefused(tenant, s);
+  });
+
+  it("escopo chat removido da chave: mesmo resultado", async () => {
+    const tenant = await t.seedTenant({ name: "Scope", monthlyQuota: 100 });
+    const s = await connect(tenant.keys.chat);
+    await migratorSql(`UPDATE api_key SET scopes = '{inbox:decide}' WHERE hash = $1`, [
+      hashApiKey(tenant.keys.chat),
+    ]);
+    await expectRefused(tenant, s);
+  });
+
+  it("tenant suspenso: mesmo resultado, e o REST também recusa (401)", async () => {
+    const tenant = await t.seedTenant({ name: "Susp", monthlyQuota: 100 });
+    const s = await connect(tenant.keys.chat);
+    await migratorSql(`UPDATE tenant SET suspended_at = now() WHERE id = $1`, [tenant.tenantId]);
+    await expectRefused(tenant, s);
+    const rest = await request(t.app.getHttpServer() as http.Server)
+      .post("/api/chat")
+      .set("Authorization", `Bearer ${tenant.keys.chat}`)
+      .send({ clientId: "cli-1", message: "olá" });
+    expect(rest.status).toBe(401);
+  });
+
+  it("rpm e cota vêm do tenant vivo, não do retrato do ticket", async () => {
+    const tenant = await t.seedTenant({ name: "Plano", rpm: 1000, monthlyQuota: 100 });
+    const s = await connect(tenant.keys.chat); // o ticket gasta 1 da janela
+    // Plano reduzido depois da emissão do ticket: rpm 1 (a janela já tem 1) → rate_limited.
+    await migratorSql(`UPDATE tenant SET rpm = 1 WHERE id = $1`, [tenant.tenantId]);
+    s.send({ clientId: "cli-1", message: "olá" });
+    await s.waitFor((e) => e.type === "error", "rate_limited");
+    expect(s.of("error")[0]?.code).toBe("rate_limited");
+    // Cota mensal reduzida abaixo do já usado → quota_exceeded.
+    await migratorSql(`UPDATE tenant SET rpm = 1000, monthly_quota = 2 WHERE id = $1`, [
+      tenant.tenantId,
+    ]);
+    await redis.set(`quota:${tenant.tenantId}:${monthKey(Date.now())}`, "5");
+    s.send({ clientId: "cli-1", message: "olá" });
+    await eventually(() => s.of("error").length === 2, 10_000, "quota_exceeded");
+    expect(s.of("error")[1]?.code).toBe("quota_exceeded");
+  });
+
+  it("o tempo máximo de vida fecha a conexão com 4401, e um ticket novo funciona", async () => {
+    const tenant = await t.seedTenant({ name: "Vida" });
+    const s = await connect(tenant.keys.chat);
+    const started = Date.now();
+    const closed = await s.waitClose(5000);
+    expect(closed.code).toBe(4401);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(MAX_LIFE_MS - 50);
+    const again = await connect(tenant.keys.chat);
+    again.send({ clientId: "cli-1", message: "olá" });
+    await again.waitFor((e) => e.type === "done", "done no socket novo");
+  });
+
+  it("um turno em andamento termina antes de o socket fechar por tempo de vida", async () => {
+    const tenant = await t.seedTenant({ name: "Vida turno" });
+    const s = await connect(tenant.keys.chat);
+    const gate = gateOrchestrator(t);
+    try {
+      s.send({ clientId: "cli-1", message: "olá" });
+      await gate.reached;
+      await new Promise((r) => setTimeout(r, MAX_LIFE_MS + 300)); // a vida venceu no meio do turno
+      expect(s.closed).toBeUndefined();
+      gate.release();
+      await s.waitFor((e) => e.type === "done", "done");
+      expect((await s.waitClose(3000)).code).toBe(4401);
+      expect(s.events.at(-1)?.type).toBe("done");
+    } finally {
+      gate.release();
+      gate.restore();
+    }
   });
 });

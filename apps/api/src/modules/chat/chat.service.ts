@@ -3,6 +3,9 @@
  *
  * Ordem (cada passo só roda se o anterior passou):
  *  1. valida o `ChatRequest` → `ValidationError` ANTES de reservar a cota;
+ *  1b. revalida a chave (`authorize`: `LiveKeyService`, cache ≤ 60 s): revogada, sem o escopo
+ *     `chat` ou de tenant suspenso → `UnauthenticatedError` (nenhum turno, nada reservado). Daqui em
+ *     diante vale o tenant VIVO (rpm e cota atuais), não o retrato do ticket do WebSocket;
  *  2. reserva 1 unidade da cota (`QuotaService.reserve`);
  *  3. resolve o cliente final (`create: true`);
  *  4. monta o `threadId`: o recebido precisa ser `${tenantId}:${clientUuid}:<id>` (senão
@@ -55,6 +58,7 @@ import {
   DomainError,
   NotFoundError,
   ThreadBusyError,
+  UnauthenticatedError,
   ValidationError,
 } from "../../core/errors/domain-errors.js";
 import { type LockHandle, LockService } from "../../core/redis/lock.service.js";
@@ -66,6 +70,7 @@ import { QuotaService } from "../limits/quota.service.js";
 import { OrchestratorService } from "../orchestrator/orchestrator.service.js";
 import type { AuthTenant } from "../tenancy/api-key.guard.js";
 import { ClientsService } from "../tenancy/clients.service.js";
+import { LiveKeyService } from "../tenancy/live-key.service.js";
 import { WatchtowerService } from "../watchtower/watchtower.service.js";
 
 export type ChatChannel = "rest" | "ws";
@@ -208,10 +213,24 @@ export class ChatService implements OnModuleDestroy {
     @Inject(LockService) private readonly locks: Pick<LockService, "acquire">,
     @Inject(InboxService) private readonly inbox: Pick<InboxService, "get">,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(LiveKeyService) private readonly keys: Pick<LiveKeyService, "resolve">,
     @Optional()
     @Inject(CHAT_LOGGER)
     private readonly logger: ChatLogger = new Logger(ChatService.name),
   ) {}
+
+  /**
+   * Revalida a chave do turno: ainda ativa (não revogada, tenant não suspenso), do mesmo tenant e
+   * com o escopo `chat`. Devolve o tenant VIVO (escopos, rpm e cota atuais). Um só erro para todos
+   * os casos (não revela qual). Cache de até `API_KEY_REVALIDATE_TTL_MS` (≤ 60 s).
+   */
+  async authorize(tenant: AuthTenant): Promise<AuthTenant> {
+    const live = await this.keys.resolve(tenant.keyId);
+    if (!live || live.tenantId !== tenant.tenantId || !live.scopes.includes("chat")) {
+      throw new UnauthenticatedError("Chave de API ausente ou inválida");
+    }
+    return live;
+  }
 
   /**
    * Eventos do turno; qualquer falha vira o evento final `error { code, traceId }` (sem mensagem
@@ -315,14 +334,16 @@ export class ChatService implements OnModuleDestroy {
   }
 
   private async pump(
-    tenant: AuthTenant,
+    authenticated: AuthTenant,
     req: ChatRequest,
     channel: ChatChannel,
     queue: TurnQueue,
     traceId: string | undefined,
   ): Promise<void> {
     const startedAt = Date.now();
+    let tenant: AuthTenant;
     try {
+      tenant = await this.authorize(authenticated);
       await this.quota.reserve(tenant);
     } catch (err) {
       queue.fail(err); // nada reservado, nada a devolver

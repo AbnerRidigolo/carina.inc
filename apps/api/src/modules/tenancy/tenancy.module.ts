@@ -4,6 +4,7 @@ import { DatabaseModule } from "../../core/database/database.module.js";
 import { ApiKeyGuard, TenantContextInterceptor } from "./api-key.guard.js";
 import { ClientsController } from "./clients.controller.js";
 import { ClientsService } from "./clients.service.js";
+import { LiveKeyService } from "./live-key.service.js";
 
 /**
  * Registra o ApiKeyGuard e o TenantContextInterceptor como globais: toda rota HTTP exige chave,
@@ -15,9 +16,10 @@ import { ClientsService } from "./clients.service.js";
   controllers: [ClientsController],
   providers: [
     ClientsService,
+    LiveKeyService,
     { provide: APP_GUARD, useClass: ApiKeyGuard },
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
   ],
-  exports: [ClientsService],
+  exports: [ClientsService, LiveKeyService],
 })
 export class TenancyModule {}

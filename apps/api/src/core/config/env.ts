@@ -23,6 +23,16 @@ export const EnvSchema = z
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
     /** Liga os workers de fundo (consumidores de streams, ex.: Sync) neste processo. */
     WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
+    /**
+     * Vida máxima de uma conexão WebSocket do chat (ms). Ao vencer, o servidor fecha com 4401 (depois
+     * de terminar o turno em andamento) e o cliente emite um ticket novo.
+     */
+    WS_MAX_CONNECTION_MS: z.coerce.number().int().min(1000).max(86_400_000).default(1_800_000),
+    /**
+     * Cache da revalidação da chave por id (ms) antes de cada turno de chat. É a janela MÁXIMA entre
+     * revogar a chave / tirar o escopo `chat` / suspender o tenant e o efeito num socket aberto.
+     */
+    API_KEY_REVALIDATE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(60_000),
   })
   .refine((e) => e.LLM_MODE !== "live" || e.OPENROUTER_API_KEY !== undefined, {
     path: ["OPENROUTER_API_KEY"],

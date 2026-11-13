@@ -660,3 +660,62 @@ describe("Chat WebSocket: revalidação da chave e tempo máximo de vida", () =>
     }
   });
 });
+
+describe("Chat WebSocket: revogação com o socket ocioso (sem mandar mensagem)", () => {
+  let t: TestApp;
+  const sockets: TestSocket[] = [];
+
+  beforeAll(async () => {
+    t = await createTestApp({
+      imports: [ChatModule],
+      redisDb: REDIS_DB,
+      // Revalidação sem cache e heartbeat curto; vida máxima padrão (30 min): o fechamento só pode
+      // vir da revalidação.
+      env: { API_KEY_REVALIDATE_TTL_MS: "0" },
+      overrides: [{ token: CHAT_GATEWAY_OPTIONS, useValue: { pingIntervalMs: 100 } }],
+    });
+  });
+
+  afterAll(async () => {
+    for (const s of sockets) s.close();
+    await t?.close();
+  });
+
+  const connect = async (key: string): Promise<TestSocket> => {
+    const res = await request(t.app.getHttpServer() as http.Server)
+      .post("/api/ws/ticket")
+      .set("Authorization", `Bearer ${key}`)
+      .send({ clientId: "cli-1" });
+    expect(res.status).toBe(201);
+    const ticket = WsTicketSchema.parse(res.body).ticket;
+    const s = new TestSocket(
+      new WebSocket(`ws://127.0.0.1:${portOf(t)}/ws/chat?ticket=${ticket}`, { autoPong: true }),
+    );
+    sockets.push(s);
+    await s.opened;
+    return s;
+  };
+
+  it("para de receber approval_required, recebe error unauthenticated e fecha com 4401", async () => {
+    const tenant = await t.seedTenant({ name: "Revogada ociosa" });
+    const idle = await connect(tenant.keys.chat);
+    const buyer = await connect(tenant.keys.approver);
+
+    // Controle: antes da revogação, o socket ocioso recebe o approval_required do outro socket.
+    buyer.send({ clientId: "cli-1", message: "compre 100 ações de PETR4" });
+    await buyer.waitFor((e) => e.type === "done", "done da compra");
+    await idle.waitFor((e) => e.type === "approval_required", "broadcast antes da revogação");
+    const before = idle.of("approval_required").length;
+
+    await t.revokeKey(tenant.keys.chat);
+    const closed = await idle.waitClose(5000);
+    expect(closed.code).toBe(4401);
+    expect(idle.events.at(-1)).toMatchObject({ type: "error", code: "unauthenticated" });
+
+    // Depois: outra compra do mesmo cliente não chega ao socket revogado.
+    const buyer2 = await connect(tenant.keys.approver);
+    buyer2.send({ clientId: "cli-1", message: "compre 10 ações de VALE3" });
+    await buyer2.waitFor((e) => e.type === "approval_required", "2ª compra");
+    expect(idle.of("approval_required")).toHaveLength(before);
+  });
+});

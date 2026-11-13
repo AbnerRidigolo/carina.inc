@@ -114,6 +114,9 @@ class ChatConnection {
   private readonly openedAt: number;
   /** A vida máxima venceu com um turno em andamento: fecha quando o turno terminar. */
   private expiring = false;
+  /** Grant do ticket, depois de conferido (para a revalidação periódica no heartbeat). */
+  private grant: WsTicketGrant | undefined;
+  private revalidating = false;
 
   constructor(
     readonly socket: WebSocket,
@@ -152,6 +155,7 @@ class ChatConnection {
           this.socket.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
           return null;
         }
+        this.grant = grant;
         this.unsubscribe = this.deps.broadcast.subscribe({
           tenantId: grant.tenant.tenantId,
           clientId: grant.client.id,
@@ -177,9 +181,42 @@ class ChatConnection {
     }
     this.alive = false;
     this.socket.ping();
+    this.revalidate();
     if (!this.busy && now - this.lastActivity >= idleTimeoutMs) {
       this.socket.close(WS_CLOSE_IDLE, "idle");
     }
+  }
+
+  /**
+   * Revalida a chave a cada heartbeat (o `authorize` tem cache de até API_KEY_REVALIDATE_TTL_MS):
+   * um socket OCIOSO também para de receber o push da inbox quando a chave é revogada, perde o
+   * escopo `chat` ou o tenant é suspenso. Falhou: para de entregar, manda `error unauthenticated`
+   * e fecha com 4401. Erro que não é de autenticação (ex.: banco fora) só é logado: o próximo
+   * heartbeat tenta de novo, e cada turno revalida por conta própria.
+   */
+  private revalidate(): void {
+    const grant = this.grant;
+    if (!grant || this.revalidating) return;
+    this.revalidating = true;
+    this.deps.chat
+      .authorize(grant.tenant)
+      .then(
+        () => undefined,
+        (err: unknown) => {
+          if (!(err instanceof UnauthenticatedError)) {
+            this.deps.logger.error({ msg: "Falha ao revalidar a chave do WebSocket", err });
+            return;
+          }
+          this.unsubscribe?.();
+          this.unsubscribe = undefined;
+          if (this.socket.readyState !== WebSocket.OPEN) return;
+          this.sendError("unauthenticated", randomUUID());
+          this.socket.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+        },
+      )
+      .finally(() => {
+        this.revalidating = false;
+      });
   }
 
   /** Socket fechou: para de entregar (o turno em andamento termina em segundo plano). */

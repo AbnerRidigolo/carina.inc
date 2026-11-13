@@ -74,7 +74,7 @@ export class OrchestratorService {
     @Inject(InboxService)
     private readonly inbox: Pick<
       InboxService,
-      "request" | "executeOnce" | "get" | "executionOf" | "expireIfDue"
+      "request" | "executeOnce" | "get" | "executionOf" | "expireIfDue" | "closeOrphan"
     >,
     @Inject(ExecutorRegistry) executors: Pick<ExecutorRegistry, "get">,
     @Inject(StreamsService) streams: Pick<StreamsService, "publish">,
@@ -227,6 +227,18 @@ export class OrchestratorService {
         (now.values as Partial<GraphStateValue>).pending?.approvalId === approvalId;
       if (stillWaiting) throw err;
     }
+  }
+
+  /**
+   * Para o worker de retomada: se o thread NÃO espera esta aprovação, fecha a aprovação como
+   * órfã (`InboxService.closeOrphan`, com carência e conferência do thread). Devolve se fechou.
+   */
+  async closeOrphan(threadId: string, approvalId: string): Promise<boolean> {
+    assertThreadInContext(threadId);
+    const snapshot = await this.graph.getState(this.config(threadId));
+    const pending = (snapshot.values as Partial<GraphStateValue>).pending?.approvalId;
+    if (pending === approvalId) return false;
+    return this.inbox.closeOrphan(approvalId, "thread_not_waiting", { threadId });
   }
 
   /** Estado atual do thread (do tenant e cliente do contexto). */

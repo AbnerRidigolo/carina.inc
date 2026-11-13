@@ -29,7 +29,7 @@ import {
 } from "../../src/modules/orchestrator/resume.worker.js";
 import { deferred } from "../chat/helpers.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
-import { migratorSql, must, redisDbUrl } from "../setup/db.js";
+import { appUrl, migratorSql, must, redisDbUrl, withPgClient } from "../setup/db.js";
 import { redisDbOf } from "../setup/redis-dbs.js";
 
 const REDIS_DB = redisDbOf("orchestrator/resume.int.spec.ts");
@@ -534,6 +534,101 @@ describe("ResumeWorker (int)", () => {
     expect(await execution(A, approvalId)).toEqual({ status: "succeeded" });
     expect(await pendingResumers()).toBe(0);
     expect(placeTrade).toHaveBeenCalledTimes(1);
+  });
+
+  describe("aprovação aprovada órfã (o thread nunca esperou por ela)", () => {
+    /** Aprovação gravada sem o `pending` do checkpoint (ex.: o turno caiu depois do request). */
+    async function orphan(t: TestApp, p: Party) {
+      const threadId = newThread(p);
+      const { approvalId } = await as(p, () =>
+        t.app.get(InboxService).request({
+          threadId,
+          turn: 1,
+          agent: "executor",
+          action: "place_trade",
+          payload: { side: "buy", assetCode: "PETR4", quantity: 100 },
+          valueBrl: "3000.00",
+        }),
+      );
+      await decide(t, p, approvalId, true);
+      await redis.del("jobs");
+      return { threadId, approvalId };
+    }
+    const resumeEvent = (p: Party, threadId: string, approvalId: string): Resume => ({
+      type: "resume",
+      eventId: randomUUID(),
+      tenantId: p.tenantId,
+      clientId: p.clientId,
+      threadId,
+      approvalId,
+      approved: true,
+    });
+    const audits = (p: Party) =>
+      migratorSql<{ query: string; channel: string }>(
+        `SELECT query, channel FROM audit_event WHERE query LIKE 'orphan:%'`,
+        [],
+        { tenantId: p.tenantId },
+      );
+    const activeTenants = () =>
+      withPgClient(appUrl(), async (c) =>
+        (await c.query<{ id: string }>("SELECT active_tenant_ids() AS id")).rows.map((r) => r.id),
+      );
+
+    it("worker: passada a carência, fecha como needs_review e audita; nada executa, a reconciliação para e o tenant sai da varredura", async () => {
+      const t = await start();
+      const A = await party(t, "Órfã worker");
+      const { threadId, approvalId } = await orphan(t, A);
+      const worker = t.app.get(ResumeWorker);
+
+      // Recém-decidida: pode ser só o checkpoint ainda não gravado. ACK sem fechar.
+      await worker.handle(resumeEvent(A, threadId, approvalId));
+      expect(await execution(A, approvalId)).toBeUndefined();
+
+      offset = 3 * 60_000; // passou a carência de 2 min
+      await worker.handle(resumeEvent(A, threadId, approvalId));
+      expect(await execution(A, approvalId)).toEqual({ status: "needs_review" });
+      expect(await audits(A)).toEqual([{ query: "orphan:place_trade", channel: "worker" }]);
+      expect(placeTrade).not.toHaveBeenCalled();
+
+      // A reconciliação não republica mais e o tenant deixa de aparecer na varredura.
+      await t.app.get(ReconciliationJob).run({ onlyTenants: [A.tenantId] });
+      expect(await resumesOf(A)).toEqual([]);
+      expect(await activeTenants()).not.toContain(A.tenantId);
+      // Reentrega posterior: idempotente (sem segunda auditoria, sem execução).
+      await worker.handle(resumeEvent(A, threadId, approvalId));
+      expect(await audits(A)).toHaveLength(1);
+      expect(placeTrade).not.toHaveBeenCalled();
+    });
+
+    it("evento com thread que não é o da aprovação não fecha nada", async () => {
+      const t = await start();
+      const A = await party(t, "Órfã thread errado");
+      const { approvalId } = await orphan(t, A);
+      offset = 3 * 60_000;
+      await t.app.get(ResumeWorker).handle(resumeEvent(A, newThread(A), approvalId));
+      expect(await execution(A, approvalId)).toBeUndefined();
+      expect(await audits(A)).toEqual([]);
+    });
+
+    it("reconciliação: aprovada sem execução além da janela de republicação vira needs_review (sem laço infinito)", async () => {
+      const t = await start();
+      const A = await party(t, "Órfã janela");
+      const { approvalId } = await orphan(t, A);
+      const job = t.app.get(ReconciliationJob);
+
+      offset = 3 * 60_000; // dentro da janela: republica
+      await job.run({ onlyTenants: [A.tenantId] });
+      expect((await resumesOf(A)).map((e) => e.approvalId)).toEqual([approvalId]);
+      await redis.del("jobs");
+
+      offset = 2 * HOUR; // além da janela: fecha em vez de republicar
+      await job.run({ onlyTenants: [A.tenantId] });
+      expect(await resumesOf(A)).toEqual([]);
+      expect(await execution(A, approvalId)).toEqual({ status: "needs_review" });
+      expect(await audits(A)).toHaveLength(1);
+      expect(await activeTenants()).not.toContain(A.tenantId);
+      expect(placeTrade).not.toHaveBeenCalled();
+    });
   });
 
   describe("resume perdido (ex.: foi para a DLQ): o guard do stream cura o thread", () => {

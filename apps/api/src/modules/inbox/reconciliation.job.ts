@@ -34,13 +34,19 @@ import { TenantPrismaService } from "../../core/database/tenant-prisma.service.j
 import { LockService } from "../../core/redis/lock.service.js";
 import { StreamsService } from "../../core/redis/streams.service.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
-import { INBOX_LOGGER, publishResume, type InboxLogger } from "./inbox.service.js";
+import { INBOX_LOGGER, InboxService, publishResume, type InboxLogger } from "./inbox.service.js";
 
 export const RECONCILIATION_INTERVAL_MS = 60_000;
 export const RECONCILIATION_LOCK_KEY = "inbox:reconciliation:lock";
 const LOCK_TTL_MS = 50_000;
 const APPROVED_GRACE_MS = 2 * 60_000;
 const STARTED_STALE_MS = 5 * 60_000;
+/**
+ * Janela de republicação de uma aprovação `approved` sem execução. Passada a janela, o `resume`
+ * não é mais republicado e a aprovação é fechada como órfã (needs_review, auditada): sem laço
+ * infinito de republicação nem tenant eterno em `active_tenant_ids()`.
+ */
+export const APPROVED_REPUBLISH_WINDOW_MS = 60 * 60_000;
 const BATCH = 500;
 
 interface ApprovalRef {
@@ -69,6 +75,7 @@ export class ReconciliationJob
     @Inject(LockService) private readonly locks: LockService,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(INBOX_LOGGER) private readonly logger: InboxLogger,
+    @Inject(InboxService) private readonly inbox: Pick<InboxService, "closeOrphan">,
   ) {}
 
   /** O timer está ligado. */
@@ -145,6 +152,7 @@ export class ReconciliationJob
     const now = this.clock();
     const nowIso = new Date(now).toISOString();
     const approvedBefore = new Date(now - APPROVED_GRACE_MS).toISOString();
+    const republishSince = new Date(now - APPROVED_REPUBLISH_WINDOW_MS).toISOString();
     const startedBefore = new Date(now - STARTED_STALE_MS).toISOString();
 
     // 1. vencidas → expired
@@ -168,16 +176,22 @@ export class ReconciliationJob
       });
     }
 
-    // 2. approved sem execução há > 2 min → republica resume
+    // 2. approved sem execução há > 2 min → republica resume; além da janela → fecha como órfã
     const stuck = await this.db.tx(
       (tx) =>
-        tx.$queryRaw<ApprovalRef[]>`
-        SELECT a.id, a.client_id, a.thread_id FROM approval_request a
+        tx.$queryRaw<(ApprovalRef & { expired_window: boolean })[]>`
+        SELECT a.id, a.client_id, a.thread_id,
+               a.decided_at < ${republishSince}::timestamptz AS expired_window
+        FROM approval_request a
         WHERE a.status = 'approved' AND a.decided_at <= ${approvedBefore}::timestamptz
           AND NOT EXISTS (SELECT 1 FROM executed_action e WHERE e.approval_request_id = a.id)
         ORDER BY a.decided_at, a.id LIMIT ${BATCH}`,
     );
     for (const row of stuck) {
+      if (row.expired_window) {
+        await this.inbox.closeOrphan(row.id, "republish_window", { minAgeMs: 0 });
+        continue;
+      }
       await publishResume(this.streams, this.logger, {
         tenantId,
         clientId: row.client_id,

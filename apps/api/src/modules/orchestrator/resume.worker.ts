@@ -136,7 +136,10 @@ export class ResumeWorker
     @Inject(ENV) private readonly env: Pick<Env, "WORKERS_ENABLED">,
     @Inject(StreamsService) private readonly streams: Pick<StreamsService, "consume">,
     @Inject(OrchestratorService)
-    private readonly orchestrator: Pick<OrchestratorService, "resume" | "finalState">,
+    private readonly orchestrator: Pick<
+      OrchestratorService,
+      "resume" | "finalState" | "closeOrphan"
+    >,
     @Inject(RESUME_LOGGER) private readonly logger: ResumeLogger,
     @Optional()
     @Inject(RESUME_STOP_TIMEOUT)
@@ -220,11 +223,24 @@ export class ResumeWorker
         { tenantId: event.tenantId, clientId: event.clientId },
         async () => {
           const state = await this.orchestrator.finalState(event.threadId);
-          if (state.pending?.approvalId !== event.approvalId) return null;
+          if (state.pending?.approvalId !== event.approvalId) {
+            // Aprovada mas órfã (o thread nunca vai esperar por ela): fecha como needs_review
+            // depois da carência, para não ficar republicada para sempre.
+            return (await this.orchestrator.closeOrphan(event.threadId, event.approvalId))
+              ? "orphaned"
+              : null;
+          }
           const { execution } = await this.orchestrator.resume(event.threadId, event.approved);
           return execution.status;
         },
       );
+      if (status === "orphaned") {
+        this.logger.warn({
+          msg: "Aprovação órfã fechada como needs_review: o thread não aguarda esta aprovação",
+          ...ids,
+        });
+        return;
+      }
       if (status === null) {
         this.logger.warn({
           msg: "Evento resume descartado: o thread não aguarda esta aprovação",

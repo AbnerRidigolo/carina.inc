@@ -114,6 +114,15 @@ const EXECUTION_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 const HOUR_MS = 3_600_000;
+/**
+ * Carência antes de fechar uma aprovação `approved` cujo thread não espera por ela: logo depois do
+ * `request` a linha já existe, mas o `pending` do checkpoint só é gravado quando o nó executor
+ * termina. Uma decisão nessa janela parece órfã sem ser; passada a carência (a mesma do
+ * republish da reconciliação), não é mais.
+ */
+export const ORPHAN_GRACE_MS = 2 * 60_000;
+
+export type OrphanReason = "thread_not_waiting" | "republish_window";
 const APPROVAL_ID_RE = /^[0-9a-f]{64}$/;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_ERROR_CHARS = 500;
@@ -298,6 +307,61 @@ export class InboxService {
       }),
     );
     return rows.map((row) => toView(row, client.externalId));
+  }
+
+  /**
+   * Fecha uma aprovação `approved` que nunca vai executar porque o thread não espera por ela
+   * (a linha foi gravada, mas o `pending` do checkpoint não; ex.: o turno caiu depois do
+   * `request`). Grava `executed_action` como `needs_review` (estado terminal, nunca reexecutado;
+   * a reconciliação para de republicar e `active_tenant_ids()` deixa de listar o tenant) e audita,
+   * na mesma transação. Sem cobrança. Só fecha se a aprovação é do `threadId` dado (quando dado),
+   * está `approved`, foi decidida há pelo menos `minAgeMs` e ainda não tem `executed_action`.
+   * Devolve se ESTA chamada fechou.
+   */
+  async closeOrphan(
+    id: string,
+    reason: OrphanReason,
+    opts: { threadId?: string; minAgeMs?: number } = {},
+  ): Promise<boolean> {
+    if (!APPROVAL_ID_RE.test(id)) return false;
+    const now = this.clock();
+    const nowIso = new Date(now).toISOString();
+    const decidedBefore = new Date(now - (opts.minAgeMs ?? ORPHAN_GRACE_MS)).toISOString();
+    const threadId = opts.threadId ?? null;
+    const result = JSON.stringify({ orphaned: true, reason });
+    return this.db.tx(async (tx) => {
+      const rows = await tx.$queryRaw<{ client_id: string; action: string; agent: string }[]>`
+        WITH ins AS (
+          INSERT INTO executed_action
+            (approval_request_id, tenant_id, client_id, status, result, started_at, finished_at)
+          SELECT a.id, a.tenant_id, a.client_id, 'needs_review', ${result}::jsonb,
+                 ${nowIso}::timestamptz, ${nowIso}::timestamptz
+          FROM approval_request a
+          WHERE a.id = ${id} AND a.status = 'approved'
+            AND a.decided_at <= ${decidedBefore}::timestamptz
+            AND (${threadId}::text IS NULL OR a.thread_id = ${threadId}::text)
+          ON CONFLICT DO NOTHING
+          RETURNING approval_request_id, client_id)
+        SELECT ins.client_id, a.action, a.agent
+        FROM ins JOIN approval_request a ON a.id = ins.approval_request_id`;
+      const row = rows[0];
+      if (!row) return false;
+      await this.watchtower.review({
+        tx,
+        clientId: row.client_id,
+        channel: "worker",
+        query: `orphan:${row.action}`,
+        agents: [row.agent],
+        responseText: `Aprovação ${id} aprovada sem thread à espera (${reason}); marcada needs_review, sem executar`,
+        durationMs: 0,
+      });
+      this.logger.warn({
+        msg: "Aprovação aprovada órfã marcada como needs_review (não será executada)",
+        approvalId: id,
+        reason,
+      });
+      return true;
+    });
   }
 
   /** A solicitação do tenant atual; de outro tenant, inexistente ou id malformado → NotFoundError. */

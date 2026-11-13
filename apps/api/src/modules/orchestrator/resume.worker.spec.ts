@@ -52,6 +52,7 @@ function setup(
     workers?: "true" | "false";
     consume?: (o: ConsumeOptions) => Promise<void>;
     stopTimeoutMs?: number;
+    closeOrphan?: boolean;
   } = {},
 ) {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } satisfies ResumeLogger;
@@ -62,6 +63,7 @@ function setup(
       contexts.push(TenantContext.current());
       return { pending: pending === null ? null : { approvalId: pending } } as GraphStateValue;
     }),
+    closeOrphan: vi.fn(async () => opts.closeOrphan ?? false),
     resume: vi.fn(
       opts.resume ??
         (async () => {
@@ -159,8 +161,18 @@ describe("ResumeWorker.handle", () => {
       const { worker, orchestrator, logger } = setup({ pending });
       await expect(worker.handle(resumeEvent())).resolves.toBeUndefined();
       expect(orchestrator.resume).not.toHaveBeenCalled();
+      expect(orchestrator.closeOrphan).toHaveBeenCalledWith(THREAD, APPROVAL);
       expect(logger.warn).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("aprovação órfã fechada pelo orquestrador: ACK com warn próprio, sem retomar", async () => {
+    const { worker, orchestrator, logger } = setup({ pending: null, closeOrphan: true });
+    await expect(worker.handle(resumeEvent())).resolves.toBeUndefined();
+    expect(orchestrator.resume).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ msg: expect.stringMatching(/órfã/) }),
+    );
   });
 
   it("NotFoundError do orquestrador é TERMINAL: ACK com warn e ids, sem relançar", async () => {

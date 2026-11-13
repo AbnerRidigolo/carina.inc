@@ -4,7 +4,7 @@
 # que também faz proxy de `/api` (REST) e `/ws` (WebSocket do chat) para `api:3000`. Mesma origem
 # no browser: sem CORS e a chave de API nunca vai para a URL.
 # Build a partir da RAIZ do monorepo: `docker build -f apps/web/Dockerfile .`.
-ARG NODE_IMAGE=node:22.12.0-bookworm-slim
+ARG NODE_IMAGE=node:22.22.2-bookworm-slim
 
 FROM ${NODE_IMAGE} AS build
 RUN npm install -g pnpm@10.28.0 && npm cache clean --force

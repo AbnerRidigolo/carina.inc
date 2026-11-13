@@ -76,9 +76,12 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Versão única do Node (.nvmrc) para CI, Dockerfiles e `engines`: o jsdom 31 exige
+      # ^22.22.2 e o undici 8 dele não carrega no 22.12 (os workers do vitest do web nem sobem).
+      # Fixado por apps/api/src/toolchain.spec.ts.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.12"
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Instala dependências

@@ -17,12 +17,12 @@
 # Build e migrate usam a imagem Debian completa: ela já traz o OpenSSL que o schema engine do
 # Prisma (`prisma migrate deploy`) detecta e carrega. O runtime usa a slim: o cliente Prisma 7 roda
 # pelo driver adapter do pg, sem engine nativo.
-ARG BUILD_IMAGE=node:22.12.0-bookworm
-ARG NODE_IMAGE=node:22.12.0-bookworm-slim
+ARG BUILD_IMAGE=node:22.22.2-bookworm
+ARG NODE_IMAGE=node:22.22.2-bookworm-slim
 
 FROM ${BUILD_IMAGE} AS base
-# pnpm fixado na versão do packageManager (o corepack do Node 22.12 não confere as chaves novas
-# de assinatura do pnpm).
+# pnpm fixado na versão do packageManager (o corepack embutido no Node 22 pode não conferir as
+# chaves novas de assinatura do pnpm).
 RUN npm install -g pnpm@10.28.0 && npm cache clean --force
 ENV CI=true
 WORKDIR /repo

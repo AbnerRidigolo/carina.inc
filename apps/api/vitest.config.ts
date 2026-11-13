@@ -34,5 +34,15 @@ export default defineConfig({
         },
       },
     ],
+    // `pnpm --filter @carina/api test:cov`: unit + int + e2e juntos (precisa de Postgres e Redis,
+    // como test:int). Mede só o código de domínio (src/modules); o limite vale para o total.
+    coverage: {
+      provider: "v8",
+      include: ["src/modules/**/*.ts"],
+      exclude: ["src/**/*.spec.ts"],
+      reporter: ["text-summary", "text", "json-summary"],
+      reportsDirectory: "coverage",
+      thresholds: { lines: 80 },
+    },
   },
 });

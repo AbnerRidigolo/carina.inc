@@ -1,8 +1,9 @@
 # CI do CARINA — roda em todo push para main e em todo pull request.
 # legacy-python: testes unitários (mockados, sem credenciais externas), ruff e black.
 #   Os testes `integration` (credenciais reais NIM/Groq/FalkorDB) ficam FORA do CI.
-# typescript: lint, typecheck, testes unitários, testes de integração da API (Postgres 17 +
-#   pgvector e Redis dos service containers; RLS e migrações reais) e build do monorepo pnpm.
+# typescript: lint, typecheck, testes unitários, testes de integração e E2E da API (Postgres 17 +
+#   pgvector e Redis dos service containers; RLS e migrações reais), cobertura da API (≥ 80% de
+#   linhas em src/modules) e build do monorepo pnpm.
 # compose-smoke: build das imagens e `docker compose up --wait` da demo completa SEM nenhuma chave
 #   de API (LLM_MODE=mock); confere /api/health, /api/ready, um chat com a chave de demo e o web.
 name: CI
@@ -11,6 +12,10 @@ on:
   push:
     branches: [main]
   pull_request:
+
+# Nenhum job escreve no repositório: o GITHUB_TOKEN fica só com leitura.
+permissions:
+  contents: read
 
 jobs:
   legacy-python:
@@ -102,6 +107,11 @@ jobs:
       - name: Testes E2E
         run: pnpm --filter @carina/api test:e2e
 
+      # unit + int + e2e da API numa execução (projetos em sequência), medindo src/modules/**;
+      # falha abaixo de 80% de linhas (limite no apps/api/vitest.config.ts).
+      - name: Cobertura da API (limite de 80% de linhas em src/modules)
+        run: pnpm --filter @carina/api test:cov
+
       - name: Build
         run: pnpm build
 
@@ -131,6 +141,34 @@ jobs:
           curl -fsS -o /dev/null http://localhost:5173/
           # O nginx do web faz proxy de /api para a API (mesma origem do frontend).
           curl -fsS http://localhost:5173/api/health
+          # index.html nunca em cache; CSP sem destinos de rede além da própria origem.
+          headers="$(curl -fsSI http://localhost:5173/)"
+          grep -qi '^cache-control: no-cache' <<<"$headers"
+          grep -qi "connect-src 'self';" <<<"$headers"
+
+      - name: Fluxo de aprovação pelo proxy do web (api → worker)
+        run: |
+          set -euo pipefail
+          W=http://localhost:5173
+          APP="Authorization: Bearer sk-live-demoapp0000000000000000000000000"
+          APPROVER="Authorization: Bearer sk-live-demoapprover00000000000000000000"
+          JSON="Content-Type: application/json"
+          chat="$(curl -fsS -X POST "$W/api/chat" -H "$APP" -H "$JSON" \
+            -d '{"clientId":"cliente-moderado","message":"compre 100 ações de PETR4"}')"
+          jq -e '.status == "awaiting_approval" and .approval.valueBrl == "3000.00"' <<<"$chat"
+          id="$(jq -r '.approval.id' <<<"$chat")"
+          # A chave app não decide; a aprovadora sim. A execução roda no serviço worker.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$W/api/inbox/$id/decision" \
+            -H "$APP" -H "$JSON" -d '{"approved":true}')" = 403
+          curl -fsS -X POST "$W/api/inbox/$id/decision" -H "$APPROVER" -H "$JSON" \
+            -d '{"approved":true}' | jq -e '.status == "approved"'
+          for _ in $(seq 1 30); do
+            usage="$(curl -fsS "$W/api/usage" -H "$APP")"
+            if jq -e '.byWorkType.execution.count == 1' <<<"$usage" >/dev/null; then break; fi
+            sleep 1
+          done
+          jq -e '.byWorkType.execution == {"count": 1, "totalBrl": "90.00"}' <<<"$usage"
+          curl -fsS "$W/api/clients/cliente-moderado/inbox" -H "$APP" | jq -e 'length == 0'
 
       - name: Logs dos serviços (se falhar)
         if: failure()

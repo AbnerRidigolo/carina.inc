@@ -149,7 +149,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Stub estático até a Task 22 (build do Vite).
+  # Frontend React (build do Vite) servido pelo nginx; faz proxy de /api e /ws para a api.
   web:
     build:
       context: .

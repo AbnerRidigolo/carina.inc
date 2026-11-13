@@ -126,6 +126,8 @@ jobs:
             -d '{"clientId":"cliente-moderado","message":"Como está minha carteira?"}' \
             | grep -q '"status":"completed"'
           curl -fsS -o /dev/null http://localhost:5173/
+          # O nginx do web faz proxy de /api para a API (mesma origem do frontend).
+          curl -fsS http://localhost:5173/api/health
 
       - name: Logs dos serviços (se falhar)
         if: failure()

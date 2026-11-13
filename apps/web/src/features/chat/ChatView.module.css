@@ -1,0 +1,60 @@
+.log {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 60vh;
+  min-height: 160px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.question {
+  align-self: flex-end;
+  background: var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent-contrast);
+  max-width: 85%;
+  padding: 8px 12px;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+}
+
+.footer {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.formRow {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}

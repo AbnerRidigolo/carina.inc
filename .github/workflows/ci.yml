@@ -1,9 +1,9 @@
 # CI do CARINA — roda em todo push para main e em todo pull request.
 # legacy-python: testes unitários (mockados, sem credenciais externas), ruff e black.
 #   Os testes `integration` (credenciais reais NIM/Groq/FalkorDB) ficam FORA do CI.
-# typescript: lint, typecheck, testes unitários, testes de integração e E2E da API (Postgres 17 +
-#   pgvector e Redis dos service containers; RLS e migrações reais), cobertura da API (≥ 80% de
-#   linhas em src/modules) e build do monorepo pnpm.
+# typescript: lint, typecheck, testes unitários (api, shared, web), testes de integração e E2E da
+#   API numa execução com cobertura (Postgres 17 + pgvector e Redis dos service containers; RLS e
+#   migrações reais; ≥ 80% de linhas em src/modules) e build do monorepo pnpm.
 # compose-smoke: build das imagens e `docker compose up --wait` da demo completa SEM nenhuma chave
 #   de API (LLM_MODE=mock); confere /api/health, /api/ready, um chat com a chave de demo e o web.
 name: CI
@@ -101,15 +101,10 @@ jobs:
       - name: Testes unitários
         run: pnpm test
 
-      - name: Testes de integração
-        run: pnpm --filter @carina/api test:int
-
-      - name: Testes E2E
-        run: pnpm --filter @carina/api test:e2e
-
-      # unit + int + e2e da API numa execução (projetos em sequência), medindo src/modules/**;
-      # falha abaixo de 80% de linhas (limite no apps/api/vitest.config.ts).
-      - name: Cobertura da API (limite de 80% de linhas em src/modules)
+      # Integração e E2E da API: uma execução só de unit + int + e2e (projetos em sequência), com
+      # cobertura de src/modules/**; falha em qualquer teste e abaixo de 80% de linhas (limite no
+      # apps/api/vitest.config.ts). Não roda int/e2e duas vezes.
+      - name: Testes de integração e E2E da API, com cobertura (≥ 80% de linhas em src/modules)
         run: pnpm --filter @carina/api test:cov
 
       - name: Build

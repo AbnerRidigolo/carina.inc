@@ -21,6 +21,9 @@
  *   ids não conferem com o thread / formato → log error + ACK (nunca executa; não adianta retentar)
  *   thread sem esta aprovação pendente      → log warn + ACK
  *   NotFoundError do orquestrador           → TERMINAL: log warn + ACK, nunca retenta
+ *                                             (inclui a corrida com um turno de chat que já
+ *                                             curou a espera de uma rejeitada/vencida: o
+ *                                             `classify` do turno novo zera `pending`)
  *   ValidationError do orquestrador         → permanente: log error + ACK
  *   ApprovalConflictError (banco `pending`) → log warn e relança: sem ACK; o XAUTOCLAIM reentrega
  *                                             depois de `claimIdleMs` (a espera entre tentativas)
@@ -232,6 +235,10 @@ export class ResumeWorker
       this.logger.info({ msg: "Thread retomado", ...ids, status });
     } catch (err) {
       if (err instanceof NotFoundError) {
+        // Sem o lock `chat:thread:<id>` do ChatService, de propósito: um turno só sobrepõe este
+        // resume quando a aprovação já está rejeitada/vencida (aprovada → o chat responde 409), e
+        // aí o próprio turno fecha a espera; o NotFound aqui é um no-op. Pegar o lock trocaria
+        // esse ACK por uma reentrega 60 s depois, sem ganho de segurança.
         this.logger.warn({ msg: "Evento resume descartado: thread não encontrado", err, ...ids });
         return;
       }

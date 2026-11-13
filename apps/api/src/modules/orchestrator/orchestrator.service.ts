@@ -105,9 +105,16 @@ export class OrchestratorService {
    * no banco (cura preguiçosa de um `resume` perdido, ex. que foi para a DLQ):
    * - `rejected`/`expired` (ou `pending` já vencida pelo CLOCK, que é vencida aqui): fecha a
    *   espera pelo mesmo caminho do `resume` (o grafo grava `rejected`, nada executa) e segue o
-   *   turno. Duas chamadas concorrentes reaproveitam a idempotência do `resume`.
+   *   turno. Se outro chamador (outro turno ou o ResumeWorker) fechou a espera entre a leitura e
+   *   a cura, a cura vira no-op e o turno segue (ver `closeResolvedWait`).
    * - `approved`: ApprovalConflictError; a execução é retomada pelo worker/reconciliação.
    * - `pending` válida: ApprovalConflictError.
+   *
+   * Concorrência: este serviço NÃO serializa turnos do mesmo thread. Dois `stream` inteiros ao
+   * mesmo tempo no mesmo thread não são suportados; quem garante um turno por thread é o
+   * ChatService (lock Redis `chat:thread:<id>`). Sozinho, o orquestrador garante: execução no
+   * máximo uma vez (o banco decide no nó `approval`, `executeOnce` é idempotente) e cura do guard
+   * tolerante a corrida com outra cura ou com o `resume` do worker.
    */
   async *stream(input: { threadId: string; question: string }): AsyncIterable<ChatEvent> {
     const { threadId } = input;
@@ -207,7 +214,19 @@ export class OrchestratorService {
       approvalId,
       threadId,
     });
-    await this.resume(threadId, false);
+    try {
+      await this.resume(threadId, false);
+    } catch (err) {
+      // Corrida: entre a leitura do guard e esta cura, outro chamador já fechou a espera e um
+      // turno novo começou (o `classify` zera `pending`), então `resume` não acha a aprovação.
+      // Se o thread não aguarda mais ESTA aprovação, a cura já está feita: segue o turno.
+      if (!(err instanceof NotFoundError)) throw err;
+      const now = await this.graph.getState(this.config(threadId));
+      const stillWaiting =
+        awaitingApproval(now) &&
+        (now.values as Partial<GraphStateValue>).pending?.approvalId === approvalId;
+      if (stillWaiting) throw err;
+    }
   }
 
   /** Estado atual do thread (do tenant e cliente do contexto). */

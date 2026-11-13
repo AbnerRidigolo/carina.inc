@@ -17,6 +17,7 @@ import { ApprovalConflictError } from "../../src/core/errors/domain-errors.js";
 import { StreamsService } from "../../src/core/redis/streams.service.js";
 import { ExecutorRegistry } from "../../src/modules/inbox/executors.js";
 import { InboxService } from "../../src/modules/inbox/inbox.service.js";
+import { KnowledgeService } from "../../src/modules/knowledge/knowledge.service.js";
 import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js";
 import { CLOCK } from "../../src/modules/limits/clock.js";
 import { OrchestratorModule } from "../../src/modules/orchestrator/orchestrator.module.js";
@@ -26,6 +27,7 @@ import {
   RESUME_LOGGER,
   ResumeWorker,
 } from "../../src/modules/orchestrator/resume.worker.js";
+import { deferred } from "../chat/helpers.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
 import { redisDbOf } from "../setup/redis-dbs.js";
@@ -547,22 +549,32 @@ describe("ResumeWorker (int)", () => {
       return state.pending !== null && state.execution === null;
     };
 
+    /**
+     * A cura do guard (`closeResolvedWait`) chamada como o turno que leu o estado ANTES de outro
+     * chamador fechar a espera. Turnos inteiros concorrentes no mesmo thread não são cenário: o
+     * ChatService os serializa (lock `chat:thread:<id>`); a cura em si é que precisa tolerar a
+     * corrida (outro turno ou o ResumeWorker).
+     */
+    const heal = (t: TestApp, p: Party, threadId: string, approvalId: string) =>
+      as(p, () =>
+        (
+          t.app.get(OrchestratorService) as unknown as {
+            closeResolvedWait(threadId: string, approvalId: string): Promise<void>;
+          }
+        ).closeResolvedWait(threadId, approvalId),
+      );
+
     async function healsAndRuns(t: TestApp, p: Party, threadId: string, approvalId: string) {
       expect(await awaiting(t, p, threadId)).toBe(true); // bloqueado
-      // Dois turnos concorrentes: a cura (via resume) é idempotente e os dois seguem.
-      const results = await Promise.allSettled([
-        turn(t, p, threadId, "qual o saldo da minha carteira?"),
-        turn(t, p, threadId, "como está minha carteira?"),
-      ]);
-      for (const r of results) {
-        expect(r.status).toBe("fulfilled");
-        if (r.status === "fulfilled") {
-          expect(r.value.length).toBeGreaterThan(0);
-          expect(r.value.some((e) => e.type === "approval_required")).toBe(false);
-        }
+      // Duas curas concorrentes (mesma visão antiga do thread): as duas terminam sem erro.
+      await Promise.all([heal(t, p, threadId, approvalId), heal(t, p, threadId, approvalId)]);
+      expect(await awaiting(t, p, threadId)).toBe(false);
+      // Turnos em sequência (como o ChatService garante) seguem livres.
+      for (const q of ["qual o saldo da minha carteira?", "e agora?"]) {
+        const events = await turn(t, p, threadId, q);
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.some((e) => e.type === "approval_required")).toBe(false);
       }
-      // E o thread segue livre para mais turnos.
-      expect((await turn(t, p, threadId, "e agora?")).length).toBeGreaterThan(0);
       expect(placeTrade).not.toHaveBeenCalled();
       expect(await execution(p, approvalId)).toBeUndefined();
       expect(await usage(p)).toEqual([]);
@@ -596,6 +608,47 @@ describe("ResumeWorker (int)", () => {
       offset = 25 * HOUR;
       await healsAndRuns(t, A, threadId, approvalId);
       expect(await approvalStatus(A, approvalId)).toBe("expired");
+    });
+
+    it("corrida: a cura de quem leu o estado antes não falha depois que outro turno já curou e começou (pending zerado pelo classify)", async () => {
+      const t = await start();
+      const A = await party(t, "Cura em corrida");
+      const { threadId, approvalId } = await lost(t, A);
+      await decide(t, A, approvalId, false);
+      await redis.del("jobs");
+
+      // Segura o turno 1 na busca (nó retrieve): o checkpoint do classify, com `pending: null`,
+      // já foi gravado (durability "sync").
+      const knowledge = t.app.get(KnowledgeService);
+      const original = knowledge.search.bind(knowledge);
+      const reached = deferred<undefined>();
+      const gate = deferred<undefined>();
+      const spy = vi.spyOn(knowledge, "search").mockImplementationOnce(async (...args) => {
+        reached.resolve(undefined);
+        await gate.promise;
+        return original(...args);
+      });
+      let turn1: Promise<ChatEvent[]> | undefined;
+      try {
+        turn1 = turn(t, A, threadId, "como está minha carteira?");
+        await reached.promise;
+        const state = await as(A, () => t.app.get(OrchestratorService).finalState(threadId));
+        expect(state.pending).toBeNull();
+
+        // O turno 2 tinha visto o thread esperando a aprovação: a cura dele não pode lançar.
+        await expect(heal(t, A, threadId, approvalId)).resolves.toBeUndefined();
+
+        gate.resolve(undefined);
+        const events = await turn1;
+        expect(events.some((e) => e.type === "approval_required")).toBe(false);
+      } finally {
+        gate.resolve(undefined);
+        await turn1?.catch(() => undefined);
+        spy.mockRestore();
+      }
+      expect(await approvalStatus(A, approvalId)).toBe("rejected");
+      expect(placeTrade).not.toHaveBeenCalled();
+      expect(await execution(A, approvalId)).toBeUndefined();
     });
 
     it("pending válida: continua 409 e nada executa", async () => {

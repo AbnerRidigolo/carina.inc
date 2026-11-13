@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ApiProblemError, apiFetch, isAbortError } from "../../api/client";
 import { describeApiError } from "../../api/errors";
 import type { SignalBus } from "../../state/event-bus";
+import { subscribeApiKey } from "../../state/session";
 import ui from "../../styles/ui.module.css";
 import { formatBrl, formatDateTime } from "../../util/format";
 import styles from "./InboxPanel.module.css";
@@ -57,6 +58,8 @@ export function InboxPanel({ clientId, bus }: Props) {
       );
       if (ctrl.signal.aborted) return;
       setLoadError(undefined);
+      // Lista nova com sucesso: o 403 anterior pode ter sido por outra causa; tenta de novo.
+      setCanDecide(true);
       setItems((prev) => {
         const keep = new Map((prev ?? []).map((i) => [i.approval.id, i]));
         return list
@@ -78,6 +81,9 @@ export function InboxPanel({ clientId, bus }: Props) {
       loadCtrl.current?.abort();
     };
   }, [load]);
+
+  // Trocar a chave reabilita as decisões.
+  useEffect(() => subscribeApiKey(() => setCanDecide(true)), []);
 
   useEffect(
     () =>
@@ -163,7 +169,17 @@ export function InboxPanel({ clientId, bus }: Props) {
 
       {!canDecide ? (
         <div role="alert" className={ui.alert}>
-          {NO_PERMISSION}
+          {NO_PERMISSION}{" "}
+          <button
+            type="button"
+            className={ui.button}
+            onClick={() => {
+              setCanDecide(true);
+              void load();
+            }}
+          >
+            Tentar de novo
+          </button>
         </div>
       ) : null}
       {conflict ? (

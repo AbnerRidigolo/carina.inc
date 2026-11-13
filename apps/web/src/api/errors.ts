@@ -7,6 +7,8 @@ export function messageForCode(code: string, retryAfterSeconds?: number): string
     case "thread_busy":
     case "turn_in_progress":
       return "Já existe uma resposta em andamento nesta conversa. Aguarde terminar e tente de novo.";
+    case "connection_lost":
+      return "A conexão caiu durante a resposta. O servidor pode ter concluído (e cobrado) o pedido: confira a caixa de entrada antes de reenviar uma ação. Você já pode enviar outra mensagem.";
     case "approval_conflict":
       return "Esta conversa aguarda uma aprovação. Decida a pendência no painel de aprovações antes de continuar.";
     case "rate_limited":

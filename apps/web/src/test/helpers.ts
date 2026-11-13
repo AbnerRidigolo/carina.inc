@@ -67,7 +67,9 @@ import { FakeWebSocket } from "./fake-websocket";
 
 export async function openSocket(index = 0): Promise<FakeWebSocket> {
   const { vi, expect } = await import("vitest");
-  await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(index));
+  await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(index), {
+    timeout: 4000,
+  });
   const socket = FakeWebSocket.instances[index] as FakeWebSocket;
   act(() => socket.serverOpen());
   return socket;

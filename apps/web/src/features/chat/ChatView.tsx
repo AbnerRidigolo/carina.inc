@@ -60,6 +60,7 @@ export function ChatView({ clientId, bus }: Props) {
   const [draft, setDraft] = useState("");
   const connection = useRef<ChatConnection | null>(null);
   const threadId = useRef<string | undefined>(undefined);
+  const lastState = useRef<ChatStatus["state"]>("connecting");
   const fieldId = useId();
 
   useEffect(() => {
@@ -74,6 +75,17 @@ export function ChatView({ clientId, bus }: Props) {
       },
       onStatus: (next) => {
         if (next.state === "protocol_error") return setProtocolError(true);
+        const was = lastState.current;
+        lastState.current = next.state;
+        // Caiu no meio de um turno: os eventos que faltam nunca chegam; libera o campo.
+        if (
+          was === "open" &&
+          (next.state === "reconnecting" ||
+            next.state === "offline" ||
+            next.state === "unauthorized")
+        ) {
+          dispatch({ type: "turn_interrupted" });
+        }
         setStatus(next);
         if (next.state === "open") bus.publish({ type: "socket_open" });
       },

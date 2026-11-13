@@ -160,4 +160,29 @@ describe("InboxPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/inesperad/i);
     expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
   });
+
+  it("depois de um 403, Atualizar reabilita os botões (flag recuperável)", async () => {
+    mount();
+    use(http.post("*/api/inbox/:id/decision", () => problem(403, "forbidden_scope")));
+    const user = userEvent.setup();
+    await approveFlow(user);
+    await screen.findByText("Esta chave não pode aprovar");
+    expect(screen.getByRole("button", { name: "Aprovar" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Atualizar" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Aprovar" })).toBeEnabled());
+    expect(screen.queryByText("Esta chave não pode aprovar")).not.toBeInTheDocument();
+  });
+
+  it("'Tentar de novo' reabilita os botões e a troca de chave também", async () => {
+    mount();
+    use(http.post("*/api/inbox/:id/decision", () => problem(403, "forbidden_scope")));
+    const user = userEvent.setup();
+    await approveFlow(user);
+    await user.click(await screen.findByRole("button", { name: "Tentar de novo" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Aprovar" })).toBeEnabled());
+    await approveFlow(user);
+    await screen.findByText("Esta chave não pode aprovar");
+    act(() => setApiKey("sk-live-outra0000000000000000000000000000"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Aprovar" })).toBeEnabled());
+  });
 });

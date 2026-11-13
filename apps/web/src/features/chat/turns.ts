@@ -27,7 +27,11 @@ export interface Turn {
   error?: { code: string; traceId: string };
 }
 
-export type TurnAction = { type: "ask"; question: string } | { type: "event"; event: ChatEvent };
+export type TurnAction =
+  | { type: "ask"; question: string }
+  | { type: "event"; event: ChatEvent }
+  /** O socket caiu no meio do turno: os eventos que faltam não vão chegar. */
+  | { type: "turn_interrupted" };
 
 export const isActive = (t: Turn | undefined): t is Turn => t !== undefined && !t.done && !t.error;
 
@@ -97,5 +101,8 @@ export function turnsReducer(turns: Turn[], action: TurnAction): Turn[] {
   }
   const last = turns.at(-1);
   if (!isActive(last)) return turns;
+  if (action.type === "turn_interrupted") {
+    return [...turns.slice(0, -1), { ...last, error: { code: "connection_lost", traceId: "" } }];
+  }
   return [...turns.slice(0, -1), applyEvent(last, action.event)];
 }

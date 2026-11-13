@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { createEventBus, type PanelSignal } from "../../state/event-bus";
@@ -191,5 +191,37 @@ describe("ChatView", () => {
     view.unmount();
     expect(socket.closeCalls).toHaveLength(1);
     expect(socket.onmessage).toBeNull();
+  });
+
+  it("queda do socket no meio do turno marca o turno como interrompido e libera o campo ao reconectar", async () => {
+    const { socket } = await mount();
+    await ask(socket, "oi");
+    emit(
+      socket,
+      { type: "agent_started", agent: "navigator" },
+      { type: "token", agent: "navigator", text: "Par" },
+    );
+    act(() => socket.serverClose(1006));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/conexão caiu/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/caixa de entrada/i);
+    const second = await openSocket(1);
+    await screen.findByText(/conectado/i);
+    expect(screen.getByLabelText("Mensagem")).toBeEnabled();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Mensagem"), "de novo");
+    await user.click(screen.getByRole("button", { name: "Enviar" }));
+    expect(second.sent).toHaveLength(1);
+  });
+
+  it("4401 no meio do turno interrompe o turno; 4401 repetido mostra chave inválida", async () => {
+    const { socket } = await mount();
+    await ask(socket, "oi");
+    emit(socket, { type: "token", agent: "navigator", text: "x" });
+    act(() => socket.serverClose(4401, "unauthorized"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/conexão caiu/i);
+    const second = await openSocket(1);
+    act(() => second.serverClose(4401, "unauthorized"));
+    expect(await screen.findByText(/chave inválida/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Mensagem")).toBeDisabled();
   });
 });

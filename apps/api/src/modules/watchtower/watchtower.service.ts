@@ -2,8 +2,9 @@
  * Watchtower: inspeciona a resposta de um agente e grava a trilha de auditoria.
  *
  * `audit_event` é só-INSERT para o carina_app (e roda sob RLS com o tenant do TenantContext): este
- * serviço nunca atualiza nem apaga. A trilha guarda o digest SHA-256 da resposta, nunca o texto;
- * as flags carregam só o tipo da PII ou o trecho mínimo que disparou certeza/recomendação.
+ * serviço nunca atualiza nem apaga. A trilha guarda a pergunta com a PII conhecida mascarada e
+ * truncada (`auditQuery`) e o digest SHA-256 da resposta, nunca o texto da resposta; as flags
+ * carregam só o tipo da PII ou o trecho mínimo que disparou certeza/recomendação.
  */
 import { createHash } from "node:crypto";
 import { ComplianceFlagSchema, type AuditEventView, type ComplianceFlag } from "@carina/shared";
@@ -13,6 +14,7 @@ import { TenantPrismaService } from "../../core/database/tenant-prisma.service.j
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import type { AuditEvent, Prisma } from "../../generated/prisma/client.js";
 import { inspectText } from "./inspect-text.js";
+import { auditQuery } from "./mask-pii.js";
 
 export const DEFAULT_TRAIL_LIMIT = 100;
 export const MAX_TRAIL_LIMIT = 500;
@@ -69,7 +71,8 @@ export class WatchtowerService {
         tenantId,
         clientId: input.clientId ?? null,
         channel: input.channel,
-        query: input.query,
+        // A pergunta entra mascarada (PII conhecida) e truncada; a resposta, só como digest.
+        query: auditQuery(input.query),
         agents: input.agents,
         responseDigest: sha256Hex(input.responseText),
         flags,

@@ -21,6 +21,17 @@ import type { Options } from "pino-http";
 import { ENV } from "../config/config.module.js";
 import type { Env } from "../config/env.js";
 
+/** `x-request-id` aceito do cliente: até 128 caracteres de `[A-Za-z0-9._:-]`. */
+const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * Id da requisição (traceId dos Problem Details e dos logs): o `x-request-id` do cliente se for
+ * curto e de caracteres seguros (vai para logs e cabeçalhos de resposta); senão, um uuid novo.
+ */
+export function requestIdFrom(header: string | string[] | undefined): string {
+  return typeof header === "string" && REQUEST_ID_RE.test(header) ? header : randomUUID();
+}
+
 export const REDACT_PATHS = [
   "req.headers.authorization",
   'req.headers["x-api-key"]',
@@ -69,8 +80,7 @@ export function buildPinoHttpOptions(env: Pick<Env, "LOG_LEVEL">): Options {
   return {
     level: env.LOG_LEVEL,
     genReqId: (req: IncomingMessage, res: ServerResponse) => {
-      const existing = req.headers["x-request-id"];
-      const id = typeof existing === "string" && existing.length > 0 ? existing : randomUUID();
+      const id = requestIdFrom(req.headers["x-request-id"]);
       res.setHeader("x-request-id", id);
       return id;
     },

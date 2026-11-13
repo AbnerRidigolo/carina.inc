@@ -28,7 +28,6 @@ export const EnvSchema = z
     GROQ_BASE_URL: z.string().url().default("https://api.groq.com/openai/v1"),
     NVIDIA_BASE_URL: z.string().url().default("https://integrate.api.nvidia.com/v1"),
     EXECUTION_FEE_PCT: z.coerce.number().nonnegative().default(0.5),
-    DEFAULT_RPM: z.coerce.number().int().positive().default(60),
     APPROVAL_TTL_HOURS: z.coerce.number().positive().default(24),
     /** Única origem aceita pelo CORS da API (o frontend). Sem curinga. */
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),

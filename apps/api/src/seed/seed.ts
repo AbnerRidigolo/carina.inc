@@ -168,13 +168,13 @@ async function upsertTenantAndKeys(
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock($1)", [SEED_LOCK_ID]);
-    // Upsert pelo id fixo: cria na primeira vez; depois reaplica nome, plano e limites e reativa
-    // (o tenant de demo é deste seed por construção).
+    // Upsert pelo id fixo: cria na primeira vez; depois reaplica nome, plano e limites. Nunca mexe
+    // em `suspended_at`: suspender é decisão de operação, e rodar o seed de novo não a desfaz.
     const upsertedTenant = await client.query<{ id: string }>(
       `INSERT INTO tenant (id, name, plan, rpm, monthly_quota) VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE
          SET name = EXCLUDED.name, plan = EXCLUDED.plan, rpm = EXCLUDED.rpm,
-             monthly_quota = EXCLUDED.monthly_quota, suspended_at = NULL
+             monthly_quota = EXCLUDED.monthly_quota
        RETURNING id`,
       [
         DEMO_TENANT.id,

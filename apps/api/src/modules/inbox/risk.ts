@@ -14,11 +14,12 @@ export const READ_ACTIONS: ReadonlySet<string> = new Set([
   "analyze_portfolio",
 ]);
 
-export const REVERSIBLE_ACTIONS: ReadonlySet<string> = new Set([
-  "create_alert",
-  "update_goal",
-  "schedule_report",
-]);
+/**
+ * Só ações com executor registrado (ExecutorRegistry): uma ação reversível executa sem aprovação.
+ * `update_goal` e `schedule_report` saíram da lista enquanto não têm executor; até lá são
+ * irreversíveis (pedem aprovação) pelo padrão.
+ */
+export const REVERSIBLE_ACTIONS: ReadonlySet<string> = new Set(["create_alert"]);
 
 export function classifyRisk(action: string): RiskClass {
   if (READ_ACTIONS.has(action)) return "read";

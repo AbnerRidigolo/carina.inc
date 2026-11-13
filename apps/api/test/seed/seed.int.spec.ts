@@ -117,7 +117,7 @@ describe("seed de demo", () => {
       expect(homonym).toEqual({ plan: "outro", rpm: 7, suspended: true, keys: 0 });
     });
 
-    it("reativa e reescopa o PRÓPRIO tenant de demo se ele foi suspenso", async () => {
+    it("reaplica plano e limites do PRÓPRIO tenant de demo, mas não mexe numa suspensão", async () => {
       await migratorSql(`UPDATE tenant SET suspended_at = now(), rpm = 1 WHERE id = $1`, [
         tenantId,
       ]);
@@ -129,7 +129,9 @@ describe("seed de demo", () => {
         `SELECT rpm, suspended_at IS NOT NULL AS suspended FROM tenant WHERE id = $1`,
         [tenantId],
       );
-      expect(t).toEqual({ rpm: 120, suspended: false });
+      // Suspensão é decisão de operação: rodar o seed de novo não a desfaz.
+      expect(t).toEqual({ rpm: 120, suspended: true });
+      await migratorSql(`UPDATE tenant SET suspended_at = NULL WHERE id = $1`, [tenantId]);
     }, 120_000);
 
     it("deixa 1 tenant demo (rpm 120, cota 0), 2 chaves e 3 clientes", async () => {

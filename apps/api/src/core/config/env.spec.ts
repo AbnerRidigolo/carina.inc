@@ -14,7 +14,6 @@ describe("loadEnv", () => {
     expect(env.LLM_MODE).toBe("mock");
     expect(env.PORT).toBe(3000);
     expect(env.EXECUTION_FEE_PCT).toBe(0.5);
-    expect(env.DEFAULT_RPM).toBe(60);
     expect(env.APPROVAL_TTL_HOURS).toBe(24);
     expect(env.WEB_ORIGIN).toBe("http://localhost:5173");
     expect(env.OPENROUTER_BASE_URL).toBe("https://openrouter.ai/api/v1");

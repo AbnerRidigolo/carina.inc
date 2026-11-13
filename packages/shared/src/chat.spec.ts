@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ChatEventSchema, ChatRequestSchema } from "./chat.js";
+import {
+  ChatEventSchema,
+  ChatRequestSchema,
+  ChatResponseSchema,
+  WsTicketRequestSchema,
+  WsTicketSchema,
+} from "./chat.js";
 
 const approval = {
   id: "ap1",
@@ -78,5 +84,39 @@ describe("ChatEventSchema", () => {
     expect(ChatEventSchema.safeParse({ type: "token", agent: "zzz", text: "x" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("contratos do chat REST e do ticket", () => {
+  it("threadId com mais de 256 caracteres é recusado", () => {
+    const base = { clientId: "c1", message: "oi" };
+    expect(ChatRequestSchema.safeParse({ ...base, threadId: "t".repeat(256) }).success).toBe(true);
+    expect(ChatRequestSchema.safeParse({ ...base, threadId: "t".repeat(257) }).success).toBe(false);
+  });
+
+  it("WsTicketRequestSchema exige clientId válido e recusa campos extras", () => {
+    expect(WsTicketRequestSchema.safeParse({ clientId: "cli-1" }).success).toBe(true);
+    expect(WsTicketRequestSchema.safeParse({}).success).toBe(false);
+    expect(WsTicketRequestSchema.safeParse({ clientId: "a b" }).success).toBe(false);
+    expect(WsTicketRequestSchema.safeParse({ clientId: "c", tenantId: "x" }).success).toBe(false);
+  });
+
+  it("WsTicketSchema fixa a validade em 30 s", () => {
+    expect(WsTicketSchema.safeParse({ ticket: "x", expiresInSeconds: 30 }).success).toBe(true);
+    expect(WsTicketSchema.safeParse({ ticket: "x", expiresInSeconds: 60 }).success).toBe(false);
+  });
+
+  it("ChatResponseSchema aceita a resposta consolidada", () => {
+    const r = {
+      threadId: "t",
+      status: "completed",
+      plan: { complexity: "simples", agents: [], wantsExecution: false, rationale: "r" },
+      results: {},
+      answer: "a",
+      usage: { workType: "query", priceBrl: "1.50" },
+      compliance: { auditId: "a1", flags: [] },
+    };
+    expect(ChatResponseSchema.safeParse(r).success).toBe(true);
+    expect(ChatResponseSchema.safeParse({ ...r, status: "pending" }).success).toBe(false);
   });
 });

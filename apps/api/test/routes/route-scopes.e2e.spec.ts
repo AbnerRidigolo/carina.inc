@@ -8,6 +8,7 @@ import { RequestMethod } from "@nestjs/common";
 import { ModulesContainer, Reflector } from "@nestjs/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BillingModule } from "../../src/modules/billing/billing.module.js";
+import { ChatModule } from "../../src/modules/chat/chat.module.js";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
 import { InboxModule } from "../../src/modules/inbox/inbox.module.js";
 import {
@@ -66,7 +67,7 @@ describe("Escopos das rotas registradas", () => {
 
   beforeAll(async () => {
     t = await createTestApp({
-      imports: [BillingModule, WatchtowerModule, DataIngestionModule, InboxModule],
+      imports: [BillingModule, WatchtowerModule, DataIngestionModule, InboxModule, ChatModule],
       redisDb: 10,
     });
     routes = enumerateRoutes(t.app);
@@ -85,9 +86,11 @@ describe("Escopos das rotas registradas", () => {
         "GET /clients/:clientId/positions",
         "GET /clients/:clientId/transactions",
         "GET /usage",
+        "POST /chat",
         "POST /clients/:clientId/positions",
         "POST /inbox/:id/decision",
         "POST /clients/:clientId/transactions",
+        "POST /ws/ticket",
       ].sort(),
     );
   });
@@ -104,11 +107,13 @@ describe("Escopos das rotas registradas", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("escopo exigido de cada rota (inbox: listagem chat OU inbox:decide, decisão inbox:decide)", () => {
+  it("escopo exigido de cada rota (inbox: listagem chat OU inbox:decide, decisão inbox:decide; chat e ticket: chat)", () => {
     const expected = (r: RouteInfo): { all: string[]; any: string[] } => {
       if (r.route === "GET /clients/:clientId/inbox")
         return { all: [], any: ["chat", "inbox:decide"] };
       if (r.route === "POST /inbox/:id/decision") return { all: ["inbox:decide"], any: [] };
+      if (r.route === "POST /chat" || r.route === "POST /ws/ticket")
+        return { all: ["chat"], any: [] };
       return { all: [r.route.startsWith("POST ") ? "data:write" : "chat"], any: [] };
     };
     for (const r of routes.filter((x) => !x.isPublic)) {

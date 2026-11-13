@@ -30,6 +30,11 @@ export class ApprovalConflictError extends DomainError {
   readonly code = "approval_conflict";
   readonly status = 409;
 }
+/** Outro turno de chat está em andamento no mesmo thread (os turnos de um thread são em série). */
+export class ThreadBusyError extends DomainError {
+  readonly code = "thread_busy";
+  readonly status = 409;
+}
 /** 429 sempre traz `Retry-After`: por isso o construtor exige `retryAfterSeconds`. */
 export class RateLimitedError extends DomainError {
   readonly code = "rate_limited";

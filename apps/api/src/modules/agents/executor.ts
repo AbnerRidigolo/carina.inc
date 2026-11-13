@@ -12,6 +12,8 @@
 import { type ActionProposal, ActionProposalSchema, QuantitySchema } from "@carina/shared";
 import { z } from "zod";
 import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
+import { Prisma } from "../../generated/prisma/client.js";
+import { extractValueBrl, payloadNotionalBrl } from "../billing/pricing.js";
 import type { InboxService } from "../inbox/inbox.service.js";
 import type { ModelFactory } from "../llm/model-factory.js";
 import { type AgentInput, type AgentLogger, LlmAgent } from "./agent.js";
@@ -35,10 +37,28 @@ const PlaceTradePayloadSchema = z
 
 const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
 
+/**
+ * O `valueBrl` é afirmado pelo modelo e é a base da taxa de execução. Não há fonte de preço no
+ * servidor para derivá-lo (fase 2), então ele não é recalculado; mas, quando o próprio payload
+ * permite conferir, a proposta incoerente é recusada:
+ * - valor explícito no payload (`value_brl`, `valueBrl`, `amount`, `value`, `valor`): tem de ser
+ *   igual ao `valueBrl` (em módulo);
+ * - quantidade × preço unitário (`unitPriceBrl`, `unit_price_brl`, `priceBrl`, `price`): tem de dar o
+ *   `valueBrl` (2 casas, meio para cima); preço presente mas não numérico também é recusado.
+ */
+function assertValueMatchesPayload(p: ActionProposal): void {
+  const declared = new Prisma.Decimal(p.valueBrl);
+  const explicit = extractValueBrl(p.payload);
+  if (explicit !== undefined && !explicit.eq(declared)) throw invalid();
+  const notional = payloadNotionalBrl(p.payload);
+  if (notional === null || (notional !== undefined && !notional.eq(declared))) throw invalid();
+}
+
 export function refineProposal(p: ActionProposal): ActionProposal {
   const action = p.action.trim();
   if (action.length === 0 || action.length > MAX_ACTION_CHARS) throw invalid();
   checkMoney(p.valueBrl, { nonNegative: true });
+  assertValueMatchesPayload(p);
   if (action === "place_trade" && !PlaceTradePayloadSchema.safeParse(p.payload).success) {
     throw invalid();
   }

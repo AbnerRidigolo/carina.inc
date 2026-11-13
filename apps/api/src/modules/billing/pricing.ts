@@ -56,15 +56,32 @@ function toDecimal(raw: unknown): Decimal | undefined {
 }
 
 /**
- * Valor movimentado (BRL, absoluto) do payload de uma execução. Número ou string decimal; uma
- * chave ausente ou inválida cede a vez à próxima; sem nenhuma válida, 0 (cobra só o preço base).
+ * Valor movimentado (BRL, absoluto) declarado no payload de uma ação. Número ou string decimal;
+ * uma chave ausente ou inválida cede a vez à próxima; sem nenhuma válida, `undefined`. Usado pelo
+ * executor para conferir o `valueBrl` afirmado pelo modelo contra o próprio payload.
  */
-export function extractValueBrl(payload: Record<string, unknown>): Decimal {
+export function extractValueBrl(payload: Record<string, unknown>): Decimal | undefined {
   for (const key of VALUE_KEYS) {
     const value = toDecimal(payload[key]);
     if (value) return value.abs();
   }
-  return new Decimal(0);
+  return undefined;
+}
+
+/** Chaves do preço unitário (BRL) no payload, em ordem de precedência. */
+const UNIT_PRICE_KEYS = ["unitPriceBrl", "unit_price_brl", "priceBrl", "price"] as const;
+
+/**
+ * `quantidade × preço unitário` (BRL, 2 casas, meio para cima) quando o payload traz os dois.
+ * `undefined` se não há preço unitário; `null` se há, mas ele (ou a quantidade) não é numérico.
+ */
+export function payloadNotionalBrl(payload: Record<string, unknown>): Decimal | null | undefined {
+  const key = UNIT_PRICE_KEYS.find((k) => payload[k] !== undefined);
+  if (key === undefined) return undefined;
+  const price = toDecimal(payload[key]);
+  const quantity = toDecimal(payload["quantity"]);
+  if (!price || !quantity) return null;
+  return price.mul(quantity).abs().toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 }
 
 /**

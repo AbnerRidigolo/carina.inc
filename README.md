@@ -17,7 +17,7 @@ apresentável. A versão Python continua em [`legacy/python`](legacy/python) at�
 - [Garantias provadas por testes](#garantias-provadas-por-testes)
 - [Como rodar os testes](#como-rodar-os-testes)
 - [Segurança: o que saber antes de expor](#segurança-o-que-saber-antes-de-expor)
-- [Limitações conhecidas](#limitações-conhecidas)
+- [Limitações conhecidas e próximos passos](#limitações-conhecidas-e-próximos-passos)
 - [Roadmap](#roadmap)
 
 ## Por que migrar
@@ -174,7 +174,7 @@ sequenceDiagram
 
   W->>A: POST /api/chat "compre 100 ações de PETR4" (chave app)
   A->>A: grafo: classify → retrieve → respond → executor (proposta validada)
-  A->>DB: upsert approval_request (id = hash(thread, ação, payload))
+  A->>DB: upsert approval_request (id = hash(thread, turno, ação, payload))
   A->>R: approval.created (inbox.events)
   A-->>W: awaiting_approval + approval (o grafo para em interrupt())
   W->>A: POST /api/inbox/:id/decision (chave com inbox:decide)
@@ -269,7 +269,7 @@ O que foi construído difere do plano em alguns pontos. Cada mudança tem um mot
 | 1 | Executores da inbox nunca registrados; inbox em memória; Executor fora do fluxo | Executor é nó do grafo; `ExecutorRegistry` registra executores (simulados) no boot; solicitações e execuções no Postgres | `modules/inbox`, [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts) |
 | 2 | Ação desconhecida tratada como reversível (executava sem aprovação) | Listas explícitas de `READ` e `REVERSIBLE`; **qualquer outra ação é `IRREVERSIBLE`** | [`risk.spec.ts`](apps/api/src/modules/inbox/risk.spec.ts) |
 | 3 | Modelo de reserva só no classificador | `withFallbacks()` em toda cadeia de modelo, com schema e tools aplicados a cada modelo | [`model-factory.spec.ts`](apps/api/src/modules/llm/model-factory.spec.ts) |
-| 4 | Cache de orquestradores ilimitado e histórico compartilhado entre requisições | Grafo sem estado em memória; histórico por thread no checkpointer, cortado (20 mensagens no estado, 12 por chamada de agente) | `modules/orchestrator` |
+| 4 | Cache de orquestradores ilimitado e histórico compartilhado entre requisições | Grafo sem estado em memória; histórico por thread no checkpointer, cortado: o checkpoint guarda as últimas 40 mensagens, os nós passam as últimas 20 aos agentes, e cada chamada ao modelo usa as últimas 12 | `modules/orchestrator`, `agents/agent.ts` |
 | 5 | Orquestrador sem síntese | Nó `synthesize`; a falha de um especialista vira `{agent, error}` e a síntese menciona a análise que faltou | [`graph.spec.ts`](apps/api/src/modules/orchestrator/graph.spec.ts) |
 | 6 | Limites e cota por processo; cota não atômica | Janela deslizante e cota mensal no Redis, cada uma num único script Lua | [`limits.int.spec.ts`](apps/api/test/limits/limits.int.spec.ts) |
 | 7 | 500 sem tratamento; WebSocket expunha `str(exc)` | Filtro global RFC 9457 (`application/problem+json` com `traceId`); evento WS `error` só com `code` e `traceId` | [`problem-details.filter.spec.ts`](apps/api/src/core/errors/problem-details.filter.spec.ts), [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) |
@@ -295,9 +295,11 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
 | **Append-only**: em `usage_record` e `audit_event`, o INSERT do `carina_app` passa e UPDATE, DELETE e TRUNCATE falham com 42501 (permission denied) | [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts); pelo cliente Prisma do serviço (UPDATE e DELETE recusados): [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
-| A auditoria guarda o digest da resposta, **nunca o texto nem a PII** | [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
+| A auditoria guarda a pergunta com **CPF, CNPJ, e-mail, telefone e cartão mascarados** e truncada em 500 caracteres, e a resposta **só como digest** (nunca o texto) | [`mask-pii.spec.ts`](apps/api/src/modules/watchtower/mask-pii.spec.ts), [`watchtower.e2e.spec.ts`](apps/api/test/watchtower/watchtower.e2e.spec.ts) ("a pergunta gravada é mascarada…"), [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
 | **Ticket WS de uso único**; vencido ou malformado → 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("ticket reutilizado…") |
-| **Chave revogada, escopo removido ou tenant suspenso com o socket aberto**: o próximo turno é recusado e o socket fecha | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("Chat WebSocket: revalidação da chave e tempo máximo de vida") |
+| **Chave revogada, escopo removido ou tenant suspenso com o socket aberto**: o próximo turno é recusado e o socket fecha; um socket **ocioso** é revalidado a cada heartbeat, para de receber o push da inbox e fecha com 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("Chat WebSocket: revalidação da chave e tempo máximo de vida" e "revogação com o socket ocioso") |
+| A **mesma ordem pedida de novo** no mesmo thread é um pedido novo (id da aprovação inclui o turno): nova aprovação pendente, executada só depois da decisão | [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("a mesma ordem repetida no mesmo thread") |
+| Aprovação `approved` **órfã** (o thread nunca esperou por ela) termina em `needs_review`, auditada, sem executar e sem republicação infinita | [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("aprovação aprovada órfã") |
 | O broadcast da inbox só chega ao socket do **mesmo tenant e cliente** | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("broadcast da inbox") |
 | **Streams**: retentativa, DLQ após 5 entregas, dedup por `eventId`, entrada inválida não derruba o loop | [`streams.int.spec.ts`](apps/api/test/redis/streams.int.spec.ts), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) |
 | **Ingestão idempotente**: o mesmo lote duas vezes não duplica; lote cobrado ⇔ lote gravado | [`ingestion.e2e.spec.ts`](apps/api/test/data-ingestion/ingestion.e2e.spec.ts) |
@@ -366,15 +368,20 @@ Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos 
 - **Sem allow-list de `Origin` no WebSocket.** O ticket é a autenticação e é obtido com a chave
   num header, que outro site não consegue ler. Mesmo assim, uma checagem de `Origin` seria defesa
   em profundidade.
-- **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401 e
-  sockets abertos fecham no próximo turno), mas hoje só se altera direto no banco.
+- **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401;
+  sockets abertos fecham no próximo turno ou heartbeat), mas hoje só se altera direto no banco.
+- **O valor que define a taxa de execução é afirmado pelo modelo.** O `valueBrl` da proposta vem
+  da saída do LLM. Ele é validado (formato, sinal, limite de `numeric(18,2)`) e, quando o payload
+  traz como conferir (valor explícito, ou quantidade × preço unitário), tem de bater, senão a
+  proposta é recusada. O aprovador vê o valor junto com o payload antes de decidir. Não há fonte
+  de preço no servidor: na fase 2 o valor deve vir de uma cotação do servidor, não do modelo.
 - **CSP do web**: `connect-src 'self'`. Pela CSP Level 3, `'self'` cobre o `ws:`/`wss:` da mesma
   origem; verificamos isso no Chromium. Um navegador antigo que não siga a CSP3 bloquearia o
   WebSocket.
 - O papel de runtime (`carina_app`) não tem `BYPASSRLS` e não lê `api_key`. A autenticação passa
   por funções `SECURITY DEFINER` com `search_path` fixo.
 
-## Limitações conhecidas
+## Limitações conhecidas e próximos passos
 
 O que **não** está feito ou tem limite conhecido na fase 1:
 
@@ -385,9 +392,15 @@ O que **não** está feito ou tem limite conhecido na fase 1:
 - **Agentes da fase 1:** navigator, insight, predictor, risk e executor. Os outros seis do Python
   ficam para a fase 2. Os docs [`AGENTS.md`](docs/AGENTS.md), [`B2B.md`](docs/B2B.md) e
   [`DEPLOYMENT.md`](docs/DEPLOYMENT.md) ainda descrevem a versão Python e a visão de produto.
-- **Retenção de checkpoints.** O schema `langgraph` não tem RLS (são tabelas da biblioteca), nem
-  TTL, nem limpeza por cliente. O thread é `tenant:cliente:uuid`, e a API nunca expõe nem retoma
-  thread de outro tenant, mas os dados ficam lá.
+- **Conversa guardada no checkpoint.** O schema `langgraph` guarda as mensagens da conversa
+  (perguntas e respostas, em texto) sem RLS (são tabelas da biblioteca), sem TTL e sem limpeza em
+  cascata por cliente. O thread é `tenant:cliente:uuid`, e a API nunca expõe nem retoma thread de
+  outro tenant, mas os dados ficam lá.
+- **Sem caminho de eliminação (LGPD).** Não há rota nem rotina para apagar os dados de um cliente
+  final (posições, transações, conhecimento, checkpoints). A auditoria é append-only por desenho.
+- **Mascaramento de PII por padrões.** A pergunta auditada tem CPF, CNPJ, e-mail, telefone e
+  cartão mascarados; nomes, endereços e PII em formato livre continuam passando. No modo live, o
+  contexto do cliente vai ao provedor de LLM (ver [Segurança](#segurança-o-que-saber-antes-de-expor)).
 - **Re-sync completo por lote.** Cada lote de ingestão dispara um Sync completo do cliente (sem
   coalescência), o que custa caro num backfill grande.
 - **Auditoria com o uuid interno do cliente.** `GET /api/audit` devolve o `clientId` interno,
@@ -399,6 +412,23 @@ O que **não** está feito ou tem limite conhecido na fase 1:
   ou pelo botão "Atualizar", não quando chega `approval_executed`.
 - **Uma instância só foi exercitada na demo.** Réplicas são seguras por desenho e por teste
   (consumidores concorrentes, locks), mas não houve teste de carga.
+
+Próximos passos de engenharia, em ordem de prioridade:
+
+1. API administrativa para suspender tenant e revogar chave (hoje, só direto no banco).
+2. `MAXLEN`/trim dos streams e offset inicial dos consumer groups.
+3. Nomes de consumer estáveis por réplica, ou `XGROUP DELCONSUMER` dos ociosos (hoje cada
+   processo cria um nome novo).
+4. Mapear erros do Prisma/Postgres (42501, P2002, classe 22) para Problem Details específicos, em
+   vez de 500 genérico.
+5. Limite para a criação de `client`: hoje cada `clientId` novo num ticket ou chat cria um cliente.
+6. `MODELS_CONFIG_PATH` dentro do `EnvSchema` (hoje é lida fora da validação).
+7. Reconciliação: trocar as políticas SELECT da migração 0004 (por `current_user`/`session_user`)
+   por um papel dedicado `carina_reconciler`, ou cobri-las com um teste de catálogo.
+8. Remover código morto restante: `ExecutorAgent.request`, `INSTITUTIONS`,
+   `MODEL_FACTORY_OPTIONS`.
+9. Alinhar a classe de erro do modo mock (`ValidationError`) com a do live
+   (`AllProvidersFailedError`) para saída fora do schema.
 
 ## Roadmap
 

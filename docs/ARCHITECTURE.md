@@ -51,7 +51,8 @@ apps/api/src/modules
   inbox           risco, solicitações, decisão com trava, executores simulados, execução única,
                   reconciliação
   billing         preço por tipo de trabalho, fee sobre valor executado, resumo do mês
-  watchtower      flags de compliance e trilha de auditoria append-only
+  watchtower      flags de compliance e trilha de auditoria append-only (pergunta com PII
+                  mascarada e truncada; resposta só como digest)
   chat            POST /chat, ticket do WS, ChatGateway, InboxBroadcast
   data-ingestion  API de ingestão em lote, gerador sintético, SyncWorker
   health          /health e /ready (single-flight + cache curto)
@@ -85,7 +86,8 @@ As regras de fronteira são verificadas assim:
    `Retry-After`. Mensagens internas não vão ao cliente.
 6. **Logs.** nestjs-pino em JSON, com `tenantId` e `keyId` na linha da requisição. Mascara
    `authorization`, `x-api-key`, `cookie` e campos pessoais conhecidos, e não registra a query
-   string.
+   string. O `x-request-id` do cliente (que vira o `traceId`) só é aceito com até 128 caracteres
+   de `[A-Za-z0-9._:-]`; senão, a API gera um uuid.
 
 ## 4. Dados e Row-Level Security
 
@@ -99,7 +101,7 @@ runtime: `NOSUPERUSER NOBYPASSRLS`, sem acesso a `api_key`.
 | `kg_document`, `kg_chunk`, `kg_entity`, `kg_relation`, `kg_mention` | **tenant E cliente obrigatórios**: sem `app.client_id`, nenhuma linha |
 | `tenant` | leitura só do próprio tenant |
 | `api_key` | sem acesso para `carina_app`; só via `resolve_api_key` / `resolve_api_key_by_id` |
-| schema `langgraph` | tabelas do checkpointer, sem RLS; o `thread_id` é `tenant:cliente:uuid` e só é retomado a partir de uma `approval_request` (sob RLS) ou do chat do mesmo cliente |
+| schema `langgraph` | tabelas do checkpointer, sem RLS; o `thread_id` é `tenant:cliente:uuid`. O chat só usa threads do cliente do contexto (`assertThreadInContext`). O `ResumeWorker` lê o checkpoint pelos ids do evento, depois de conferir que tenant e cliente do evento batem com o prefixo do thread; a decisão de executar vem da `approval_request`, lida sob RLS no nó `approval` |
 
 Todas as tabelas de dados usam `ENABLE` + `FORCE ROW LEVEL SECURITY`. Sem `app.tenant_id`,
 `current_setting` devolve NULL e nada volta. Integridade entre tabelas:
@@ -170,13 +172,17 @@ flowchart LR
 - **`respond` / `synthesize`**: o Navigator produz a resposta final (em streaming de `token`).
 - **`executor`** gera uma `ActionProposal` validada. `classifyRisk`: `READ` executa direto,
   `REVERSIBLE` executa, e **qualquer outra ação é `IRREVERSIBLE`**. Para uma ação irreversível o
-  nó grava a `approval_request` com id determinístico (hash de thread, ação e payload), o que é
-  idempotente. A chamada de modelo fica fora do nó que pausa.
+  nó grava a `approval_request` com id determinístico (hash de thread, **turno**, ação e
+  payload): idempotente entre as tentativas do mesmo turno, e a mesma ordem pedida em outro turno
+  vira outra aprovação. O `turn` é um contador do estado, incrementado pelo `classify`. A chamada
+  de modelo fica fora do nó que pausa. O `valueBrl` da proposta é afirmado pelo modelo; quando o
+  payload traz um valor explícito ou quantidade × preço unitário, ele tem de bater.
 - **`approval`** chama `interrupt({ approvalId })`. Na retomada, o valor do `resume` é só um
   sinal: o nó relê a aprovação no banco e só chama `executeOnce` se ela estiver `approved`.
 - O estado por thread fica no `PostgresSaver`, no schema `langgraph`, criado pela migração 0005.
   O `carina_app` lê e grava checkpoints, mas não cria objetos nesse schema. O histórico é
-  cortado: 20 mensagens no estado, 12 por chamada de agente.
+  cortado: o checkpoint guarda as últimas 40 mensagens, os nós passam as últimas 20 aos agentes, e
+  cada chamada ao modelo usa as últimas 12.
 - Um turno por thread de cada vez: um lock Redis por thread dá 409 `thread_busy`. Um thread que
   aguarda aprovação pendente dá 409. Uma espera já resolvida no banco (rejeitada ou vencida com o
   `resume` perdido) é curada no próximo turno.
@@ -188,7 +194,10 @@ flowchart LR
    `decided_by_key_id`, `decided_at` e `reason`. **Depois do commit** publica `resume` em `jobs`.
 2. **`ResumeWorker`**: fixa o `TenantContext` a partir do evento, valida o thread
    (`tenant:cliente:uuid`) contra o evento e retoma o grafo. `NotFound` é terminal (ACK); um
-   conflito transitório é repetido pela reentrega.
+   conflito transitório é repetido pela reentrega. Se o thread não espera aquela aprovação e ela
+   está `approved` há mais de 2 min (a carência cobre a janela entre gravar a linha e gravar o
+   checkpoint), ela é **órfã**: `closeOrphan` grava `executed_action` como `needs_review` e um
+   `audit_event` `orphan:<ação>`, sem executar e sem cobrar.
 3. **`executeOnce`**: `INSERT executed_action(status='started')`. Se houver conflito, outro
    worker já executou e este para. Depois chama o executor registrado e, numa **mesma
    transação**, grava `succeeded`, `usage_record(execution)` e `audit_event`. Se a cobrança ou a
@@ -196,7 +205,8 @@ flowchart LR
    vez**: efeitos externos não cabem numa transação do banco.
 4. **`ReconciliationJob`** (a cada 60 s, lock por tick):
    - vence as solicitações pendentes expiradas e retoma o grafo como rejeitado;
-   - republica `resume` para aprovações `approved` sem `executed_action` há mais de 2 min;
+   - republica `resume` para aprovações `approved` sem `executed_action` há mais de 2 min; depois
+     de 1 h sem execução, fecha a aprovação como órfã em vez de republicar (sem laço infinito);
    - marca `started` há mais de 5 min como `needs_review`, que **nunca é reexecutado**.
 
    Os tenants vêm de `active_tenant_ids()` (`SECURITY DEFINER`) e cada um é processado sob RLS
@@ -237,7 +247,9 @@ flowchart LR
    inválido, vencido ou reutilizado, o servidor fecha com 4401.
 3. Cada mensagem é um `ChatRequest` estrito (o mesmo schema do REST). Antes de cada turno o
    servidor revalida chave, escopo e tenant por id (`LiveKeyService`, cache de até
-   `API_KEY_REVALIDATE_TTL_MS`) e aplica rpm e cota vigentes.
+   `API_KEY_REVALIDATE_TTL_MS`) e aplica rpm e cota vigentes. A mesma revalidação roda a cada
+   heartbeat: um socket ocioso cuja chave foi revogada (ou o tenant suspenso) deixa de receber o
+   push da inbox, recebe `error unauthenticated` e fecha com 4401.
 4. Eventos: `plan`, `agent_started`, `token`, `agent_result`, `approval_required`,
    `approval_executed`, `done` (com `usage` e `compliance`) e `error` (`code` + `traceId`).
 5. Códigos de fechamento: 4401 (não autorizado ou vida máxima `WS_MAX_CONNECTION_MS`
@@ -253,7 +265,8 @@ Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e v
 
 - `DATABASE_URL` (`carina_app`), `MIGRATION_DATABASE_URL` (só migrações e seed) e `REDIS_URL`;
 - `LLM_MODE` e as chaves dos provedores;
-- `WORKERS_ENABLED`, `WEB_ORIGIN`, `EXECUTION_FEE_PCT`, `DEFAULT_RPM` e `APPROVAL_TTL_HOURS`;
+- `WORKERS_ENABLED`, `WEB_ORIGIN`, `EXECUTION_FEE_PCT` e `APPROVAL_TTL_HOURS` (o rpm vem do
+  tenant);
 - `WS_MAX_CONNECTION_MS` e `API_KEY_REVALIDATE_TTL_MS`.
 
 ## 12. Testes

@@ -72,41 +72,43 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
     });
   });
 
-  it("audit_event é append-only: INSERT funciona, UPDATE dá permission denied", async () => {
-    await asApp(async (c) => {
-      await inRlsTransaction(c, { tenantId: tenantA }, () =>
-        c.query(`INSERT INTO audit_event (tenant_id, channel, query) VALUES ($1, 'chat', 'q')`, [
-          tenantA,
-        ]),
-      );
-      await expect(
-        inRlsTransaction(c, { tenantId: tenantA }, () =>
-          c.query("UPDATE audit_event SET query = 'x'"),
-        ),
-      ).rejects.toThrow(/permission denied/);
-    });
-  });
+  // Append-only (REVOKE UPDATE, DELETE, TRUNCATE na 0002): o INSERT do carina_app passa e cada
+  // alteração falha com 42501 (insufficient_privilege) citando a tabela, não com outro erro.
+  const appendOnly = [
+    {
+      table: "audit_event",
+      insert: `INSERT INTO audit_event (tenant_id, channel, query) VALUES ($1, 'chat', 'q')`,
+      update: "UPDATE audit_event SET query = 'x'",
+    },
+    {
+      table: "usage_record",
+      insert: `INSERT INTO usage_record (tenant_id, work_type, price_brl, duration_ms)
+               VALUES ($1, 'query', 1.50, 1)`,
+      update: "UPDATE usage_record SET price_brl = 0",
+    },
+  ] as const;
 
-  it("usage_record é append-only: INSERT funciona; UPDATE, DELETE e TRUNCATE dão permission denied", async () => {
-    await asApp(async (c) => {
-      await inRlsTransaction(c, { tenantId: tenantA }, () =>
-        c.query(
-          `INSERT INTO usage_record (tenant_id, work_type, price_brl, duration_ms) VALUES ($1, 'query', 1.50, 1)`,
-          [tenantA],
-        ),
-      );
-      for (const sql of [
-        "UPDATE usage_record SET price_brl = 0",
-        "DELETE FROM usage_record",
-        "TRUNCATE usage_record",
-      ]) {
-        await expect(
-          inRlsTransaction(c, { tenantId: tenantA }, () => c.query(sql)),
-          sql,
-        ).rejects.toThrow(/permission denied/);
-      }
+  for (const { table, insert, update } of appendOnly) {
+    it(`${table} é append-only: INSERT funciona; UPDATE, DELETE e TRUNCATE dão 42501 permission denied`, async () => {
+      await asApp(async (c) => {
+        await inRlsTransaction(c, { tenantId: tenantA }, () => c.query(insert, [tenantA]));
+        for (const sql of [update, `DELETE FROM ${table}`, `TRUNCATE ${table}`]) {
+          await expect(
+            inRlsTransaction(c, { tenantId: tenantA }, () => c.query(sql)),
+            sql,
+          ).rejects.toMatchObject({
+            code: "42501",
+            message: `permission denied for table ${table}`,
+          });
+        }
+        // A linha inserida continua lá (nada foi alterado nem apagado).
+        const { rows } = await inRlsTransaction(c, { tenantId: tenantA }, () =>
+          c.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`),
+        );
+        expect(rows[0]?.n).toBeGreaterThanOrEqual(1);
+      });
     });
-  });
+  }
 
   it("api_key é inacessível para carina_app", async () => {
     await asApp(async (c) => {

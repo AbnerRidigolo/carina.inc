@@ -12,7 +12,7 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
  *
  * - DataIngestionCoreModule → SyncWorker (grupo `sync` do stream `jobs`);
  * - OrchestratorModule → ResumeWorker (grupo `resumers` do stream `jobs`);
- * - InboxCoreModule → ReconciliationJob (timer; lock Redis por tenant evita ticks simultâneos).
+ * - InboxCoreModule → ReconciliationJob (timer; um lock Redis global por tick evita ticks simultâneos).
  */
 @Module({
   imports: [

@@ -7,7 +7,7 @@
 # - api    (main.ts, WORKERS_ENABLED=false): REST + WebSocket + InboxBroadcast (um tail de
 #          `inbox.events` por processo HTTP, que repassa aos sockets dele; não é consumidor de grupo).
 # - worker (main.worker.ts, WORKERS_ENABLED forçado a true): SyncWorker (grupo `sync`),
-#          ResumeWorker (grupo `resumers`) e ReconciliationJob (timer com lock Redis por tenant).
+#          ResumeWorker (grupo `resumers`) e ReconciliationJob (timer com lock Redis global por tick).
 #   Réplicas extras do worker são seguras (grupos de consumo do Redis + locks), só não são
 #   necessárias para a demo.
 #

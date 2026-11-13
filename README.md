@@ -54,6 +54,10 @@ de demo, uma vez) → `api` (healthy) → `web`. O `worker` sobe depois do `migr
 
 Todas as portas são publicadas só em `127.0.0.1`.
 
+Se você já tinha subido a demo antes de o tenant de demo ganhar id fixo, apague os volumes antigos
+com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
+"DEMO_APP_KEY já pertence a outro tenant".
+
 O seed cria o tenant `demo` (id fixo), três clientes sintéticos já sincronizados com a base de
 conhecimento (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
 
@@ -120,7 +124,7 @@ flowchart LR
   subgraph workerproc["processo worker (main.worker.ts)"]
     sync["SyncWorker<br/>grupo sync"]
     resume["ResumeWorker<br/>grupo resumers"]
-    recon["ReconciliationJob<br/>timer + lock por tenant"]
+    recon["ReconciliationJob<br/>timer de 60 s + lock global por tick"]
   end
 
   subgraph pg["PostgreSQL 17 + pgvector"]
@@ -169,7 +173,7 @@ sequenceDiagram
   participant K as worker
 
   W->>A: POST /api/chat "compre 100 ações de PETR4" (chave app)
-  A->>A: grafo: classify → respond → executor (proposta validada)
+  A->>A: grafo: classify → retrieve → respond → executor (proposta validada)
   A->>DB: upsert approval_request (id = hash(thread, ação, payload))
   A->>R: approval.created (inbox.events)
   A-->>W: awaiting_approval + approval (o grafo para em interrupt())
@@ -290,7 +294,7 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | Decisões concorrentes: só uma vale; a segunda → 409 | [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts), [`decision.e2e.spec.ts`](apps/api/test/inbox/decision.e2e.spec.ts), [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
-| **Append-only**: `carina_app` não faz UPDATE/DELETE/TRUNCATE em `usage_record` e `audit_event` | [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts), [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
+| **Append-only**: em `usage_record` e `audit_event`, o INSERT do `carina_app` passa e UPDATE, DELETE e TRUNCATE falham com 42501 (permission denied) | [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts); pelo cliente Prisma do serviço (UPDATE e DELETE recusados): [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
 | A auditoria guarda o digest da resposta, **nunca o texto nem a PII** | [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
 | **Ticket WS de uso único**; vencido ou malformado → 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("ticket reutilizado…") |
 | **Chave revogada, escopo removido ou tenant suspenso com o socket aberto**: o próximo turno é recusado e o socket fecha | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("Chat WebSocket: revalidação da chave e tempo máximo de vida") |

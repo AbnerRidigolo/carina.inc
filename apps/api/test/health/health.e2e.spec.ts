@@ -15,9 +15,14 @@ import { WsTicketSchema, type ChatEvent } from "@carina/shared";
 import { Logger, type INestApplication } from "@nestjs/common";
 import { Redis } from "ioredis";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { createApiApp } from "../../src/bootstrap.js";
+import {
+  DEFAULT_READY_CACHE_TTL_MS,
+  READINESS_PROBES,
+  type ReadinessProbes,
+} from "../../src/modules/health/health.controller.js";
 import { generateApiKey } from "../../src/modules/tenancy/api-key.js";
 import { appUrl, migratorSql, migratorUrl, must, redisDbUrl } from "../setup/db.js";
 
@@ -134,6 +139,25 @@ describe("boot da API (createApiApp)", () => {
         .get("/api/clients")
         .set("Authorization", `Bearer ${rpm1Key}`);
       expect([first.status, second.status]).toEqual([200, 429]);
+    });
+
+    it("ready concorrente: todas 200 e no máximo 1 sondagem de cada serviço por janela", async () => {
+      const probes = app.get<ReadinessProbes>(READINESS_PROBES);
+      const pg = vi.spyOn(probes, "postgres");
+      const rd = vi.spyOn(probes, "redis");
+      try {
+        // Deixa vencer o cache dos testes anteriores: esta janela começa do zero.
+        await new Promise((r) => setTimeout(r, DEFAULT_READY_CACHE_TTL_MS + 50));
+        const responses = await Promise.all(
+          Array.from({ length: 25 }, () => request(server).get("/api/ready")),
+        );
+        expect(responses.map((r) => r.status)).toEqual(Array(25).fill(200));
+        expect(pg).toHaveBeenCalledTimes(1);
+        expect(rd).toHaveBeenCalledTimes(1);
+      } finally {
+        pg.mockRestore();
+        rd.mockRestore();
+      }
     });
 
     it("health e ready não entram no log de requisições", async () => {

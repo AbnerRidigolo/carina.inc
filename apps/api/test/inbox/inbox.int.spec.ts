@@ -23,6 +23,7 @@ import type { AuthTenant } from "../../src/modules/tenancy/api-key.guard.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must } from "../setup/db.js";
 import type { Redis } from "ioredis";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -153,7 +154,7 @@ describe("Inbox (int)", () => {
   beforeAll(async () => {
     t = await createTestApp({
       imports: [InboxModule],
-      redisDb: 5,
+      redisDb: redisDbOf("inbox/inbox.int.spec.ts"),
       overrides: [
         { token: CLOCK, useValue: () => Date.now() + offset },
         {

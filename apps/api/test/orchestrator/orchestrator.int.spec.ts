@@ -22,8 +22,9 @@ import { OrchestratorModule } from "../../src/modules/orchestrator/orchestrator.
 import { OrchestratorService } from "../../src/modules/orchestrator/orchestrator.service.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { appUrl, migratorSql, migratorUrl, must, withPgClient } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 3;
+const REDIS_DB = redisDbOf("orchestrator/orchestrator.int.spec.ts");
 
 interface Party {
   tenantId: string;

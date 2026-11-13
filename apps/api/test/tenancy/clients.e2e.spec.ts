@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
 import { migratorSql } from "../setup/db.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
   let t: TestApp;
@@ -45,7 +46,10 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
 
   beforeAll(async () => {
     // As rotas de posições vivem no data-ingestion, que importa o tenancy.
-    t = await createTestApp({ imports: [DataIngestionModule], redisDb: 10 });
+    t = await createTestApp({
+      imports: [DataIngestionModule],
+      redisDb: redisDbOf("tenancy/clients.e2e.spec.ts"),
+    });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     A = await t.seedTenant({ name: "Tenant A" });
     B = await t.seedTenant({ name: "Tenant B" });

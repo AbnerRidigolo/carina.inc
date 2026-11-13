@@ -14,9 +14,10 @@ import {
 } from "../../src/modules/llm/provider-limiter.js";
 import { createTestApp } from "../setup/app.js";
 import { redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// DB lógico dedicado a este arquivo (11 = streams, 12 = limites); esvaziado a cada teste.
-const TEST_DB = 13;
+// DB lógico próprio (test/setup/redis-dbs.ts); esvaziado a cada teste.
+const TEST_DB = redisDbOf("llm/provider-limiter.int.spec.ts");
 
 const silent = () => ({ warn: vi.fn(), error: vi.fn() });
 

@@ -2,7 +2,7 @@
  * Sync (spec §6.4): posições e transações do cliente final viram documentos do conhecimento, pelo
  * `SyncWorker.syncClient` e pelo worker que consome `data.ingested` em `jobs` (grupo `sync`).
  *
- * Redis: DB lógico 8, esvaziado a cada teste. O worker só liga onde o teste pede
+ * Redis: DB lógico próprio (test/setup/redis-dbs.ts), esvaziado a cada teste. O worker só liga onde o teste pede
  * (`workersEnabled: true`); o padrão do createTestApp é desligado.
  */
 import { randomUUID } from "node:crypto";
@@ -31,8 +31,9 @@ import { chunkText } from "../../src/modules/knowledge/chunker.js";
 import { KnowledgeService } from "../../src/modules/knowledge/knowledge.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 8;
+const REDIS_DB = redisDbOf("data-ingestion/sync.int.spec.ts");
 const KG_TABLES = ["kg_document", "kg_chunk", "kg_entity", "kg_relation", "kg_mention"] as const;
 
 async function until(cond: () => Promise<boolean>, ms = 10_000): Promise<void> {

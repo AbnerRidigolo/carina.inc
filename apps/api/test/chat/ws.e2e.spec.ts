@@ -21,9 +21,10 @@ import { hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
 import { FailingMockRegistry, eventually, gateOrchestrator } from "./helpers.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// Outro DB lógico que o do chat.e2e (DB 1): os arquivos rodam em paralelo e cada um faz flush.
-const REDIS_DB = 6;
+// DB lógico próprio (test/setup/redis-dbs.ts): os arquivos rodam em paralelo e cada um faz flush.
+const REDIS_DB = redisDbOf("chat/ws.e2e.spec.ts");
 
 /** Cliente de teste: guarda as mensagens recebidas e o fechamento. */
 class TestSocket {

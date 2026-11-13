@@ -6,7 +6,7 @@
  *   Nest apontado para o pino, WebSocket do chat atendendo na mesma porta);
  * - os logs de requisição levam tenantId/keyId e nunca a chave, o ticket nem a query string.
  *
- * Redis: DB lógico 0, esvaziado a cada teste. O ConfigModule do app lê `process.env` (como em
+ * Redis: DB lógico próprio (test/setup/redis-dbs.ts), esvaziado a cada teste. O ConfigModule do app lê `process.env` (como em
  * produção): o teste fixa as variáveis antes do boot e as restaura no fim.
  */
 import type http from "node:http";
@@ -25,8 +25,9 @@ import {
 } from "../../src/modules/health/health.controller.js";
 import { generateApiKey } from "../../src/modules/tenancy/api-key.js";
 import { appUrl, migratorSql, migratorUrl, must, redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 0;
+const REDIS_DB = redisDbOf("health/health.e2e.spec.ts");
 const WEB_ORIGIN = "http://localhost:5173";
 
 interface LogRecord {

@@ -19,9 +19,10 @@ import {
 } from "../../src/modules/data-ingestion/ingestion.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// DB lógico próprio (o knowledge.int.spec usa o 14 e este arquivo faz flushdb a cada teste).
-const REDIS_DB = 15;
+// DB lógico próprio (test/setup/redis-dbs.ts): este arquivo faz flushdb a cada teste.
+const REDIS_DB = redisDbOf("data-ingestion/ingestion.e2e.spec.ts");
 
 const pos = (externalId: string, o: Partial<NormalizedPosition> = {}): NormalizedPosition => ({
   externalId,

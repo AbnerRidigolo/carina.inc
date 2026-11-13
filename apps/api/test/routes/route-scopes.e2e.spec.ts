@@ -17,6 +17,7 @@ import {
   SCOPES,
 } from "../../src/modules/tenancy/scopes.decorator.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 interface RouteInfo {
   route: string;
@@ -80,7 +81,7 @@ describe("Escopos das rotas registradas", () => {
   beforeAll(async () => {
     t = await createTestApp({
       imports: [AppModule.register()],
-      redisDb: 10,
+      redisDb: redisDbOf("routes/route-scopes.e2e.spec.ts"),
     });
     routes = enumerateRoutes(t.app);
   });

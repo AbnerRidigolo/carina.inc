@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ValidationError } from "../../src/core/errors/domain-errors.js";
 import { StreamsService, type StreamName } from "../../src/core/redis/streams.service.js";
 import { redisUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// DB lógico dedicado a este arquivo (o ioredis não aplica keyPrefix ao XGROUP); esvaziado a cada teste.
-const TEST_DB = 11;
+// DB lógico próprio (test/setup/redis-dbs.ts; o ioredis não aplica keyPrefix ao XGROUP); esvaziado a cada teste.
+const TEST_DB = redisDbOf("redis/streams.int.spec.ts");
 function dbUrl(): string {
   const url = new URL(redisUrl());
   url.pathname = `/${TEST_DB}`;

@@ -16,6 +16,7 @@ import { IngestionRepository } from "../../src/modules/data-ingestion/ingestion.
 import { IngestionService } from "../../src/modules/data-ingestion/ingestion.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 const N = 2500;
 const SYNTHETIC_DUPLICATES = 100;
@@ -72,7 +73,10 @@ describe("IngestionService: iteradores por id interno (Sync)", () => {
     TenantContext.run({ tenantId }, fn);
 
   beforeAll(async () => {
-    t = await createTestApp({ imports: [DataIngestionModule], redisDb: 9 });
+    t = await createTestApp({
+      imports: [DataIngestionModule],
+      redisDb: redisDbOf("data-ingestion/ingestion.int.spec.ts"),
+    });
     svc = t.app.get(IngestionService);
     A = await t.seedTenant({ name: "A" });
     B = await t.seedTenant({ name: "B" });

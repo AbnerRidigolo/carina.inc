@@ -5,6 +5,7 @@ import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { WatchtowerModule } from "../../src/modules/watchtower/watchtower.module.js";
 import { WatchtowerService } from "../../src/modules/watchtower/watchtower.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 describe("Watchtower E2E: GET /api/audit", () => {
   let t: TestApp;
@@ -27,7 +28,10 @@ describe("Watchtower E2E: GET /api/audit", () => {
     });
 
   beforeAll(async () => {
-    t = await createTestApp({ imports: [WatchtowerModule], redisDb: 12 });
+    t = await createTestApp({
+      imports: [WatchtowerModule],
+      redisDb: redisDbOf("watchtower/watchtower.e2e.spec.ts"),
+    });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     watchtower = t.app.get(WatchtowerService);
     A = await t.seedTenant({ name: "A" });

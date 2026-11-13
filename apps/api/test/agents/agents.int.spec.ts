@@ -14,6 +14,7 @@ import { AgentsModule } from "../../src/modules/agents/agents.module.js";
 import { MockResponderRegistry } from "../../src/modules/llm/mock-models.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { migratorSql, must } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 const knowledge = { chunks: [], entities: [], neighbors: [] };
 
@@ -41,7 +42,10 @@ describe("Agentes (int)", () => {
     migratorSql<Record<string, unknown>>(`SELECT * FROM executed_action`, [], { tenantId });
 
   beforeAll(async () => {
-    t = await createTestApp({ imports: [AgentsModule], redisDb: 4 });
+    t = await createTestApp({
+      imports: [AgentsModule],
+      redisDb: redisDbOf("agents/agents.int.spec.ts"),
+    });
     agents = t.app.get(AgentRegistry);
     ({ tenantId: tenantA, clientId: clientA } = await party("Agentes A"));
     ({ tenantId: tenantB, clientId: clientB } = await party("Agentes B"));

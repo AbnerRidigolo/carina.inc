@@ -5,7 +5,7 @@
  *
  * O `consume` do StreamsService é trocado por um no-op que espera o abort: o teste prova que cada
  * worker pediu o seu grupo de consumo sem roubar eventos do stream `jobs` de outros testes.
- * Redis: DB lógico 0, sem depender do conteúdo (nada é lido nem esvaziado aqui).
+ * Redis: DB lógico próprio (test/setup/redis-dbs.ts), sem depender do conteúdo (nada é lido nem esvaziado aqui).
  */
 import { ModulesContainer } from "@nestjs/core";
 import { Test, type TestingModule } from "@nestjs/testing";
@@ -22,8 +22,9 @@ import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js
 import { ResumeWorker } from "../../src/modules/orchestrator/resume.worker.js";
 import { WorkerModule } from "../../src/worker.module.js";
 import { appUrl, migratorUrl, redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 0;
+const REDIS_DB = redisDbOf("app/app-graph.int.spec.ts");
 
 function env(workers: "true" | "false") {
   return loadEnv({

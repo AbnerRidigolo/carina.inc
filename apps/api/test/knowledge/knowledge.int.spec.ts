@@ -14,8 +14,9 @@ import { HashEmbeddings } from "../../src/modules/llm/hash-embeddings.js";
 import type { ModelFactory } from "../../src/modules/llm/model-factory.js";
 import { createTestApp } from "../setup/app.js";
 import { appUrl, migratorSql } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 14;
+const REDIS_DB = redisDbOf("knowledge/knowledge.int.spec.ts");
 
 /** ModelFactory mínimo: só `embeddings()`, com os embeddings determinísticos do modo mock. */
 function fakeFactory(embeddings = new HashEmbeddings(1024)): ModelFactory {

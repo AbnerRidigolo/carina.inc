@@ -4,7 +4,7 @@
  * acontece no máximo uma vez mesmo com reentrega, eventos duplicados e dois consumidores; eventos
  * forjados não executam nada; a expiração pela reconciliação destrava o thread.
  *
- * Redis: DB lógico 2, esvaziado a cada teste. Os testes de reentrega usam consumidores próprios
+ * Redis: DB lógico próprio (test/setup/redis-dbs.ts), esvaziado a cada teste. Os testes de reentrega usam consumidores próprios
  * (StreamsService com reivindicação rápida) chamando `ResumeWorker.handle`; o loop real do worker
  * só liga onde o teste pede (`workersEnabled: true`).
  */
@@ -28,8 +28,9 @@ import {
 } from "../../src/modules/orchestrator/resume.worker.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 2;
+const REDIS_DB = redisDbOf("orchestrator/resume.int.spec.ts");
 const HOUR = 3_600_000;
 
 interface Party {

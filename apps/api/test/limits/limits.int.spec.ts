@@ -10,9 +10,10 @@ import { slidingWindowAcquire } from "../../src/modules/limits/sliding-window.lu
 import type { AuthTenant } from "../../src/modules/tenancy/api-key.guard.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// DB lógico dedicado a este arquivo (os demais arquivos de teste usam outros); esvaziado a cada teste.
-const TEST_DB = 12;
+// DB lógico próprio (test/setup/redis-dbs.ts); esvaziado a cada teste.
+const TEST_DB = redisDbOf("limits/limits.int.spec.ts");
 
 const TENANT_ID = "6f1c1d1e-8a3b-4c2d-9e0f-0123456789ab";
 

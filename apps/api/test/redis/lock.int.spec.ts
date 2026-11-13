@@ -1,13 +1,14 @@
 /**
  * LockService: lock distribuído no Redis (SET NX PX + token), com heartbeat (compare-and-pexpire)
- * e liberação compare-and-del. DB lógico 7, esvaziado a cada teste.
+ * e liberação compare-and-del. DB lógico próprio (test/setup/redis-dbs.ts), esvaziado a cada teste.
  */
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LockLostError, LockService } from "../../src/core/redis/lock.service.js";
 import { redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const TEST_DB = 7;
+const TEST_DB = redisDbOf("redis/lock.int.spec.ts");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("LockService", () => {

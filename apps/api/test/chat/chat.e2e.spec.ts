@@ -18,8 +18,9 @@ import { MockResponderRegistry } from "../../src/modules/llm/mock-models.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
 import { FailingMockRegistry, eventually, gateOrchestrator } from "./helpers.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 1;
+const REDIS_DB = redisDbOf("chat/chat.e2e.spec.ts");
 const QUOTA = 1000;
 
 describe("Chat REST", () => {

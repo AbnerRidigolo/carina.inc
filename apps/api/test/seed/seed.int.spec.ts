@@ -2,7 +2,7 @@
  * Seed de demo (`pnpm --filter @carina/api seed`): idempotente, cria o tenant `demo` e as duas
  * chaves com o papel migrator, e os três clientes sintéticos pela ingestão + Sync.
  *
- * Redis: DB lógico 0, esvaziado a cada teste. O banco é o da execução (global-setup); o tenant
+ * Redis: DB lógico próprio (test/setup/redis-dbs.ts), esvaziado a cada teste. O banco é o da execução (global-setup); o tenant
  * `demo` só é criado aqui, então as contagens filtram por ele.
  */
 import http from "node:http";
@@ -21,8 +21,9 @@ import {
 } from "../../src/seed/seed.js";
 import { createTestApp, type TestApp } from "../setup/app.js";
 import { appUrl, migratorSql, migratorUrl, must, redisDbUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-const REDIS_DB = 0;
+const REDIS_DB = redisDbOf("seed/seed.int.spec.ts");
 
 function seedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {

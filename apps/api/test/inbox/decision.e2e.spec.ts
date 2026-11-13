@@ -5,6 +5,7 @@ import { approvalId } from "../../src/modules/inbox/approval-id.js";
 import { InboxModule } from "../../src/modules/inbox/inbox.module.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 const hex = () => approvalId(crypto.randomUUID(), "place_trade", { n: Math.random() });
 
@@ -63,7 +64,10 @@ describe("Inbox HTTP: listagem e decisão", () => {
   };
 
   beforeAll(async () => {
-    t = await createTestApp({ imports: [InboxModule], redisDb: 5 });
+    t = await createTestApp({
+      imports: [InboxModule],
+      redisDb: redisDbOf("inbox/decision.e2e.spec.ts"),
+    });
     A = await t.seedTenant({ name: "A" });
     B = await t.seedTenant({ name: "B" });
     clientA = await seedClient(A.tenantId);

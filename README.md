@@ -1,114 +1,417 @@
-# CARINA Wealth AI v3
+# CARINA — núcleo multiagente de gestão patrimonial em TypeScript
 
-Plataforma de gestão patrimonial autônoma para investidores HNWI brasileiros (R$1M–50M),
-com **12 agentes especializados** coordenados, **deploy 100% gratuito na nuvem** (zero
-processamento ou banco no notebook), camada de modelos flexível com fallback e conhecimento
-via **GraphRAG-SDK** sobre **FalkorDB Cloud**.
+O CARINA é uma API B2B multi-tenant de inteligência financeira para bancos, fintechs e gestoras.
+O cliente final faz uma pergunta sobre a própria carteira, um orquestrador aciona agentes
+especialistas em paralelo e responde com streaming. Quando o pedido é uma **ação irreversível**
+(por exemplo, uma ordem de compra), o grafo pausa até que uma pessoa com o escopo certo aprove. A
+execução acontece **no máximo uma vez** e fica cobrada e auditada.
 
-## Demo local da versão TypeScript (docker compose)
+Este repositório é a **fase 1** da migração do CARINA de Python para TypeScript/Node.js: o núcleo
+apresentável. A versão Python continua em [`legacy/python`](legacy/python) até a fase 3.
+
+- [Por que migrar](#por-que-migrar)
+- [Demo local](#demo-local)
+- [Arquitetura](#arquitetura)
+- [Decisões de arquitetura](#decisões-de-arquitetura)
+- [Defeitos do Python corrigidos](#defeitos-do-python-corrigidos)
+- [Garantias provadas por testes](#garantias-provadas-por-testes)
+- [Como rodar os testes](#como-rodar-os-testes)
+- [Segurança: o que saber antes de expor](#segurança-o-que-saber-antes-de-expor)
+- [Limitações conhecidas](#limitações-conhecidas)
+- [Roadmap](#roadmap)
+
+## Por que migrar
+
+A versão Python (AgentScope, FalkorDB, LiteLLM, FastAPI, Gradio) tem cerca de 9,5 mil linhas e
+138 testes. Ao analisar esse código antes de migrar, encontramos defeitos estruturais: executores
+da inbox que nunca eram registrados, ação desconhecida tratada como reversível, limites de uso
+por processo, cota não atômica, dinheiro em `float` e chave de API na URL do WebSocket. A lista
+completa está em [Defeitos do Python corrigidos](#defeitos-do-python-corrigidos).
+
+Corrigir isso no lugar exigiria reescrever as mesmas partes que uma migração reescreve. Por isso
+reescrevemos o sistema num stack TypeScript de ponta a ponta (NestJS, Prisma/PostgreSQL, Redis,
+LangGraph.js e React), com contratos tipados compartilhados entre API e frontend. O desenho
+completo está em
+[docs/superpowers/specs/2026-11-11-migracao-typescript-design.md](docs/superpowers/specs/2026-11-11-migracao-typescript-design.md).
+
+## Demo local
+
+Pré-requisito: Docker com Compose v2. **Nenhuma chave de API é necessária**: a demo roda com
+`LLM_MODE=mock`, em que modelos determinísticos substituem os provedores.
 
 ```bash
-docker compose up --build   # sem nenhuma chave de API: LLM_MODE=mock
+docker compose up --build
 ```
 
-Sobe Postgres (pgvector) e Redis, aplica as migrações (`migrate`), roda o seed de demo (`seed`),
-a API em http://localhost:3000 (`/api/health`, `/api/ready`), o worker (Sync, retomada de
-aprovações e reconciliação) e o web em http://localhost:5173. O seed cria o tenant `demo`, três
-clientes sintéticos já sincronizados e duas chaves:
+Ordem de subida: `postgres` e `redis` (healthy) → `migrate` (migrações, uma vez) → `seed` (dados
+de demo, uma vez) → `api` (healthy) → `web`. O `worker` sobe depois do `migrate`.
 
-| Chave | Valor padrão | Escopos |
+| Serviço  | Endereço                                   | O que é                                                               |
+| -------- | ------------------------------------------ | --------------------------------------------------------------------- |
+| `web`    | http://localhost:5173                      | React (build do Vite) servido pelo nginx, que faz proxy de `/api` e `/ws` |
+| `api`    | http://localhost:3000/api/health, `/api/ready` | REST + WebSocket do chat (`WORKERS_ENABLED=false`)                 |
+| `worker` | sem porta                                  | Sync, retomada de aprovações e reconciliação                          |
+
+Todas as portas são publicadas só em `127.0.0.1`.
+
+O seed cria o tenant `demo` (id fixo), três clientes sintéticos já sincronizados com a base de
+conhecimento (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
+
+| Variável            | Valor padrão                               | Escopos                 |
+| ------------------- | ------------------------------------------ | ----------------------- |
+| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`    |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`  |
+
+> **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
+> `NODE_ENV=production` o seed recusa as chaves fixas, a menos que `SEED_ALLOW_DEMO_KEYS=true`.
+> Só o compose de demo liga essa opção. Fora da demo, defina `DEMO_APP_KEY` e
+> `DEMO_APPROVER_KEY` com chaves novas. Todas as variáveis estão em [.env.example](.env.example).
+
+### Roteiro de 2 minutos
+
+1. Abra http://localhost:5173 e conecte com a `DEMO_APPROVER_KEY`.
+2. Pergunte "Como está minha carteira?". O Insight roda e o Navigator responde em streaming, com
+   o custo do turno.
+3. Peça "compre 100 ações de PETR4". O executor propõe a ordem (R$ 3.000,00 no preço fixo do mock),
+   o grafo pausa e a aprovação aparece no painel.
+4. Aprove e confirme. O `worker` retoma o grafo e executa a ordem simulada uma vez. O painel de
+   aprovações recebe `approval_executed` pelo WebSocket e o uso passa a mostrar a execução: R$ 90,00
+   (R$ 75,00 de preço base + 0,5% de R$ 3.000,00).
+
+O mesmo roteiro pela API:
+
+```bash
+APP="Authorization: Bearer sk-live-demoapp0000000000000000000000000"
+APPROVER="Authorization: Bearer sk-live-demoapprover00000000000000000000"
+curl -s -X POST localhost:3000/api/chat -H "$APP" -H 'Content-Type: application/json' \
+  -d '{"clientId":"cliente-moderado","message":"compre 100 ações de PETR4"}'   # → awaiting_approval
+curl -s -X POST localhost:3000/api/inbox/<approval.id>/decision -H "$APPROVER" \
+  -H 'Content-Type: application/json' -d '{"approved":true}'                  # → approved
+curl -s localhost:3000/api/usage -H "$APP"                                    # → execution: 90.00
+```
+
+Com a chave app, a decisão devolve **403**: ela não tem `inbox:decide`. Esse roteiro roda no CI
+(job `compose-smoke`) e no teste
+[`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
+
+### Modo live
+
+Com `LLM_MODE=live` e `OPENROUTER_API_KEY` (e, opcionalmente, `GROQ_API_KEY` e `NVIDIA_API_KEY`),
+os agentes usam os modelos de [`apps/api/config/models.yaml`](apps/api/config/models.yaml). Com
+`NODE_ENV=production`, `LLM_MODE` é obrigatória: a API não sobe se ela faltar. O modo live
+**não é exercitado pelo CI**. Leia [Segurança](#segurança-o-que-saber-antes-de-expor) antes de
+ligar o modo live.
+
+## Arquitetura
+
+```mermaid
+flowchart LR
+  browser["Navegador<br/>apps/web (React + Vite)"]
+  nginx["nginx (web)<br/>/api e /ws por proxy"]
+
+  subgraph apiproc["processo api (main.ts)"]
+    guards["ApiKeyGuard → RateLimitGuard<br/>TenantContext (AsyncLocalStorage)"]
+    rest["REST: chat, inbox, usage, audit,<br/>clients, ingestão, health/ready"]
+    gw["ChatGateway /ws/chat<br/>ticket de uso único + revalidação da chave"]
+    graph1["Orquestrador LangGraph.js<br/>classify → retrieve → especialistas (Send) → synthesize<br/>executor → approval (interrupt)"]
+    bcast["InboxBroadcast<br/>(tail de inbox.events)"]
+  end
+
+  subgraph workerproc["processo worker (main.worker.ts)"]
+    sync["SyncWorker<br/>grupo sync"]
+    resume["ResumeWorker<br/>grupo resumers"]
+    recon["ReconciliationJob<br/>timer + lock por tenant"]
+  end
+
+  subgraph pg["PostgreSQL 17 + pgvector"]
+    tx["transacional (RLS FORCE)<br/>tenant, client, approval_request,<br/>executed_action, usage_record, audit_event,<br/>position, transaction"]
+    kg["conhecimento kg_* (RLS: tenant E cliente)<br/>HNSW + full-text"]
+    lg["schema langgraph<br/>checkpoints (PostgresSaver)"]
+  end
+
+  subgraph redis["Redis 7"]
+    streams["Streams: jobs, inbox.events (+ .dlq)"]
+    limits["janela deslizante (rpm), cota mensal,<br/>tickets WS, locks, cache"]
+  end
+
+  llm["LangChain.js: OpenRouter → reservas → Groq<br/>embeddings NVIDIA<br/>LLM_MODE=mock: modelos determinísticos"]
+
+  browser --> nginx --> guards
+  guards --> rest --> graph1
+  nginx -- "WebSocket" --> gw --> graph1
+  graph1 --> llm
+  graph1 --> tx & kg & lg
+  rest -- "decisão → resume" --> streams
+  rest -- "data.ingested" --> streams
+  streams --> resume --> graph1b["mesmo grafo, retomado<br/>executeOnce"]
+  graph1b --> tx
+  streams --> sync --> kg
+  recon --> tx
+  recon -- "republica resume" --> streams
+  resume -- "approval.executed" --> streams
+  streams --> bcast --> gw
+  guards --> limits
+```
+
+O worker (`WorkerModule`) reaproveita os módulos de domínio da API, sem controllers, gateway nem
+broadcast. No diagrama, "mesmo grafo, retomado" é o orquestrador rodando no processo do worker. Por padrão cada job roda em um só
+lugar. Réplicas extras do worker são seguras: consumer groups do Redis, locks e a garantia de
+execução única no banco.
+
+### Fluxo de uma ação irreversível
+
+```mermaid
+sequenceDiagram
+  participant W as Web / cliente
+  participant A as api
+  participant DB as Postgres (RLS)
+  participant R as Redis Streams
+  participant K as worker
+
+  W->>A: POST /api/chat "compre 100 ações de PETR4" (chave app)
+  A->>A: grafo: classify → respond → executor (proposta validada)
+  A->>DB: upsert approval_request (id = hash(thread, ação, payload))
+  A->>R: approval.created (inbox.events)
+  A-->>W: awaiting_approval + approval (o grafo para em interrupt())
+  W->>A: POST /api/inbox/:id/decision (chave com inbox:decide)
+  A->>DB: SELECT … FOR UPDATE → approved, decided_by_key_id
+  A->>R: resume (jobs), depois do commit
+  R->>K: ResumeWorker (XREADGROUP, dedup por eventId)
+  K->>DB: nó approval relê o status (o banco manda, não o evento)
+  K->>DB: INSERT executed_action(started), conflito = outro worker já executou
+  K->>K: executor simulado
+  K->>DB: succeeded + usage_record(execution) + audit_event, na mesma transação
+  K->>R: approval.executed (inbox.events)
+  R-->>A: InboxBroadcast (tail)
+  A-->>W: evento approval_executed no WebSocket do mesmo tenant e cliente
+```
+
+### Estrutura do repositório
+
+```
+apps/api            NestJS 12 (ESM). src/core: config, database, redis, logging, errors, http
+                    src/modules: tenancy, limits, llm, knowledge, agents, orchestrator, inbox,
+                    billing, watchtower, chat, data-ingestion, health
+                    prisma/migrations: SQL escrito à mão (RLS, pgvector, funções SECURITY DEFINER)
+                    test: integração (*.int.spec.ts) e E2E (*.e2e.spec.ts)
+apps/web            React 19 + Vite, CSS modules, sem biblioteca de UI
+packages/shared     schemas Zod e tipos (contratos REST, eventos de WebSocket e de Streams);
+                    sem dependência de Node, importado direto pelo web
+legacy/python       versão Python, intocada até a fase 3
+docs/ARCHITECTURE.md  arquitetura detalhada da versão TypeScript
+```
+
+As regras de fronteira são verificadas por lint e por teste. O `PrismaService` sem RLS só pode
+ser importado por `core/database` e `modules/tenancy` (regra de ESLint, fixada por
+[`prisma-import-restriction.spec.ts`](apps/api/src/core/database/prisma-import-restriction.spec.ts)).
+Toda rota não pública declara escopo
+([`route-scopes.e2e.spec.ts`](apps/api/test/routes/route-scopes.e2e.spec.ts)).
+
+## Decisões de arquitetura
+
+| Tema | Decisão | Alternativas descartadas (motivo) |
 | --- | --- | --- |
-| `DEMO_APP_KEY` | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write` |
-| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide` |
+| Organização | Monorepo **pnpm workspaces** | Nx (configuração demais para o tamanho); repositórios separados (tipos duplicados) |
+| Backend | **NestJS 12** (ESM, Node 22.22.2 fixado em `.nvmrc`) | Express/Fastify puros (organização toda manual) |
+| Frontend | **React + Vite** | Next.js (peças demais ao lado do NestJS); Angular |
+| Dados transacionais | **PostgreSQL 17 + Prisma 7** (driver adapter `pg`) | Tudo no FalkorDB (não serve para dado transacional) |
+| Conhecimento | **pgvector no mesmo Postgres**, grafo em tabelas, isolamento por **RLS** | Neo4j Community (sem controle de acesso por papel); FalkorDB (SSPL, ecossistema JS fraco) |
+| Agentes | **LangGraph.js** com `interrupt()` e checkpointer Postgres | Vercel AI SDK (sem pausa durável pronta); Mastra (licença `ee/`) |
+| Modelos | **LangChain.js** com `withFallbacks()` por papel; embeddings NVIDIA | LiteLLM (só Python); misturar LangChain com AI SDK |
+| Cache, limites, eventos | **Redis**: TTL, sorted set + Lua (limites e cota atômicos), **Streams** com consumer groups e DLQ | Limites em memória (não valem com várias instâncias) |
+| Dados de clientes | **Custo zero**: API de ingestão, gerador sintético e (fase 2) importação de arquivos, atrás de `FinancialDataProvider` | Pluggy/Belvo (a partir de R$ 1.500–2.500/mês); APIs da B3 (contrato); Open Finance direto (autorização do BC) |
+| Testes | **Vitest**, Supertest, Testing Library + MSW; Postgres/Redis reais | Jest (problemas com pacotes só-ESM do NestJS 12) |
+| Qualidade | TypeScript `strict` + `noUncheckedIndexedAccess`, ESLint + Prettier, versões exatas no lockfile | — |
 
-**Essas chaves são públicas e servem só para a demo local.** Fora dela, defina `DEMO_APP_KEY` e
-`DEMO_APPROVER_KEY` com chaves novas; com `NODE_ENV=production` o seed recusa as chaves fixas,
-a menos que `SEED_ALLOW_DEMO_KEYS=true` (que só o compose de demo liga). Todas as variáveis estão
-documentadas em [.env.example](.env.example).
+### Onde a implementação se afastou do plano
 
-## Princípios inegociáveis
+O que foi construído difere do plano em alguns pontos. Cada mudança tem um motivo registrado:
 
-1. **Nada roda na máquina do dev em produção** — inference, embeddings e banco são serviços na nuvem.
-2. **Sem `docker run`** — o banco é FalkorDB Cloud (serviço gerenciado, connection string).
-3. **Modelo é config, não código** — roteamento por LiteLLM; trocar provedor = editar YAML.
-4. **Toda ação externa irreversível passa por aprovação humana** (agentic-inbox), classificada por risco.
-5. `async/await` em todo I/O · Pydantic em toda fronteira · try/except + log estruturado sempre.
+- **Pluggy fora; `data-ingestion` no lugar.** O spec foi revisado antes da implementação por
+  causa do custo. Os dados de clientes entram pela API de ingestão (lotes de até 1.000 itens,
+  upsert idempotente, `data:write`) ou pelo gerador sintético. O Sync, sem LLM, os transforma em
+  documentos, entidades e relações da base de conhecimento.
+- **Grafo com nós `retrieve`, `respond` e `approval`.** O nó `answer` virou `respond` porque o
+  LangGraph proíbe nó com o nome de um canal do estado. O executor e a aprovação ficaram em
+  **dois nós**: na retomada o LangGraph reexecuta o nó do `interrupt()` desde o início, e assim a
+  proposta (chamada de modelo) não roda de novo.
+- **O banco decide a retomada, não o evento.** O valor do `resume` é só um sinal. O nó `approval`
+  relê a `approval_request` sob RLS e só chama `executeOnce` se ela estiver `approved`.
+- **Processo de workers separado.** `main.worker.ts` roda Sync, ResumeWorker e reconciliação. No
+  compose a API sobe com `WORKERS_ENABLED=false`. Em desenvolvimento, `main.ts` sozinho também
+  roda tudo.
+- **Revalidação da chave em sockets abertos.** Um ticket vale 30 s e uma vez só (`GETDEL`).
+  Antes de cada turno, o `LiveKeyService` revalida chave, escopo e tenant por id (cache de no
+  máximo `API_KEY_REVALIDATE_TTL_MS`, 60 s por padrão), e a conexão tem vida máxima
+  (`WS_MAX_CONNECTION_MS`). Para isso a migração 0006 criou `tenant.suspended_at` e
+  `resolve_api_key_by_id`.
+- **Reconciliação sem credencial de dono.** A reconciliação lista os tenants por uma função
+  `SECURITY DEFINER` (`active_tenant_ids`) e processa cada um sob RLS como `carina_app`. A API e o
+  worker nunca recebem a senha do `carina_migrator`.
+- **Agendamento.** Em vez de `@nestjs/schedule`, um `setInterval` com lock Redis por tick
+  (`ReconciliationJob`).
+- **Frontend sem TanStack Query.** O estado fica no React e num barramento de eventos interno; o
+  WebSocket reconecta com backoff.
+- **Versão fixada por compatibilidade.** `@langchain/langgraph-sdk` está em 1.12.9 (override em
+  [`pnpm-workspace.yaml`](pnpm-workspace.yaml)), porque o 1.12.10 exige `@langchain/core` ≥ 1.3.2.
+- **Node 22.22.2.** O jsdom 31 exige `^22.22.2`. O `.nvmrc` é a única fonte, e o CI, as imagens
+  Docker e o `engines` seguem essa versão
+  ([`toolchain.spec.ts`](apps/api/src/toolchain.spec.ts)).
 
-## Stack
+## Defeitos do Python corrigidos
 
-| Camada            | Tecnologia                                                        |
-| ----------------- | ----------------------------------------------------------------- |
-| Orquestração      | AgentScope                                                        |
-| Conhecimento      | GraphRAG-SDK + FalkorDB Cloud (grafo + vetor + full-text)         |
-| Modelos           | LiteLLM → NVIDIA NIM (primário) · Hermes 4 (reasoning) · Groq (fallback) |
-| API / UI          | FastAPI + WebSocket · Gradio                                      |
-| Jobs 24/7         | Modal                                                            |
-| Deploy online     | Hugging Face Spaces                                              |
+| # | Defeito no Python | Correção na versão TypeScript | Onde ver |
+| --- | --- | --- | --- |
+| 1 | Executores da inbox nunca registrados; inbox em memória; Executor fora do fluxo | Executor é nó do grafo; `ExecutorRegistry` registra executores (simulados) no boot; solicitações e execuções no Postgres | `modules/inbox`, [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts) |
+| 2 | Ação desconhecida tratada como reversível (executava sem aprovação) | Listas explícitas de `READ` e `REVERSIBLE`; **qualquer outra ação é `IRREVERSIBLE`** | [`risk.spec.ts`](apps/api/src/modules/inbox/risk.spec.ts) |
+| 3 | Modelo de reserva só no classificador | `withFallbacks()` em toda cadeia de modelo, com schema e tools aplicados a cada modelo | [`model-factory.spec.ts`](apps/api/src/modules/llm/model-factory.spec.ts) |
+| 4 | Cache de orquestradores ilimitado e histórico compartilhado entre requisições | Grafo sem estado em memória; histórico por thread no checkpointer, cortado (20 mensagens no estado, 12 por chamada de agente) | `modules/orchestrator` |
+| 5 | Orquestrador sem síntese | Nó `synthesize`; a falha de um especialista vira `{agent, error}` e a síntese menciona a análise que faltou | [`graph.spec.ts`](apps/api/src/modules/orchestrator/graph.spec.ts) |
+| 6 | Limites e cota por processo; cota não atômica | Janela deslizante e cota mensal no Redis, cada uma num único script Lua | [`limits.int.spec.ts`](apps/api/test/limits/limits.int.spec.ts) |
+| 7 | 500 sem tratamento; WebSocket expunha `str(exc)` | Filtro global RFC 9457 (`application/problem+json` com `traceId`); evento WS `error` só com `code` e `traceId` | [`problem-details.filter.spec.ts`](apps/api/src/core/errors/problem-details.filter.spec.ts), [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) |
+| 8 | `decided_by` em texto livre | Escopo `inbox:decide`; `decided_by_key_id` com FK composta (a chave tem de ser do mesmo tenant) | [`decision.e2e.spec.ts`](apps/api/test/inbox/decision.e2e.spec.ts), [`inbox-integrity.int.spec.ts`](apps/api/test/database/inbox-integrity.int.spec.ts) |
+| — | Dinheiro em `float` | `numeric(18,2)` / `Decimal`, string decimal nos contratos; fee com arredondamento meio-para-cima | [`pricing.spec.ts`](apps/api/src/modules/billing/pricing.spec.ts), [`billing.int.spec.ts`](apps/api/test/billing/billing.int.spec.ts) |
+| — | Chave de API na URL do WebSocket | Ticket de uso único (30 s) emitido por `POST /api/ws/ticket` | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) |
+| — | Ferramentas de lint sem versão fixada | Versões exatas em todos os `package.json` e lockfile congelado no CI | `pnpm install --frozen-lockfile` |
 
-## Estrutura
+## Garantias provadas por testes
 
-```
-carina/        agents/ · knowledge/ · models/ · inbox/ · api/ · integrations/ · config/ · utils/
-modal_jobs/    jobs 24/7 (Monitor, Sync, keepalive do FalkorDB)
-frontend/      UI Gradio
-deployment/    huggingface/ · modal/
-scripts/ tests/ docs/
-```
+Cada linha cita o arquivo e o teste que a prova. Os testes de integração e E2E rodam contra
+Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), conectados como
+`carina_app`, que é `NOSUPERUSER NOBYPASSRLS`.
 
-## Setup
+| Garantia | Teste |
+| --- | --- |
+| **Isolamento por RLS** entre tenants e entre clientes; fora de contexto, nada volta (falha fechada) | [`rls-isolation.int.spec.ts`](apps/api/test/database/rls-isolation.int.spec.ts) (incl. "20 contextos em paralelo… nunca leem dados um do outro"); [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts) ("SELECT em position sem app.tenant_id não devolve nada", "toda tabela de dados tem RLS com FORCE e política") |
+| RLS na **busca vetorial/híbrida** (outro cliente do mesmo tenant e outro tenant não veem nada) | [`knowledge.int.spec.ts`](apps/api/test/knowledge/knowledge.int.spec.ts) |
+| Funções `SECURITY DEFINER` não podem ser **sombreadas por tabelas temporárias** | [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts) (`resolve_api_key` e `resolve_api_key_by_id`), [`inbox-integrity.int.spec.ts`](apps/api/test/database/inbox-integrity.int.spec.ts) (`active_tenant_ids`) |
+| **Execução no máximo uma vez**: dois `executeOnce` em paralelo, o mesmo `resume` entregue duas vezes ou por dois workers, retomadas concorrentes do grafo | [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts) ("dois em paralelo: o executor roda uma vez…"), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("mesmo resume entregue duas vezes e por dois consumidores"), [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("retomadas concorrentes (duas instâncias)") |
+| `started` preso vira `needs_review` e **nunca é reexecutado**; cobrança, auditoria e status revertem juntos | [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts) (ReconciliationJob, "falha na cobrança…") |
+| Decisões concorrentes: só uma vale; a segunda → 409 | [`inbox.int.spec.ts`](apps/api/test/inbox/inbox.int.spec.ts), [`decision.e2e.spec.ts`](apps/api/test/inbox/decision.e2e.spec.ts), [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts) |
+| **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts) |
+| **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
+| **Append-only**: `carina_app` não faz UPDATE/DELETE/TRUNCATE em `usage_record` e `audit_event` | [`migrations.int.spec.ts`](apps/api/test/database/migrations.int.spec.ts), [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
+| A auditoria guarda o digest da resposta, **nunca o texto nem a PII** | [`watchtower.int.spec.ts`](apps/api/test/watchtower/watchtower.int.spec.ts) |
+| **Ticket WS de uso único**; vencido ou malformado → 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("ticket reutilizado…") |
+| **Chave revogada, escopo removido ou tenant suspenso com o socket aberto**: o próximo turno é recusado e o socket fecha | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("Chat WebSocket: revalidação da chave e tempo máximo de vida") |
+| O broadcast da inbox só chega ao socket do **mesmo tenant e cliente** | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("broadcast da inbox") |
+| **Streams**: retentativa, DLQ após 5 entregas, dedup por `eventId`, entrada inválida não derruba o loop | [`streams.int.spec.ts`](apps/api/test/redis/streams.int.spec.ts), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) |
+| **Ingestão idempotente**: o mesmo lote duas vezes não duplica; lote cobrado ⇔ lote gravado | [`ingestion.e2e.spec.ts`](apps/api/test/data-ingestion/ingestion.e2e.spec.ts) |
+| **Limites atômicos**: 50 `reserve` concorrentes com cota 10 → exatamente 10; 429 sempre com `Retry-After` | [`limits.int.spec.ts`](apps/api/test/limits/limits.int.spec.ts) |
+| **Watchtower sem ReDoS**: tempo linear em entradas adversariais de 1 MB; paridade com o Python | [`inspect-text.perf.spec.ts`](apps/api/src/modules/watchtower/inspect-text.perf.spec.ts), [`inspect-text.parity.spec.ts`](apps/api/src/modules/watchtower/inspect-text.parity.spec.ts) |
+| Logs **sem chave, ticket nem query string**; requisições levam `tenantId`/`keyId` | [`health.e2e.spec.ts`](apps/api/test/health/health.e2e.spec.ts) ("logs de requisição") |
+| Provedores fora: REST → 503 com `Retry-After`; WS → evento `error` sem texto interno; nos dois, cota devolvida e nada cobrado | [`chat.e2e.spec.ts`](apps/api/test/chat/chat.e2e.spec.ts), [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) |
+
+## Como rodar os testes
+
+Requisitos: Node 22.22.2 (`.nvmrc`) e pnpm 10 (`corepack enable` ou `npm i -g pnpm@10.28.0`).
 
 ```bash
-python -m venv .venv && . .venv/Scripts/activate   # Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -e ".[dev,modal]"
-cp .env.example .env        # preencher chaves (NUNCA comitar .env)
-pytest -m "not integration" # testes unitários (mockados)
-pytest -m integration       # testes live (exigem credenciais reais)
+pnpm install
+pnpm lint && pnpm typecheck
+pnpm test                              # unidade: api, shared e web
+pnpm --filter @carina/api test:int     # integração (Postgres + Redis reais)
+pnpm --filter @carina/api test:e2e     # E2E da API (Supertest + WebSocket, LLM_MODE=mock)
+pnpm --filter @carina/api test:cov     # unit + int + e2e com cobertura (limite: 80% de linhas em src/modules)
+pnpm build
 ```
 
-A troca de modelos é feita em [carina/config/models.yaml](carina/config/models.yaml) — sem tocar em código.
+Integração e E2E precisam de um Postgres com pgvector e de um Redis:
 
-## API B2B (Agent API)
+- **Com Docker e sem nenhuma variável**, o harness sobe `pgvector/pgvector:pg17` e
+  `redis:7-alpine` via Testcontainers.
+- **Com serviços próprios** (é o que o CI faz), aponte para eles:
 
-A API REST/WS é multi-tenant: toda rota (exceto `/api/health`) exige chave de API
-(`Authorization: Bearer sk-...` ou `X-API-Key`), configurada em `CARINA_API_KEYS`.
-Cada resolução é medida e precificada por trabalho (`carina/b2b/metering.py`) e
-auditada pelo **Watchtower** (`carina/b2b/watchtower.py`) — flags de compliance
-(suitability, LGPD/PII, recomendação não autorizada CVM, disclaimers) e trilha
-append-only. Endpoints do tenant: `POST /api/chat`, `GET /api/usage`, `GET /api/audit`,
-inbox de aprovações. Sem chaves configuradas a API **falha fechada** (tudo 401);
-em desenvolvimento, `CARINA_ALLOW_DEV_TENANT=1` habilita um tenant `dev`
-implícito (opt-in explícito, nunca em produção).
+  ```bash
+  export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres  # superusuário
+  export TEST_REDIS_URL=redis://localhost:6379
+  ```
 
-## Data Engine — Camada 1 (Market Data BR)
+  O harness cria um banco novo por execução e projeto, cria os papéis `carina_migrator` e
+  `carina_app` se faltarem (nunca altera papéis existentes), aplica as migrações e remove o
+  banco no fim.
+- **`TEST_DB_ICU_LOCALE=en-US`** (opcional, PostgreSQL ≥ 15) cria o banco de teste com
+  collation ICU, para reproduzir localmente a ordenação de texto do CI (`en_US.utf8`) num
+  Postgres local em `C.UTF-8`.
 
-Dados de mercado B3 e macro BCB normalizados num schema único
-(`carina/data_engine/market_data.py`), em arquitetura de adapter (fontes
-atuais: brapi.dev e SGS/BCB; EODHD e B3 direto no futuro), com cache TTL para
-proteger rate limits. Endpoints (medidos como `data_query`, R$ 0,05/chamada):
-`GET /api/market/quotes?symbols=PETR4,HGLG11`, `GET /api/market/history/{symbol}`
-e `GET /api/market/macro` (Selic, CDI, IPCA, PTAX).
+Cada arquivo de teste usa um DB lógico próprio do Redis
+([`redis-dbs.ts`](apps/api/test/setup/redis-dbs.ts)), e os projetos `unit` → `int` → `e2e` rodam
+em sequência numa execução única.
 
-## Data Engine — Camada 3 (SEAL BR, avaliação de agentes)
+O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) tem três jobs:
 
-Benchmark de perguntas financeiras brasileiras com correção determinística
-(`carina/data_engine/evaluation.py` + dataset curado em `eval_dataset.py`):
-tributação (isenção de R$20K, come-cotas, FII, JCP), CVM (suitability,
-Resolução 175), Open Finance, produtos e macro. O catálogo nunca expõe o
-gabarito; a correção mede fatos esperados, afirmações proibidas E flags de
-compliance do Watchtower em cada resposta. Endpoints: `GET /api/eval/cases`
-(catálogo) e `POST /api/eval/submit` (execução medida como `evaluation`,
-R$ 5,00/execução).
+- `typescript`: lint, typecheck, unidade, integração, E2E, cobertura e build, com service
+  containers PG17 + pgvector e Redis 7;
+- `compose-smoke`: `docker compose up --wait` sem chaves de API e o roteiro de aprovação pelo
+  proxy do web;
+- `legacy-python`: os testes da versão antiga.
 
-## Builder Layer (estratégias + backtesting)
+## Segurança: o que saber antes de expor
 
-Esqueleto do Produto 3 (`carina/builder/`): o tenant registra estratégias
-**declarativas** validadas (`buy_hold`, `sma_cross` — nunca código arbitrário;
-a camada é regulada e auditável por construção) e roda backtests
-determinísticos sem lookahead sobre o Market Data BR, com retorno total,
-drawdown máximo, volatilidade anualizada e curva de equity. Endpoints:
-`POST/GET /api/builder/strategies` e `POST /api/builder/strategies/{id}/backtest`
-(medido como `backtest`, R$ 7,50/execução).
+Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos a conhecer:
 
-Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AGENTS.md](docs/AGENTS.md),
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) e [docs/B2B.md](docs/B2B.md) (estratégia
-e produtos B2B).
+- **PII vai ao provedor de LLM no modo live.** Os prompts levam a pergunta e trechos da base de
+  conhecimento do cliente (posições, transações, instituições) para OpenRouter/Groq, e os textos a
+  indexar para a NVIDIA. No modo mock nada sai da máquina.
+- **As chaves de demo são públicas.** Veja [Demo local](#demo-local). Gere chaves novas fora dela.
+  As chaves ficam no banco só como sha256 e nunca vão para os logs.
+- **Ticket do WebSocket na query string.** A chave nunca vai na URL; o ticket vai em
+  `/ws/chat?ticket=…`. Ele vale 30 s e uma vez só, e o nginx da demo não grava access log de
+  `/ws/`. Um reverse proxy seu deve fazer o mesmo (ou mascarar a query), porque um ticket ainda
+  não usado que vaze nos logs pode abrir uma sessão dentro da janela de 30 s.
+- **Sem allow-list de `Origin` no WebSocket.** O ticket é a autenticação e é obtido com a chave
+  num header, que outro site não consegue ler. Mesmo assim, uma checagem de `Origin` seria defesa
+  em profundidade.
+- **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401 e
+  sockets abertos fecham no próximo turno), mas hoje só se altera direto no banco.
+- **CSP do web**: `connect-src 'self'`. Pela CSP Level 3, `'self'` cobre o `ws:`/`wss:` da mesma
+  origem; verificamos isso no Chromium. Um navegador antigo que não siga a CSP3 bloquearia o
+  WebSocket.
+- O papel de runtime (`carina_app`) não tem `BYPASSRLS` e não lê `api_key`. A autenticação passa
+  por funções `SECURITY DEFINER` com `search_path` fixo.
+
+## Limitações conhecidas
+
+O que **não** está feito ou tem limite conhecido na fase 1:
+
+- **Executores simulados.** `place_trade`, `transfer` e afins devolvem ids simulados; não há
+  integração com corretora. O preço do `place_trade` no mock é fixo (R$ 30,00 por ação).
+- **Modo live sem teste automatizado.** A cadeia de fallback é testada com modelos falsos; os ids
+  `:free` do OpenRouter em `models.yaml` têm `TODO confirmar` e podem mudar.
+- **Agentes da fase 1:** navigator, insight, predictor, risk e executor. Os outros seis do Python
+  ficam para a fase 2. Os docs [`AGENTS.md`](docs/AGENTS.md), [`B2B.md`](docs/B2B.md) e
+  [`DEPLOYMENT.md`](docs/DEPLOYMENT.md) ainda descrevem a versão Python e a visão de produto.
+- **Retenção de checkpoints.** O schema `langgraph` não tem RLS (são tabelas da biblioteca), nem
+  TTL, nem limpeza por cliente. O thread é `tenant:cliente:uuid`, e a API nunca expõe nem retoma
+  thread de outro tenant, mas os dados ficam lá.
+- **Re-sync completo por lote.** Cada lote de ingestão dispara um Sync completo do cliente (sem
+  coalescência), o que custa caro num backfill grande.
+- **Auditoria com o uuid interno do cliente.** `GET /api/audit` devolve o `clientId` interno,
+  enquanto as outras rotas usam o `externalId`.
+- **Turno que termina depois de o cliente desconectar** é cobrado, mas a resposta não pode ser
+  recuperada pela API.
+- **Streams sem `MAXLEN`.** `jobs`, `inbox.events` e as DLQs crescem sem limite.
+- **Atualização após aprovar.** Na UI, o painel de uso só se atualiza no fim de um turno de chat
+  ou pelo botão "Atualizar", não quando chega `approval_executed`.
+- **Uma instância só foi exercitada na demo.** Réplicas são seguras por desenho e por teste
+  (consumidores concorrentes, locks), mas não houve teste de carga.
+
+## Roadmap
+
+**Fase 2 — produtos B2B**
+
+- Importação de arquivos (`POST /clients/:clientId/imports`, tabela `import_job` já criada):
+  OFX, CSV com mapeamento de colunas, planilhas da Área do Investidor B3 e notas de corretagem
+  (SINACOR), com `file_sha256` para não processar o mesmo arquivo duas vezes e erros por linha.
+- AOPs (procedimentos agendados), `market` (cotações B3 e macro BCB), `evaluation` (SEAL BR com
+  42 casos) e `builder` (estratégias declarativas e backtest).
+- Os seis agentes restantes: strategist, researcher, assessor_liaison, monitor, categorizer e tax.
+
+**Fase 3 — integrações e remoção do Python**
+
+- Notificações (WhatsApp e SMTP) e monitor de carteiras.
+- Remoção de `legacy/python` e do job `legacy-python` do CI, depois de conferir que nenhuma
+  funcionalidade do Python ficou sem equivalente.
+
+Mais detalhes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) e o
+[spec da migração](docs/superpowers/specs/2026-11-11-migracao-typescript-design.md).

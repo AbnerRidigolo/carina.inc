@@ -20,6 +20,7 @@ export const REDIS_DBS = {
     "orchestrator/orchestrator.int.spec.ts": 3,
     "agents/agents.int.spec.ts": 4,
     "inbox/inbox.int.spec.ts": 5,
+    "market/market-service.int.spec.ts": 6,
     "redis/lock.int.spec.ts": 7,
     "data-ingestion/sync.int.spec.ts": 8,
     "data-ingestion/ingestion.int.spec.ts": 9,

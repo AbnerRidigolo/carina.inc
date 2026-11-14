@@ -31,7 +31,7 @@ const trade = (over: Record<string, unknown> = {}): Record<string, unknown> => (
   ...over,
 });
 
-function expectPriceUnavailable(fn: () => unknown): void {
+function expectPriceUnavailable(fn: () => unknown): MarketPriceError {
   let caught: unknown;
   try {
     fn();
@@ -40,6 +40,7 @@ function expectPriceUnavailable(fn: () => unknown): void {
   }
   expect(caught).toBeInstanceOf(MarketPriceError);
   expect((caught as MarketPriceError).code).toBe("price_unavailable");
+  return caught as MarketPriceError;
 }
 
 describe("priceTrade", () => {
@@ -221,6 +222,33 @@ describe("priceTrade", () => {
   it("preço zero, negativo ou fora do formato nunca vira ordem", () => {
     for (const price of ["0", "0.00", "-30.00", "abc", "", "1e3", "NaN", "Infinity"]) {
       expectPriceUnavailable(() => priceTrade(trade(), quote({ price })));
+    }
+  });
+
+  it("cotação de outro ativo → price_unavailable (comparação exata do símbolo)", () => {
+    expectPriceUnavailable(() => priceTrade(trade(), quote({ symbol: "VALE3" })));
+    expectPriceUnavailable(() => priceTrade(trade(), quote({ symbol: "petr4" })));
+    expectPriceUnavailable(() => priceTrade(trade(), quote({ symbol: " PETR4" })));
+    expectPriceUnavailable(() => priceTrade(trade(), quote({ symbol: "PETR4F" })));
+    // a mesma ordem com a cotação do próprio ativo continua precificada
+    expect(priceTrade(trade(), quote({ symbol: "PETR4" })).valueBrl).toBe("3000.00");
+  });
+
+  it("a mensagem do erro é fixa: não carrega símbolo nem nada do payload do modelo", () => {
+    const err = expectPriceUnavailable(() =>
+      priceTrade(
+        trade({ quantity: "MODEL-QTY-x", foo: "MODEL-SECRET", valueBrl: "424242.42" }),
+        quote({ symbol: "VALE3" }),
+      ),
+    );
+    const mismatch = expectPriceUnavailable(() =>
+      priceTrade(trade({ foo: "MODEL-SECRET", valueBrl: "424242.42" }), quote({ symbol: "VALE3" })),
+    );
+    for (const e of [err, mismatch]) {
+      expect(e.message).toBe("Cotação indisponível");
+      for (const leaked of ["MODEL", "424242", "PETR4", "VALE3", "buy"]) {
+        expect(e.message).not.toContain(leaked);
+      }
     }
   });
 

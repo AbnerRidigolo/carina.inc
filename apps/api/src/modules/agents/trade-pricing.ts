@@ -7,9 +7,10 @@
  * como veio) e os campos do servidor. Nenhuma outra chave do modelo passa, nem as de valor e de
  * preço (`MODEL_VALUE_KEYS` de billing/pricing.ts, em qualquer caixa) nem qualquer outra.
  *
- * Falha fechada: proposta fora do formato, preço que não é decimal positivo, notional que não cabe
- * em `numeric(18,2)` (acima de `MAX_MONEY_BRL`) ou que arredonda para zero lançam
- * `MarketPriceError("price_unavailable")`, e nenhuma aprovação é criada.
+ * Falha fechada: proposta fora do formato, cotação de outro ativo (`quote.symbol` diferente do
+ * `assetCode`), preço que não é decimal positivo, notional que não cabe em `numeric(18,2)` (acima
+ * de `MAX_MONEY_BRL`) ou que arredonda para zero lançam `MarketPriceError("price_unavailable")`, e
+ * nenhuma aprovação é criada.
  */
 import { PriceSchema, type Quote } from "@carina/shared";
 import { Prisma } from "../../generated/prisma/client.js";
@@ -42,6 +43,10 @@ export function priceTrade(proposalPayload: Record<string, unknown>, quote: Quot
   const parsed = PlaceTradePayloadSchema.safeParse(proposalPayload);
   if (!parsed.success) throw unavailable();
   const { side, assetCode, quantity } = parsed.data;
+
+  // A cotação tem de ser do ativo da ordem: comparação exata, sem normalizar. Cotação de outro
+  // ativo (erro de lote, de chave de cache, de normalização) não pode precificar nem cobrar a ordem.
+  if (quote.symbol !== assetCode) throw unavailable();
 
   // O `Quote` é tipado, mas o preço é a base do dinheiro: confere o formato de novo (string decimal,
   // sem sinal nem expoente) e exige positivo.

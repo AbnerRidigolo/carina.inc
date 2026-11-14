@@ -7,6 +7,7 @@
  * `json_serie-sgs-*`) e resposta pública indexada de api.bcb.gov.br. A resposta é um array
  * `[{ "data": "dd/MM/aaaa", "valor": "<decimal em texto>" }]`; série sem dado volta `[]`. Código de
  * série inválido responde 200 com página HTML (vira JSON inválido e `MarketDataUnavailableError`).
+ * `referenceDate` além de `now + 1 dia` é descartada (data futura não é dado publicado).
  * NÃO verificado contra uma resposta real (sem rede): as fixtures são reconstruídas nesse formato.
  * Séries, nomes e unidades seguem o `BcbProvider` do legado Python.
  */
@@ -14,6 +15,7 @@ import { MacroIndicatorSchema, type MacroIndicator } from "@carina/shared";
 import { z } from "zod";
 import { MarketDataUnavailableError } from "../../../core/errors/domain-errors.js";
 import { Prisma } from "../../../generated/prisma/client.js";
+import type { Clock } from "../../limits/clock.js";
 import {
   buildProviderUrl,
   defaultMarketLogger,
@@ -40,6 +42,9 @@ const SgsRowSchema = z.object({
   valor: z.string().max(32),
 });
 /** Decimal em texto, com ponto ou vírgula, sem notação científica, até 12 dígitos inteiros. */
+/** Tolerância para `referenceDate` à frente do relógio (fuso e publicação antecipada). */
+const MAX_REFERENCE_AHEAD_MS = 86_400_000;
+
 const SGS_VALUE_RE = /^-?\d{1,12}([.,]\d{1,12})?$/;
 
 /** "05/11/2026" -> "2026-11-05", só se a data existe no calendário. */
@@ -67,6 +72,8 @@ export interface BcbProviderOptions {
   maxBytes: number;
   fetchImpl?: typeof fetch;
   logger?: MarketLogger;
+  /** Relógio (`CLOCK`): `referenceDate` não pode passar de `now + 1 dia`. */
+  now: Clock;
 }
 
 export class BcbProvider implements MacroProvider {
@@ -108,6 +115,9 @@ export class BcbProvider implements MacroProvider {
     const value = toValue(row.data.valor);
     const referenceDate = toIsoDate(row.data.data);
     if (value === null || referenceDate === null) return null;
+    if (Date.parse(`${referenceDate}T00:00:00Z`) > this.opts.now() + MAX_REFERENCE_AHEAD_MS) {
+      return null;
+    }
 
     const checked = MacroIndicatorSchema.safeParse({
       code: series.code,

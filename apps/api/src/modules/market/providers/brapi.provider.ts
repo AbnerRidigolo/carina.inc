@@ -11,8 +11,13 @@
  *   nullable) e `regularMarketTime` (ISO 8601, nullable).
  * - Com `range` e `interval`: `historicalDataPrice[]` com `date` (Unix em segundos) e
  *   `open`/`high`/`low`/`close`/`volume` (number, nullable).
- * - Ticker inexistente fica fora de `results`; nenhum ticker válido responde 404 (aqui vira
- *   `MarketDataUnavailableError`, como qualquer status fora de 2xx).
+ * - Ticker inexistente fica fora de `results`; se nenhum ticker pedido existe a resposta é 404 com
+ *   corpo de erro `{ error: true, message }`. Só esse 404 vira resultado vazio (o símbolo ausente
+ *   significa "ativo desconhecido" tanto na perda parcial quanto na total); qualquer outro 404
+ *   (corpo diferente, caminho base errado) e qualquer outro status fora de 2xx viram
+ *   `MarketDataUnavailableError`.
+ * - `regularMarketTime` só vale como ISO 8601 estrito com `Z` ou offset, entre 2000-01-01 e
+ *   `now + 2 min` (tolerância de relógio): hora futura daria idade negativa e passaria no frescor.
  * NÃO verificado contra uma resposta real (sem rede): as fixtures são reconstruídas do exemplo da
  * especificação. O mapeamento de campos segue o `BrapiProvider` do legado Python.
  */
@@ -27,11 +32,12 @@ import {
 import { z } from "zod";
 import { MarketDataUnavailableError, ValidationError } from "../../../core/errors/domain-errors.js";
 import { Prisma } from "../../../generated/prisma/client.js";
+import type { Clock } from "../../limits/clock.js";
 import { inferAssetClass, SYMBOL_RE } from "../asset-class.js";
 import {
   buildProviderUrl,
   defaultMarketLogger,
-  safeFetchJson,
+  safeFetchJsonResponse,
   withNetworkRetry,
   type MarketLogger,
 } from "./safe-fetch.js";
@@ -49,6 +55,16 @@ const MAX_DECIMAL_PLACES = 6;
 /** Faixa aceita para `date` (segundos): 2000-01-01 a 2100-01-01. */
 const MIN_BAR_EPOCH_S = 946_684_800;
 const MAX_BAR_EPOCH_S = 4_102_444_800;
+/** Tolerância para relógio adiantado do provedor: hora além de `now + 2 min` é descartada. */
+export const CLOCK_SKEW_MS = 2 * 60_000;
+/** Piso da hora da cotação (2000-01-01T00:00:00Z). */
+const MIN_QUOTE_TIME_MS = Date.UTC(2000, 0, 1);
+
+/** ISO 8601 estrito, com `Z` ou offset (sem hora "local" ambígua nem formatos que o `Date.parse` aceita). */
+const QuoteTimeSchema = z.iso.datetime({ offset: true });
+
+/** Corpo do 404 da brapi quando nenhum ticker pedido existe. */
+const BrapiNotFoundSchema = z.object({ error: z.literal(true), message: z.string() });
 
 const RawQuoteSchema = QuoteSchema.omit({ marketState: true });
 
@@ -119,10 +135,14 @@ function toVolume(raw: unknown): string | null {
   return QuoteSchema.shape.volume.safeParse(text).success ? text : null;
 }
 
-function toIsoTime(raw: unknown): string | null {
-  if (typeof raw !== "string" || raw.length > 40) return null;
+/** Hora da cotação em UTC, ou `null` se não for ISO estrito ou estiver fora de [piso, now + 2 min]. */
+function toQuoteTime(raw: unknown, nowMs: number): string | null {
+  if (typeof raw !== "string" || raw.length > 40 || !QuoteTimeSchema.safeParse(raw).success) {
+    return null;
+  }
   const ms = Date.parse(raw);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  if (!Number.isFinite(ms) || ms < MIN_QUOTE_TIME_MS || ms > nowMs + CLOCK_SKEW_MS) return null;
+  return new Date(ms).toISOString();
 }
 
 /** Remove caracteres de controle e de formatação, junta espaços e limita o tamanho. */
@@ -153,6 +173,8 @@ export interface BrapiProviderOptions {
   maxBytes: number;
   fetchImpl?: typeof fetch;
   logger?: MarketLogger;
+  /** Relógio (`CLOCK`): limita a hora das cotações e a data das barras ao presente. */
+  now: Clock;
 }
 
 export class BrapiProvider implements MarketDataProvider {
@@ -174,14 +196,14 @@ export class BrapiProvider implements MarketDataProvider {
 
     const requested = [...new Set(symbols)];
     const url = buildProviderUrl(this.opts.baseUrl, ["quote", requested]);
-    const parsed = QuoteResponseSchema.safeParse(await this.get(url));
-    if (!parsed.success) throw this.badShape(url);
+    const results = await this.fetchResults(url);
 
     const wanted = new Set(requested);
     const seen = new Set<string>();
     const quotes: RawQuote[] = [];
-    for (const item of parsed.data.results) {
-      const quote = this.toQuote(item, wanted);
+    const nowMs = this.opts.now();
+    for (const item of results) {
+      const quote = this.toQuote(item, wanted, nowMs);
       if (quote === null || seen.has(quote.symbol)) continue;
       seen.add(quote.symbol);
       quotes.push(quote);
@@ -198,11 +220,10 @@ export class BrapiProvider implements MarketDataProvider {
       range: validRange.data,
       interval: "1d",
     });
-    const parsed = QuoteResponseSchema.safeParse(await this.get(url));
-    if (!parsed.success) throw this.badShape(url);
+    const results = await this.fetchResults(url);
 
     let rawBars: unknown[] | undefined;
-    for (const item of parsed.data.results) {
+    for (const item of results) {
       const entry = HistoryItemSchema.safeParse(item);
       if (entry.success && entry.data.symbol === symbol) {
         rawBars = entry.data.historicalDataPrice;
@@ -211,9 +232,11 @@ export class BrapiProvider implements MarketDataProvider {
     }
     if (rawBars === undefined) return [];
 
+    // Barra de dia futuro (no calendário de São Paulo) é descartada; a de hoje vale.
+    const today = SAO_PAULO_DATE.format(new Date(this.opts.now()));
     const bars: HistoricalBar[] = [];
     for (const raw of rawBars) {
-      const bar = toBar(raw);
+      const bar = toBar(raw, today);
       if (bar !== null) bars.push(bar);
     }
     // Ordem por data (estável) e uma barra por dia: a primeira recebida vence.
@@ -221,33 +244,45 @@ export class BrapiProvider implements MarketDataProvider {
     return bars.filter((bar, i) => i === 0 || bars[i - 1]?.date !== bar.date);
   }
 
-  private get(url: URL): Promise<unknown> {
+  /**
+   * `results` da resposta. O 404 com o corpo de erro da brapi (nenhum ticker pedido existe) vira
+   * lista vazia; a mensagem dele não vai para o log. Qualquer outro formato lança.
+   */
+  private async fetchResults(url: URL): Promise<unknown[]> {
     const headers: Record<string, string> = {};
     if (this.opts.token) headers.Authorization = `Bearer ${this.opts.token}`;
-    return safeFetchJson(url, {
+    const { status, body } = await safeFetchJsonResponse(url, {
       fetchImpl: this.fetchImpl,
       timeoutMs: this.opts.timeoutMs,
       maxBytes: this.opts.maxBytes,
       headers,
       logger: this.logger,
+      allowStatuses: [404],
     });
+    if (status === 404) {
+      if (BrapiNotFoundSchema.safeParse(body).success) return [];
+      throw this.badShape(url, status);
+    }
+    const parsed = QuoteResponseSchema.safeParse(body);
+    if (!parsed.success) throw this.badShape(url, status);
+    return parsed.data.results;
   }
 
   /** Resposta 2xx com JSON fora do formato: os detalhes do Zod não vão para o log (trazem valores). */
-  private badShape(url: URL): MarketDataUnavailableError {
-    this.logger.warn({ msg: "Resposta da brapi fora do formato esperado", host: url.host });
+  private badShape(url: URL, status: number): MarketDataUnavailableError {
+    this.logger.warn({ msg: "Resposta da brapi fora do formato esperado", host: url.host, status });
     return new MarketDataUnavailableError();
   }
 
   /** Item da brapi -> `RawQuote`, ou `null` (descartado) se qualquer campo obrigatório não presta. */
-  private toQuote(item: unknown, wanted: ReadonlySet<string>): RawQuote | null {
+  private toQuote(item: unknown, wanted: ReadonlySet<string>, nowMs: number): RawQuote | null {
     const parsed = QuoteItemSchema.safeParse(item);
     if (!parsed.success) return null;
     const raw = parsed.data;
     if (!SYMBOL_RE.test(raw.symbol) || !wanted.has(raw.symbol)) return null;
     if (raw.currency !== undefined && raw.currency !== null && raw.currency !== "BRL") return null;
     const price = toPrice(raw.regularMarketPrice);
-    const updatedAt = toIsoTime(raw.regularMarketTime);
+    const updatedAt = toQuoteTime(raw.regularMarketTime, nowMs);
     if (price === null || updatedAt === null) return null;
 
     const candidate: RawQuote = {
@@ -268,7 +303,7 @@ export class BrapiProvider implements MarketDataProvider {
   }
 }
 
-function toBar(raw: unknown): HistoricalBar | null {
+function toBar(raw: unknown, today: string): HistoricalBar | null {
   const parsed = BarSchema.safeParse(raw);
   if (!parsed.success) return null;
   const b = parsed.data;
@@ -280,8 +315,10 @@ function toBar(raw: unknown): HistoricalBar | null {
   if (open === null || high === null || low === null || close === null || volume === null) {
     return null;
   }
+  const date = SAO_PAULO_DATE.format(new Date(b.date * 1000));
+  if (date > today) return null;
   const candidate = {
-    date: SAO_PAULO_DATE.format(new Date(b.date * 1000)),
+    date,
     open,
     high,
     low,

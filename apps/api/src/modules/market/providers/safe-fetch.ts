@@ -30,6 +30,19 @@ export interface SafeFetchOptions {
   logger?: MarketLogger;
 }
 
+export interface SafeFetchResponseOptions extends SafeFetchOptions {
+  /**
+   * Status fora de 2xx que a chamada quer tratar ela mesma (ex.: `[404]`). O corpo continua lido
+   * com o limite de bytes e precisa ser JSON; qualquer outro status fora de 2xx lança.
+   */
+  allowStatuses?: readonly number[];
+}
+
+export interface SafeFetchResult {
+  status: number;
+  body: unknown;
+}
+
 type FailureReason =
   | "unsupported_url"
   | "network"
@@ -128,7 +141,7 @@ async function readCapped(res: Response, maxBytes: number, signal: AbortSignal):
   }
 }
 
-async function fetchJson(url: URL, opts: SafeFetchOptions): Promise<unknown> {
+async function fetchJson(url: URL, opts: SafeFetchResponseOptions): Promise<SafeFetchResult> {
   if (!ALLOWED_PROTOCOLS.has(url.protocol) || url.username !== "" || url.password !== "") {
     throw new MarketFetchFailure("unsupported_url");
   }
@@ -146,23 +159,35 @@ async function fetchJson(url: URL, opts: SafeFetchOptions): Promise<unknown> {
     if (signal.aborted) throw new MarketFetchFailure("timeout");
     throw new MarketFetchFailure("network", safeErrorDescription(err));
   }
-  if (res.status < 200 || res.status > 299) {
+  const allowed = opts.allowStatuses?.includes(res.status) === true;
+  if ((res.status < 200 || res.status > 299) && !allowed) {
     await cancelQuietly(res.body);
     throw new MarketFetchFailure("http_status", String(res.status), res.status);
   }
   const text = await readCapped(res, opts.maxBytes, signal);
   try {
-    return JSON.parse(text) as unknown;
+    return { status: res.status, body: JSON.parse(text) as unknown };
   } catch {
     throw new MarketFetchFailure("invalid_json");
   }
 }
 
 /**
- * GET de JSON com as proteções acima. A URL deve vir de `buildProviderUrl` (base da
+ * GET de JSON com as proteções acima (só 2xx). A URL deve vir de `buildProviderUrl` (base da
  * configuração); quem chama nunca escolhe o host.
  */
 export async function safeFetchJson(url: URL, opts: SafeFetchOptions): Promise<unknown> {
+  return (await safeFetchJsonResponse(url, opts)).body;
+}
+
+/**
+ * Igual a `safeFetchJson`, mas devolve o status e aceita, por chamada, status fora de 2xx listados
+ * em `allowStatuses` (com as mesmas proteções de prazo, bytes e JSON).
+ */
+export async function safeFetchJsonResponse(
+  url: URL,
+  opts: SafeFetchResponseOptions,
+): Promise<SafeFetchResult> {
   try {
     return await fetchJson(url, opts);
   } catch (err) {

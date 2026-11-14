@@ -15,6 +15,9 @@ const HISTORY_BODY = fixture("brapi-history.reconstructed.json");
 
 const RawQuoteSchema = QuoteSchema.omit({ marketState: true });
 const TOKEN = "tok-segredo-123";
+/** Relógio fixo: depois das horas das fixtures (2026-02-08) e das barras (até 2026-02-04). */
+const NOW = Date.parse("2026-02-09T12:00:00.000Z");
+const SKEW_MS = 2 * 60_000;
 
 function setup(body: string | (() => Response), extra: Partial<BrapiProviderOptions> = {}) {
   const fetchImpl = vi.fn<typeof fetch>(() =>
@@ -28,10 +31,17 @@ function setup(body: string | (() => Response), extra: Partial<BrapiProviderOpti
     maxBytes: 64 * 1024,
     fetchImpl,
     logger: { warn },
+    now: () => NOW,
     ...extra,
   });
   return { provider, fetchImpl, warn };
 }
+
+/** 404 que a brapi devolve quando nenhum ticker pedido existe (formato de erro da API). */
+const brapiNotFound = () =>
+  new Response(JSON.stringify({ error: true, message: "Não encontramos a ação ZZZZ4" }), {
+    status: 404,
+  });
 
 /** Resposta com um único item de cotação, a partir de um válido com campos trocados. */
 function quoteBody(overrides: Record<string, unknown>, drop: string[] = []): string {
@@ -256,6 +266,82 @@ describe("BrapiProvider.fetchQuotes", () => {
   });
 });
 
+describe("BrapiProvider: hora da cotação", () => {
+  it.each([
+    ["2099-01-01T00:00:00Z"],
+    ["1"],
+    ["0"],
+    ["12/31/2099"],
+    ["2026-02-08T16:24:54"],
+    ["2026-02-08"],
+    ["1999-12-31T23:59:59Z"],
+    [1770570294],
+  ])("hora %j (futura, fora de ISO 8601 com offset ou abaixo do piso) descarta", async (time) => {
+    const { provider } = setup(quoteBody({ regularMarketTime: time }));
+    expect(await provider.fetchQuotes(["PETR4"])).toEqual([]);
+  });
+
+  it("hora exatamente em now + 2 min passa; 1 ms a mais descarta", async () => {
+    const { provider: atLimit } = setup(
+      quoteBody({ regularMarketTime: new Date(NOW + SKEW_MS).toISOString() }),
+    );
+    expect((await atLimit.fetchQuotes(["PETR4"]))[0]?.updatedAt).toBe(
+      new Date(NOW + SKEW_MS).toISOString(),
+    );
+    const { provider: past } = setup(
+      quoteBody({ regularMarketTime: new Date(NOW + SKEW_MS + 1).toISOString() }),
+    );
+    expect(await past.fetchQuotes(["PETR4"])).toEqual([]);
+  });
+
+  it("hora com offset é aceita e normalizada para UTC", async () => {
+    const { provider } = setup(quoteBody({ regularMarketTime: "2026-02-09T08:00:00-03:00" }));
+    expect((await provider.fetchQuotes(["PETR4"]))[0]?.updatedAt).toBe("2026-02-09T11:00:00.000Z");
+  });
+});
+
+describe("BrapiProvider: 404 de ticker inexistente", () => {
+  it("404 no formato de erro da brapi vira lista vazia, sem a mensagem no log", async () => {
+    const { provider, warn } = setup(brapiNotFound);
+    expect(await provider.fetchQuotes(["ZZZZ4"])).toEqual([]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("Não encontramos");
+  });
+
+  it.each([
+    ["<html>Not Found</html>"],
+    ['{"error":"sim","message":"x"}'],
+    ['{"message":"x"}'],
+    ['{"error":true}'],
+    ["[]"],
+  ])("404 com outro corpo (%s) lança MarketDataUnavailableError", async (body) => {
+    const { provider } = setup(() => new Response(body, { status: 404 }));
+    await expect(provider.fetchQuotes(["ZZZZ4"])).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+    await expect(provider.fetchHistory("ZZZZ4", "5d")).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+  });
+
+  it("500 com o formato de erro da brapi continua lançando", async () => {
+    const { provider } = setup(
+      () => new Response(JSON.stringify({ error: true, message: "falha" }), { status: 500 }),
+    );
+    await expect(provider.fetchQuotes(["PETR4"])).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+  });
+
+  it("lote misto: 200 sem o ticker desconhecido devolve só os encontrados", async () => {
+    const { provider, fetchImpl } = setup(quoteBody({}));
+    const quotes = await provider.fetchQuotes(["PETR4", "ZZZZ4"]);
+    expect(quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "https://brapi.example/api/quote/PETR4,ZZZZ4",
+    );
+  });
+});
+
 describe("BrapiProvider.fetchHistory", () => {
   it("histórico vira HistoricalBar com data de São Paulo e range/interval na query", async () => {
     const { provider, fetchImpl } = setup(HISTORY_BODY);
@@ -336,6 +422,31 @@ describe("BrapiProvider.fetchHistory", () => {
       ["2026-02-02", "10"],
       ["2026-02-04", "10.5"],
     ]);
+  });
+
+  it("barra com data futura (no calendário de São Paulo) é descartada; a do dia passa", async () => {
+    const bar = (date: number) => ({ date, open: 10, high: 11, low: 9, close: 10, volume: 1 });
+    const body = JSON.stringify({
+      results: [
+        {
+          symbol: "PETR4",
+          historicalDataPrice: [
+            bar(1770030000), // 2026-02-02
+            bar(1770667200), // 2026-02-09 17:00 em SP: mesmo dia de NOW
+            bar(1770721200), // 2026-02-10: futuro
+            bar(4_000_000_000), // 2096: futuro
+          ],
+        },
+      ],
+    });
+    const { provider } = setup(body);
+    const bars = await provider.fetchHistory("PETR4", "5d");
+    expect(bars.map((b) => b.date)).toEqual(["2026-02-02", "2026-02-09"]);
+  });
+
+  it("404 no formato de erro da brapi vira histórico vazio", async () => {
+    const { provider } = setup(brapiNotFound);
+    expect(await provider.fetchHistory("ZZZZ4", "5d")).toEqual([]);
   });
 
   it("sem resultado para o símbolo pedido volta vazio", async () => {

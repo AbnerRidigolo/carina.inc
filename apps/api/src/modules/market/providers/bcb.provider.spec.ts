@@ -13,6 +13,7 @@ const fixture = (id: number) =>
   readFileSync(new URL(`./fixtures/sgs-${String(id)}.reconstructed.json`, import.meta.url), "utf8");
 
 const BASE = "https://sgs.example/dados/serie";
+const NOW = Date.parse("2026-11-14T12:00:00.000Z");
 
 function setup(bodies: Partial<Record<number, string | Response>> = {}) {
   const fetchImpl = vi.fn<typeof fetch>((input) => {
@@ -28,6 +29,7 @@ function setup(bodies: Partial<Record<number, string | Response>> = {}) {
     maxBytes: 4096,
     fetchImpl,
     logger: { warn },
+    now: () => NOW,
   });
   return { provider, fetchImpl, warn };
 }
@@ -73,6 +75,19 @@ describe("BcbProvider.fetchMacro", () => {
         .sort(),
     );
     expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("error");
+  });
+
+  it("referenceDate futura além de 1 dia é omitida; até 1 dia passa", async () => {
+    const { provider } = setup({
+      433: '[{"data":"16/11/2026","valor":"0.5"}]',
+      1: '[{"data":"15/11/2026","valor":"5.40"}]',
+    });
+    const macro = await provider.fetchMacro();
+    expect(macro.map((m) => [m.code, m.referenceDate])).toEqual([
+      ["selic", "2026-11-05"],
+      ["cdi", "2026-11-13"],
+      ["ptax_usd", "2026-11-15"],
+    ]);
   });
 
   it("série vazia é omitida", async () => {

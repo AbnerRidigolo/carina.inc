@@ -3,6 +3,7 @@ import { MarketDataUnavailableError } from "../../../core/errors/domain-errors.j
 import {
   buildProviderUrl,
   safeFetchJson,
+  safeFetchJsonResponse,
   withNetworkRetry,
   type MarketLogger,
 } from "./safe-fetch.js";
@@ -201,6 +202,58 @@ describe("safeFetchJson", () => {
       expect(fetchImpl).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("safeFetchJsonResponse (allowStatuses)", () => {
+  it("status permitido devolve { status, body } com o JSON", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() =>
+      Promise.resolve(jsonResponse('{"error":true}', { status: 404 })),
+    );
+    await expect(
+      safeFetchJsonResponse(URL_OK, { ...opts(fetchImpl), allowStatuses: [404] }),
+    ).resolves.toEqual({ status: 404, body: { error: true } });
+  });
+
+  it("2xx devolve o status real", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() =>
+      Promise.resolve(jsonResponse("[1]", { status: 203 })),
+    );
+    await expect(safeFetchJsonResponse(URL_OK, opts(fetchImpl))).resolves.toEqual({
+      status: 203,
+      body: [1],
+    });
+  });
+
+  it("status permitido continua exigindo JSON e respeitando o limite de bytes", async () => {
+    const html = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response("<html>Not Found</html>", { status: 404 })),
+    );
+    await expect(
+      safeFetchJsonResponse(URL_OK, { ...opts(html), allowStatuses: [404] }),
+    ).rejects.toBeInstanceOf(MarketDataUnavailableError);
+
+    const { stream, state } = endlessStream();
+    const big = vi.fn<typeof fetch>(() => Promise.resolve(new Response(stream, { status: 404 })));
+    await expect(
+      safeFetchJsonResponse(URL_OK, { ...opts(big), allowStatuses: [404] }),
+    ).rejects.toBeInstanceOf(MarketDataUnavailableError);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("status fora da lista (e 404 sem a lista) continua lançando", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() =>
+      Promise.resolve(jsonResponse('{"error":true}', { status: 500 })),
+    );
+    await expect(
+      safeFetchJsonResponse(URL_OK, { ...opts(fetchImpl), allowStatuses: [404] }),
+    ).rejects.toBeInstanceOf(MarketDataUnavailableError);
+    const notFound = vi.fn<typeof fetch>(() =>
+      Promise.resolve(jsonResponse('{"error":true}', { status: 404 })),
+    );
+    await expect(safeFetchJsonResponse(URL_OK, opts(notFound))).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+  });
 });
 
 describe("withNetworkRetry", () => {

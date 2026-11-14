@@ -5,6 +5,7 @@
  * outro tenant é invisível e resolve como NotFoundError (404), exatamente como um inexistente.
  * O filtro explícito por `tenantId` é defesa em profundidade, não a barreira principal.
  */
+import { ExternalIdSchema } from "@carina/shared";
 import { Inject, Injectable } from "@nestjs/common";
 import { TenantContext } from "../../core/context/tenant-context.js";
 import { TenantPrismaService } from "../../core/database/tenant-prisma.service.js";
@@ -20,12 +21,9 @@ export interface ClientSummary extends ClientRef {
   createdAt: Date;
 }
 
-// 1..128 caracteres (como `externalId` nos contratos de ingestão), sem caracteres de controle,
-// de formatação ou inválidos (\p{C}: NUL, quebras de linha, zero-width…).
-const EXTERNAL_ID_RE = /^[^\p{C}]{1,128}$/u;
-
+// Mesmo schema do `externalId` dos contratos de ingestão: 1..128 caracteres, sem \p{C}.
 function assertExternalId(externalId: string): void {
-  if (!EXTERNAL_ID_RE.test(externalId)) {
+  if (!ExternalIdSchema.safeParse(externalId).success) {
     throw new ValidationError(
       "clientId precisa ter de 1 a 128 caracteres, sem caracteres de controle",
     );

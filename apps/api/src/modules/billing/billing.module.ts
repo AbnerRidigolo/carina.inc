@@ -1,19 +1,17 @@
 import { Module } from "@nestjs/common";
-import { DatabaseModule } from "../../core/database/database.module.js";
 import { LimitsModule } from "../limits/limits.module.js";
 import { TenancyModule } from "../tenancy/tenancy.module.js";
 import { BillingController } from "./billing.controller.js";
-import { BillingService } from "./billing.service.js";
+import { BillingCoreModule } from "./billing-core.module.js";
 
 /**
- * Billing por resolução. Importa o TenancyModule antes do LimitsModule (que traz o CLOCK e o
+ * Billing por resolução (rotas). Importa o TenancyModule antes do LimitsModule (que traz o
  * RateLimitGuard global) para que a ordem dos guards globais fique correta, qualquer que seja a
- * ordem em que o módulo raiz importe este.
+ * ordem em que o módulo raiz importe este. O serviço vem do BillingCoreModule (reexportado).
  */
 @Module({
-  imports: [DatabaseModule, TenancyModule, LimitsModule],
+  imports: [TenancyModule, LimitsModule, BillingCoreModule],
   controllers: [BillingController],
-  providers: [BillingService],
-  exports: [BillingService],
+  exports: [BillingCoreModule],
 })
 export class BillingModule {}

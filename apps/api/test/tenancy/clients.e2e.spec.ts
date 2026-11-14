@@ -1,8 +1,10 @@
 import request from "supertest";
 import { ProblemSchema } from "@carina/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
 import { migratorSql } from "../setup/db.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
   let t: TestApp;
@@ -43,7 +45,11 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
   const withoutTraceId = (problem: object) => ({ ...problem, traceId: undefined });
 
   beforeAll(async () => {
-    t = await createTestApp();
+    // As rotas de posições vivem no data-ingestion, que importa o tenancy.
+    t = await createTestApp({
+      imports: [DataIngestionModule],
+      redisDb: redisDbOf("tenancy/clients.e2e.spec.ts"),
+    });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     A = await t.seedTenant({ name: "Tenant A" });
     B = await t.seedTenant({ name: "Tenant B" });
@@ -159,10 +165,15 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
         .get("/api/clients/a1/positions")
         .set("X-API-Key", A.keys.chat)
         .expect(200);
-      const body = res.body as { externalId: string; clientId: string; valueBrl: string }[];
-      expect(body.map((p) => p.externalId)).toEqual(["pa1"]);
-      expect(body[0]?.clientId).toBe(clientIds[`${A.tenantId}:a1`]);
-      expect(body[0]?.valueBrl).toBe("100.5");
+      const body = (res.body as { positions: Record<string, unknown>[] }).positions;
+      expect(body.map((p) => p["externalId"])).toEqual(["pa1"]);
+      expect(body[0]?.["valueBrl"]).toBe("100.50");
+      // Contrato NormalizedPosition: sem ids de tenant/cliente nem colunas internas.
+      expect(Object.keys(body[0] ?? {}).sort()).toEqual(
+        ["asOf", "assetClass", "externalId", "institution", "kind", "name", "valueBrl"].sort(),
+      );
+      expect(res.text).not.toContain(A.tenantId);
+      expect(res.text).not.toContain(clientIds[`${A.tenantId}:a1`]);
     });
 
     it("externalId repetido entre tenants resolve para o cliente do tenant da chave", async () => {
@@ -170,7 +181,9 @@ describe("Tenancy E2E: chaves de API, escopos e clientes", () => {
         .get("/api/clients/shared/positions")
         .set("X-API-Key", B.keys.chat)
         .expect(200);
-      expect((res.body as { externalId: string }[]).map((p) => p.externalId)).toEqual(["pbs"]);
+      expect(
+        (res.body as { positions: { externalId: string }[] }).positions.map((p) => p.externalId),
+      ).toEqual(["pbs"]);
     });
 
     it("externalId de B com a chave de A → 404, igual a um cliente inexistente", async () => {

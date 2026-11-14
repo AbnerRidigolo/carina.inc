@@ -7,6 +7,7 @@ import { BillingModule } from "../../src/modules/billing/billing.module.js";
 import { BillingService } from "../../src/modules/billing/billing.service.js";
 import { monthKey } from "../../src/modules/limits/month.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 // Os registros levam created_at = now() do banco; o mês corrente vem do CLOCK do app.
 const MONTH = monthKey(Date.now());
@@ -21,7 +22,7 @@ describe("Billing E2E: GET /api/usage", () => {
   beforeAll(async () => {
     t = await createTestApp({
       imports: [BillingModule],
-      redisDb: 13,
+      redisDb: redisDbOf("billing/billing.e2e.spec.ts"),
     });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     billing = t.app.get(BillingService);

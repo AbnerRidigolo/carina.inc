@@ -51,7 +51,7 @@ function py(source: string): RegExp {
  * sua classe. Não há divergência de comportamento em relação ao Python (parte local de qualquer
  * tamanho continua sendo detectada).
  */
-const EMAIL_PATTERN = new RegExp(
+export const EMAIL_PATTERN = new RegExp(
   String.raw`(?<![\p{L}\p{N}_.+-])[.+-]*[\p{L}\p{N}_][\p{L}\p{N}_.+-]*@[\p{L}\p{N}_-]+\.\.*[\p{L}\p{N}_]`,
   "u",
 );

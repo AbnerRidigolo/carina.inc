@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { beforeAll, describe, expect, it } from "vitest";
-import { appUrl, inRlsTransaction, migratorSql, withPgClient } from "../setup/db.js";
+import { appUrl, inRlsTransaction, migratorSql, must, withPgClient } from "../setup/db.js";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const asApp = <T>(fn: (c: pg.Client) => Promise<T>) => withPgClient(appUrl(), fn);
@@ -72,20 +72,43 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
     });
   });
 
-  it("audit_event é append-only: INSERT funciona, UPDATE dá permission denied", async () => {
-    await asApp(async (c) => {
-      await inRlsTransaction(c, { tenantId: tenantA }, () =>
-        c.query(`INSERT INTO audit_event (tenant_id, channel, query) VALUES ($1, 'chat', 'q')`, [
-          tenantA,
-        ]),
-      );
-      await expect(
-        inRlsTransaction(c, { tenantId: tenantA }, () =>
-          c.query("UPDATE audit_event SET query = 'x'"),
-        ),
-      ).rejects.toThrow(/permission denied/);
+  // Append-only (REVOKE UPDATE, DELETE, TRUNCATE na 0002): o INSERT do carina_app passa e cada
+  // alteração falha com 42501 (insufficient_privilege) citando a tabela, não com outro erro.
+  const appendOnly = [
+    {
+      table: "audit_event",
+      insert: `INSERT INTO audit_event (tenant_id, channel, query) VALUES ($1, 'chat', 'q')`,
+      update: "UPDATE audit_event SET query = 'x'",
+    },
+    {
+      table: "usage_record",
+      insert: `INSERT INTO usage_record (tenant_id, work_type, price_brl, duration_ms)
+               VALUES ($1, 'query', 1.50, 1)`,
+      update: "UPDATE usage_record SET price_brl = 0",
+    },
+  ] as const;
+
+  for (const { table, insert, update } of appendOnly) {
+    it(`${table} é append-only: INSERT funciona; UPDATE, DELETE e TRUNCATE dão 42501 permission denied`, async () => {
+      await asApp(async (c) => {
+        await inRlsTransaction(c, { tenantId: tenantA }, () => c.query(insert, [tenantA]));
+        for (const sql of [update, `DELETE FROM ${table}`, `TRUNCATE ${table}`]) {
+          await expect(
+            inRlsTransaction(c, { tenantId: tenantA }, () => c.query(sql)),
+            sql,
+          ).rejects.toMatchObject({
+            code: "42501",
+            message: `permission denied for table ${table}`,
+          });
+        }
+        // A linha inserida continua lá (nada foi alterado nem apagado).
+        const { rows } = await inRlsTransaction(c, { tenantId: tenantA }, () =>
+          c.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`),
+        );
+        expect(rows[0]?.n).toBeGreaterThanOrEqual(1);
+      });
     });
-  });
+  }
 
   it("api_key é inacessível para carina_app", async () => {
     await asApp(async (c) => {
@@ -111,9 +134,52 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
     });
   });
 
-  it("resolve_api_key não é sombreada por tabelas temporárias de carina_app", async () => {
+  it("resolve_api_key_by_id: chave ativa pelo id; revogada, inexistente ou de tenant suspenso → nada", async () => {
+    const suspended = randomUUID();
+    const suspendedHash = sha256(`sk-live-${randomUUID()}`);
+    await migratorSql(
+      `INSERT INTO tenant (id, name, plan, rpm, monthly_quota) VALUES ($1, 'Suspenso', 'pro', 60, 0)`,
+      [suspended],
+    );
+    await migratorSql(
+      `INSERT INTO api_key (tenant_id, hash, prefix, scopes) VALUES ($1, $2, 'sk-live-cccc', ARRAY['chat'])`,
+      [suspended, suspendedHash],
+    );
+    const ids = await migratorSql<{ id: string; hash: string }>(
+      `SELECT id, hash FROM api_key WHERE hash = ANY($1::text[])`,
+      [[keyHash, revokedHash, suspendedHash]],
+    );
+    const idOf = (h: string) => ids.find((r) => r.hash === h)?.id;
+    await asApp(async (c) => {
+      const active = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(keyHash)]);
+      expect(active.rows).toHaveLength(1);
+      expect(active.rows[0]).toMatchObject({ tenant_id: tenantA, rpm: 120, monthly_quota: 1000 });
+      const revoked = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(revokedHash)]);
+      expect(revoked.rows).toHaveLength(0);
+      const missing = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [randomUUID()]);
+      expect(missing.rows).toHaveLength(0);
+      // Ainda não suspenso: as duas funções resolvem.
+      expect(
+        (await c.query("SELECT * FROM resolve_api_key($1)", [suspendedHash])).rows,
+      ).toHaveLength(1);
+    });
+    await migratorSql(`UPDATE tenant SET suspended_at = now() WHERE id = $1`, [suspended]);
+    await asApp(async (c) => {
+      const byId = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [idOf(suspendedHash)]);
+      expect(byId.rows).toHaveLength(0);
+      const byHash = await c.query("SELECT * FROM resolve_api_key($1)", [suspendedHash]);
+      expect(byHash.rows).toHaveLength(0);
+    });
+  });
+
+  it("resolve_api_key e resolve_api_key_by_id não são sombreadas por tabelas temporárias de carina_app", async () => {
     const forgedTenant = randomUUID();
     const forgedHash = sha256(`sk-live-${randomUUID()}`);
+    const forgedKeyId = randomUUID();
+    const [realKey] = await migratorSql<{ id: string }>(`SELECT id FROM api_key WHERE hash = $1`, [
+      keyHash,
+    ]);
+    const realKeyId = must(realKey).id;
     await asApp(async (c) => {
       // carina_app tem TEMPORARY (via PUBLIC): tenta sombrear api_key e tenant com pg_temp.
       await c.query(`CREATE TEMP TABLE api_key (id uuid, tenant_id uuid, hash text, prefix text,
@@ -124,9 +190,9 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
         forgedTenant,
       ]);
       await c.query(
-        `INSERT INTO pg_temp.api_key VALUES (gen_random_uuid(), $1, $2, 'x', ARRAY['admin'], NULL, NULL, now()),
-                                            (gen_random_uuid(), $1, $3, 'x', ARRAY['admin'], NULL, NULL, now())`,
-        [forgedTenant, forgedHash, keyHash],
+        `INSERT INTO pg_temp.api_key VALUES ($4, $1, $2, 'x', ARRAY['admin'], NULL, NULL, now()),
+                                            ($5, $1, $3, 'x', ARRAY['admin'], NULL, NULL, now())`,
+        [forgedTenant, forgedHash, keyHash, forgedKeyId, realKeyId],
       );
       // Dono das tabelas temporárias, o atacante libera a leitura para o definer da função.
       await c.query("GRANT SELECT ON pg_temp.api_key, pg_temp.tenant TO PUBLIC");
@@ -137,6 +203,13 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
       const real = await c.query("SELECT * FROM resolve_api_key($1)", [keyHash]);
       expect(real.rows).toHaveLength(1);
       expect(real.rows[0]).toMatchObject({ tenant_id: tenantA, tenant_name: "Tenant A" });
+
+      // Pelo id (revalidação dos sockets): a chave forjada não existe; a real volta com o tenant real.
+      const forgedById = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [forgedKeyId]);
+      expect(forgedById.rows).toHaveLength(0);
+      const realById = await c.query("SELECT * FROM resolve_api_key_by_id($1)", [realKeyId]);
+      expect(realById.rows).toHaveLength(1);
+      expect(realById.rows[0]).toMatchObject({ tenant_id: tenantA, tenant_name: "Tenant A" });
     });
   });
 

@@ -1,0 +1,18 @@
+# Contexto do docker build (raiz do monorepo): só o que as imagens precisam. Nada de segredos.
+.git
+.github
+.claude
+.superpowers
+legacy
+docs
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+# Cliente Prisma gerado: a imagem gera o seu (postinstall `prisma generate`).
+apps/api/src/generated
+# Segredos locais nunca entram no contexto.
+.env
+**/.env
+**/*.env
+!.env.example

@@ -1,19 +1,21 @@
 /**
  * App Nest para testes E2E, conectado ao banco de teste do global-setup como carina_app.
  *
- * Monta o mesmo pipeline HTTP do main.ts (prefixo `/api` e ProblemDetailsFilter) sobre o
- * TenancyModule (ApiKeyGuard + TenantContextInterceptor globais) e os módulos extras que cada
- * teste passar. Tenants e chaves são criados como carina_migrator (`tenant` e `api_key` não têm
- * RLS; o carina_app nem enxerga `api_key`).
+ * Monta o MESMO pipeline HTTP do main.ts (`configureHttpApp` do bootstrap: body parser de 5 MB,
+ * adaptador `ws`, prefixo `/api`, CORS e ProblemDetailsFilter) sobre o TenancyModule (ApiKeyGuard +
+ * TenantContextInterceptor globais) e os módulos extras que cada teste passar. Tenants e chaves
+ * são criados como carina_migrator (`tenant` e `api_key` não têm RLS; o carina_app nem enxerga
+ * `api_key`).
  */
 import type { DynamicModule, INestApplication, Type } from "@nestjs/common";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { ConfigModule, ENV } from "../../src/core/config/config.module.js";
 import { loadEnv } from "../../src/core/config/env.js";
-import { ProblemDetailsFilter } from "../../src/core/errors/problem-details.filter.js";
+import { configureHttpApp } from "../../src/bootstrap.js";
 import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js";
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
-import { appUrl, migratorSql, migratorUrl, redisDbUrl, redisUrl } from "./db.js";
+import { appUrl, migratorSql, migratorUrl, redisDbUrl } from "./db.js";
 
 export type SeedKeyName = "chat" | "approver" | "ingest";
 
@@ -59,18 +61,32 @@ export interface CreateTestAppOptions {
   imports?: ModuleImport[];
   /** Substitui providers (ex.: o relógio CLOCK dos limites). */
   overrides?: { token: unknown; useValue: unknown }[];
-  /** DB lógico do Redis do app; cada arquivo de teste usa o seu para não colidir com os demais. */
-  redisDb?: number;
+  /**
+   * DB lógico do Redis do app (obrigatório): cada arquivo de teste usa o seu, de
+   * test/setup/redis-dbs.ts, para não colidir com os demais.
+   */
+  redisDb: number;
+  /**
+   * Liga os workers de fundo (WORKERS_ENABLED). Padrão: desligados, para que nenhum consumidor
+   * do stream `jobs` rode nos testes que não pediram (eles leem e contam os eventos de lá).
+   */
+  workersEnabled?: boolean;
+  /** Variáveis de ambiente extras (validadas pelo loadEnv), ex.: limites curtos para testes. */
+  env?: Record<string, string>;
 }
 
-export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<TestApp> {
+export async function createTestApp(opts: CreateTestAppOptions): Promise<TestApp> {
   const env = loadEnv({
     ...process.env,
     NODE_ENV: "test",
     DATABASE_URL: appUrl(),
     MIGRATION_DATABASE_URL: migratorUrl(),
-    REDIS_URL: opts.redisDb === undefined ? redisUrl() : redisDbUrl(opts.redisDb),
+    REDIS_URL: redisDbUrl(opts.redisDb),
     LLM_MODE: "mock",
+    WORKERS_ENABLED: opts.workersEnabled === true ? "true" : "false",
+    // Módulos que trazem o LoggingModule (ex.: AppModule) não poluem a saída dos testes.
+    LOG_LEVEL: "silent",
+    ...opts.env,
   });
 
   let builder = Test.createTestingModule({
@@ -82,9 +98,8 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     builder = builder.overrideProvider(o.token).useValue(o.useValue);
   const moduleRef = await builder.compile();
 
-  const app = moduleRef.createNestApplication({ logger: false });
-  app.setGlobalPrefix("api");
-  app.useGlobalFilters(new ProblemDetailsFilter());
+  const app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
+  configureHttpApp(app, env);
   // Escuta numa porta efêmera: o supertest usa o endereço em vez de abrir um listen por request.
   await app.listen(0, "127.0.0.1");
 

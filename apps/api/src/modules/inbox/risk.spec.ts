@@ -1,0 +1,45 @@
+import { describe, expect, it } from "vitest";
+import { ExecutorRegistry } from "./executors.js";
+import { classifyRisk, READ_ACTIONS, REVERSIBLE_ACTIONS } from "./risk.js";
+
+describe("classifyRisk", () => {
+  it("place_trade e pix_out são irreversíveis", () => {
+    expect(classifyRisk("place_trade")).toBe("irreversible");
+    expect(classifyRisk("pix_out")).toBe("irreversible");
+  });
+
+  it("ações de leitura são read", () => {
+    expect(classifyRisk("get_positions")).toBe("read");
+    for (const a of READ_ACTIONS) expect(classifyRisk(a)).toBe("read");
+  });
+
+  it("ações reversíveis explícitas são reversible", () => {
+    for (const a of REVERSIBLE_ACTIONS) expect(classifyRisk(a)).toBe("reversible");
+    expect([...REVERSIBLE_ACTIONS].sort()).toEqual(["create_alert"]);
+  });
+
+  it("update_goal e schedule_report (sem executor) exigem aprovação", () => {
+    expect(classifyRisk("update_goal")).toBe("irreversible");
+    expect(classifyRisk("schedule_report")).toBe("irreversible");
+  });
+
+  it("toda ação read ou reversible tem executor registrado (senão executaria sem aprovação e falharia)", () => {
+    const registry = new ExecutorRegistry({} as never);
+    for (const a of [...READ_ACTIONS, ...REVERSIBLE_ACTIONS]) {
+      expect(registry.get(a), a).toBeTypeOf("function");
+    }
+  });
+
+  it("ação desconhecida, vazia ou com outra caixa é irreversível (falha fechada)", () => {
+    for (const a of [
+      "",
+      "unknown",
+      "GET_POSITIONS",
+      " get_positions",
+      "__proto__",
+      "constructor",
+    ]) {
+      expect(classifyRisk(a), a).toBe("irreversible");
+    }
+  });
+});

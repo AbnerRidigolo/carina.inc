@@ -1,8 +1,23 @@
 import { z } from "zod";
 import { MoneySchema, QuantitySchema } from "./money.js";
 
+/**
+ * Identificador do item no sistema do tenant (e do cliente final): 1 a 128 caracteres (pontos de
+ * código), sem nenhum caractere da categoria `\p{C}` do Unicode (NUL e demais controles como TAB e
+ * quebra de linha, formatação como ZWJ, hífen suave, BOM e marcas bidi, uso privado, não atribuído
+ * e surrogate solto). Texto bem formado e sem invisíveis: é a mesma chave que volta no cursor de
+ * paginação e que o banco guarda, então precisa sobreviver a ida e volta sem alteração.
+ */
+export const ExternalIdSchema = z
+  .string()
+  .regex(
+    /^[^\p{C}]{1,128}$/u,
+    "precisa ter de 1 a 128 caracteres, sem caracteres de controle, de formatação ou inválidos",
+  );
+export type ExternalId = z.infer<typeof ExternalIdSchema>;
+
 export const NormalizedPositionSchema = z.object({
-  externalId: z.string().min(1).max(128),
+  externalId: ExternalIdSchema,
   institution: z.string(),
   kind: z.enum(["investment", "cash"]),
   assetClass: z.enum(["acao", "fii", "tesouro", "renda_fixa", "fundo", "caixa"]),
@@ -15,7 +30,7 @@ export const NormalizedPositionSchema = z.object({
 export type NormalizedPosition = z.infer<typeof NormalizedPositionSchema>;
 
 export const NormalizedTransactionSchema = z.object({
-  externalId: z.string().min(1).max(128),
+  externalId: ExternalIdSchema,
   institution: z.string(),
   account: z.string(),
   date: z.iso.date(),

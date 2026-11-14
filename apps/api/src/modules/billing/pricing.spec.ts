@@ -44,42 +44,42 @@ describe("classifyWork", () => {
 
 describe("extractValueBrl", () => {
   it("aceita número e devolve o valor absoluto (venda é negativa)", () => {
-    expect(extractValueBrl({ amount: 5000 }).toString()).toBe("5000");
-    expect(extractValueBrl({ amount: -1500.5 }).toString()).toBe("1500.5");
-    expect(extractValueBrl({ valor: -2500 }).toString()).toBe("2500");
+    expect(extractValueBrl({ amount: 5000 })?.toString()).toBe("5000");
+    expect(extractValueBrl({ amount: -1500.5 })?.toString()).toBe("1500.5");
+    expect(extractValueBrl({ valor: -2500 })?.toString()).toBe("2500");
   });
 
   it("aceita string decimal, sem passar por float", () => {
-    expect(extractValueBrl({ value_brl: "0.10" }).toString()).toBe("0.1");
-    expect(extractValueBrl({ valueBrl: "-1234567890123.45" }).toString()).toBe("1234567890123.45");
-    expect(extractValueBrl({ value: " 42.5 " }).toString()).toBe("42.5");
+    expect(extractValueBrl({ value_brl: "0.10" })?.toString()).toBe("0.1");
+    expect(extractValueBrl({ valueBrl: "-1234567890123.45" })?.toString()).toBe("1234567890123.45");
+    expect(extractValueBrl({ value: " 42.5 " })?.toString()).toBe("42.5");
   });
 
   it("respeita a precedência value_brl, valueBrl, amount, value, valor", () => {
-    expect(extractValueBrl({ value_brl: 10, amount: 99 }).toString()).toBe("10");
-    expect(extractValueBrl({ valueBrl: 20, amount: 99, value: 98, valor: 97 }).toString()).toBe(
+    expect(extractValueBrl({ value_brl: 10, amount: 99 })?.toString()).toBe("10");
+    expect(extractValueBrl({ valueBrl: 20, amount: 99, value: 98, valor: 97 })?.toString()).toBe(
       "20",
     );
-    expect(extractValueBrl({ amount: 30, value: 98, valor: 97 }).toString()).toBe("30");
-    expect(extractValueBrl({ value: 40, valor: 97 }).toString()).toBe("40");
-    expect(extractValueBrl({ valor: 50 }).toString()).toBe("50");
+    expect(extractValueBrl({ amount: 30, value: 98, valor: 97 })?.toString()).toBe("30");
+    expect(extractValueBrl({ value: 40, valor: 97 })?.toString()).toBe("40");
+    expect(extractValueBrl({ valor: 50 })?.toString()).toBe("50");
   });
 
-  it("ausente, boolean ou não numérico dá 0", () => {
-    expect(extractValueBrl({}).toString()).toBe("0");
-    expect(extractValueBrl({ value_brl: true }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: false }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: "muito" }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: "" }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: Number.NaN }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: Number.POSITIVE_INFINITY }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: null }).toString()).toBe("0");
-    expect(extractValueBrl({ amount: { x: 1 } }).toString()).toBe("0");
+  it("ausente, boolean ou não numérico dá undefined", () => {
+    expect(extractValueBrl({})).toBeUndefined();
+    expect(extractValueBrl({ value_brl: true })).toBeUndefined();
+    expect(extractValueBrl({ amount: false })).toBeUndefined();
+    expect(extractValueBrl({ amount: "muito" })).toBeUndefined();
+    expect(extractValueBrl({ amount: "" })).toBeUndefined();
+    expect(extractValueBrl({ amount: Number.NaN })).toBeUndefined();
+    expect(extractValueBrl({ amount: Number.POSITIVE_INFINITY })).toBeUndefined();
+    expect(extractValueBrl({ amount: null })).toBeUndefined();
+    expect(extractValueBrl({ amount: { x: 1 } })).toBeUndefined();
   });
 
   it("chave inválida não esconde uma chave válida seguinte", () => {
-    expect(extractValueBrl({ value_brl: true, amount: 7 }).toString()).toBe("7");
-    expect(extractValueBrl({ value_brl: "x", valor: "8" }).toString()).toBe("8");
+    expect(extractValueBrl({ value_brl: true, amount: 7 })?.toString()).toBe("7");
+    expect(extractValueBrl({ value_brl: "x", valor: "8" })?.toString()).toBe("8");
   });
 });
 

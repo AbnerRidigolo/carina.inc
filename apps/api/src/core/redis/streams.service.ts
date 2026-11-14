@@ -8,9 +8,14 @@ export type StreamName = "inbox.events" | "notifications" | "jobs";
 
 export const STREAMS_OPTIONS = Symbol("STREAMS_OPTIONS");
 
+/**
+ * Registros no formato objeto do pino, `{ msg, err, stream, ... }`, com o Error em `err` no topo:
+ * pelo Logger do Nest apontado para o nestjs-pino, o serializador grava `err.message` e
+ * `err.stack` (R14). Nunca texto de erro concatenado na mensagem.
+ */
 export interface StreamsLogger {
-  error(message: string, ...rest: unknown[]): void;
-  warn(message: string, ...rest: unknown[]): void;
+  error(fields: Record<string, unknown>): void;
+  warn(fields: Record<string, unknown>): void;
 }
 
 export interface StreamsOptions {
@@ -20,6 +25,8 @@ export interface StreamsOptions {
   maxDeliveries?: number;
   /** Duração do BLOCK das leituras (ms). */
   blockMs?: number;
+  /** Duração do BLOCK do tail (ms); por padrão, a mesma de `blockMs`. */
+  tailBlockMs?: number;
   logger?: StreamsLogger;
 }
 
@@ -36,6 +43,9 @@ type ReadReply = [stream: string, entries: RawEntry[]][] | null;
 
 const DEDUP_TTL_SECONDS = 86_400;
 const BATCH = 10;
+/** Espera entre tentativas após erro de leitura do tail: dobra a cada falha, com teto. */
+const TAIL_BACKOFF_MIN_MS = 200;
+const TAIL_BACKOFF_MAX_MS = 1000;
 
 function fieldOf(fields: string[] | null, name: string): string | undefined {
   if (!fields) return undefined;
@@ -52,6 +62,7 @@ export class StreamsService {
   private readonly claimIdleMs: number;
   private readonly maxDeliveries: number;
   private readonly blockMs: number;
+  private readonly tailBlockMs: number;
   private readonly logger: StreamsLogger;
 
   constructor(
@@ -61,6 +72,7 @@ export class StreamsService {
     this.claimIdleMs = opts.claimIdleMs ?? 60_000;
     this.maxDeliveries = opts.maxDeliveries ?? 5;
     this.blockMs = opts.blockMs ?? 5000;
+    this.tailBlockMs = opts.tailBlockMs ?? this.blockMs;
     this.logger = opts.logger ?? new Logger(StreamsService.name);
   }
 
@@ -109,7 +121,7 @@ export class StreamsService {
           )) as ReadReply;
         } catch (err) {
           if (signal.aborted) break;
-          this.logger.error(`XREADGROUP em ${stream} falhou: ${errMessage(err)}`);
+          this.logger.error({ msg: "XREADGROUP falhou; nova tentativa", err, stream, group });
           await this.sleep(500, signal);
           continue;
         }
@@ -126,48 +138,92 @@ export class StreamsService {
     }
   }
 
+  /**
+   * Leitor de broadcast (sem grupo): entrega a `onEvent`, em ordem e uma única vez, as entradas de
+   * `stream` publicadas depois do início do tail. Não reenvia o histórico.
+   *
+   * Cursor: o id inicial é resolvido UMA vez (`XREVRANGE + - COUNT 1`; `0-0` se o stream estiver
+   * vazio ou não existir) e passa a ser o id da última entrada recebida. Nunca se usa `$`, que
+   * significa "mais novo que o instante da chamada" e perde o que for publicado entre dois XREAD
+   * (após um BLOCK vazio, após um erro, ou entre o início do tail e o primeiro XREAD).
+   *
+   * Garantia para um evento publicado junto com o início: o XREVRANGE sai pela conexão principal
+   * de forma síncrona na chamada de `tail()`, antes de qualquer await. Logo:
+   *  - todo evento cujo XADD o servidor aplicou DEPOIS desse XREVRANGE tem id maior que o cursor
+   *    e é entregue (inclusive o publicado, pela mesma conexão `redis`, após `tail()` ser chamado);
+   *  - todo evento aplicado ANTES dele (id <= cursor) conta como histórico e não é entregue;
+   *  - não há terceira possibilidade: nenhum evento some depois de o cursor ser fixado.
+   * Se a resolução do id inicial falhar, ela é repetida (com espera) e a garantia passa a valer
+   * a partir da tentativa que der certo: o que foi publicado durante a falha conta como histórico.
+   *
+   * Erro de leitura: espera 200 ms (dobra até 1 s) e repete do MESMO cursor; um XREAD reenviado
+   * após reconexão carrega o mesmo id, então tampouco repete nem pula entradas.
+   */
   async tail(
     stream: StreamName,
     onEvent: (e: StreamEvent) => void,
     signal: AbortSignal,
   ): Promise<void> {
     if (signal.aborted) return;
+    // Emitido de forma síncrona (antes de qualquer await), pela conexão principal: fica ordenado
+    // antes de qualquer XADD que o chamador faça por ela logo após chamar tail().
+    let pendingStart: Promise<string> | null = this.latestId(stream);
+    pendingStart.catch(() => undefined); // rejeição tratada no loop; nunca "unhandled"
+
     const blocking = this.redis.duplicate();
     blocking.on("error", () => undefined);
     const onAbort = () => blocking.disconnect();
     signal.addEventListener("abort", onAbort, { once: true });
-    let lastId = "$";
+    let cursor: string | null = null;
+    let backoff = TAIL_BACKOFF_MIN_MS;
     try {
       while (!signal.aborted) {
         let reply: ReadReply;
         try {
+          if (cursor === null) {
+            cursor = await this.untilAborted(pendingStart ?? this.latestId(stream), signal);
+            pendingStart = null;
+          }
           reply = (await blocking.xread(
             "COUNT",
             BATCH,
             "BLOCK",
-            this.blockMs,
+            this.tailBlockMs,
             "STREAMS",
             stream,
-            lastId,
+            cursor,
           )) as ReadReply;
         } catch (err) {
           if (signal.aborted) break;
-          this.logger.error(`XREAD em ${stream} falhou: ${errMessage(err)}`);
-          await this.sleep(500, signal);
+          pendingStart = null;
+          this.logger.warn({
+            msg: `Leitura do tail em ${stream} falhou; nova tentativa do mesmo cursor`,
+            err,
+            stream,
+          });
+          await this.sleep(backoff, signal);
+          backoff = Math.min(backoff * 2, TAIL_BACKOFF_MAX_MS);
           continue;
         }
+        backoff = TAIL_BACKOFF_MIN_MS;
         for (const [, entries] of reply ?? []) {
           for (const [id, fields] of entries) {
-            lastId = id;
+            if (signal.aborted) break;
+            cursor = id; // avança mesmo se a entrada for inválida ou o listener falhar
             const parsed = this.parse(fields);
             if (!parsed.ok) {
-              this.logger.warn(`Entrada inválida ignorada em ${stream} (${id}): ${parsed.error}`);
+              this.logger.warn({
+                msg: "Entrada inválida ignorada no tail",
+                stream,
+                entryId: id,
+                reason: parsed.error,
+              });
               continue;
             }
             try {
               onEvent(parsed.event);
             } catch (err) {
-              this.logger.error(`Listener de tail em ${stream} falhou: ${errMessage(err)}`);
+              this.logger.error({ msg: "Listener do tail falhou", err, stream, entryId: id });
             }
           }
         }
@@ -176,6 +232,30 @@ export class StreamsService {
       signal.removeEventListener("abort", onAbort);
       blocking.disconnect();
     }
+  }
+
+  /** Id da última entrada do stream, ou `0-0` se estiver vazio ou não existir. */
+  private async latestId(stream: StreamName): Promise<string> {
+    const rows = await this.redis.xrevrange(stream, "+", "-", "COUNT", 1);
+    return rows[0]?.[0] ?? "0-0";
+  }
+
+  /** Rejeita assim que o sinal abortar, sem esperar uma promessa que pode estar pendurada. */
+  private untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(new Error("tail abortado"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      p.then(
+        (v) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        (e: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(e instanceof Error ? e : new Error(String(e)));
+        },
+      );
+    });
   }
 
   /** Reivindica pendentes ociosas e as reprocessa (ou manda para a DLQ). */
@@ -196,7 +276,7 @@ export class StreamsService {
           BATCH,
         )) as [string, RawEntry[], ...unknown[]];
       } catch (err) {
-        this.logger.error(`XAUTOCLAIM em ${stream} falhou: ${errMessage(err)}`);
+        this.logger.error({ msg: "XAUTOCLAIM falhou", err, stream, group });
         return;
       }
       cursor = res[0];
@@ -222,10 +302,12 @@ export class StreamsService {
     try {
       await fn();
     } catch (err) {
-      this.logger.error(
-        `Falha ao processar a entrada ${id} de ${stream}; ficará pendente para nova tentativa: ${errMessage(err)}`,
-        err instanceof Error ? err.stack : undefined,
-      );
+      this.logger.error({
+        msg: "Falha ao processar a entrada; ficará pendente para nova tentativa",
+        err,
+        stream,
+        entryId: id,
+      });
     }
   }
 
@@ -270,7 +352,12 @@ export class StreamsService {
     const { stream, group, handler } = opts;
     const parsed = this.parse(fields);
     if (!parsed.ok) {
-      this.logger.error(`Entrada inválida em ${stream} (${id}) enviada à DLQ: ${parsed.error}`);
+      this.logger.error({
+        msg: "Entrada inválida enviada à DLQ",
+        stream,
+        entryId: id,
+        reason: parsed.error,
+      });
       await this.deadLetter(stream, group, id, parsed.raw, parsed.error);
       return;
     }
@@ -294,9 +381,19 @@ export class StreamsService {
     try {
       await handler(event);
     } catch (err) {
-      this.logger.error(
-        `Handler de ${stream} falhou para ${event.eventId} (entrega ${deliveries}/${this.maxDeliveries}): ${errMessage(err)}`,
-      );
+      this.logger.error({
+        msg: "Handler do stream falhou",
+        err,
+        stream,
+        group,
+        entryId: id,
+        eventId: event.eventId,
+        eventType: event.type,
+        tenantId: event.tenantId,
+        clientId: event.clientId,
+        deliveries,
+        maxDeliveries: this.maxDeliveries,
+      });
       await this.redis.del(dedupKey);
       if (deliveries >= this.maxDeliveries) {
         await this.deadLetter(stream, group, id, event, errMessage(err));

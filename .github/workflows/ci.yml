@@ -1,14 +1,21 @@
 # CI do CARINA — roda em todo push para main e em todo pull request.
 # legacy-python: testes unitários (mockados, sem credenciais externas), ruff e black.
 #   Os testes `integration` (credenciais reais NIM/Groq/FalkorDB) ficam FORA do CI.
-# typescript: lint, typecheck, testes unitários, testes de integração da API (Postgres 17 +
-#   pgvector e Redis dos service containers; RLS e migrações reais) e build do monorepo pnpm.
+# typescript: lint, typecheck, testes unitários (api, shared, web), testes de integração e E2E da
+#   API numa execução com cobertura (Postgres 17 + pgvector e Redis dos service containers; RLS e
+#   migrações reais; ≥ 80% de linhas em src/modules) e build do monorepo pnpm.
+# compose-smoke: build das imagens e `docker compose up --wait` da demo completa SEM nenhuma chave
+#   de API (LLM_MODE=mock); confere /api/health, /api/ready, um chat com a chave de demo e o web.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# Nenhum job escreve no repositório: o GITHUB_TOKEN fica só com leitura.
+permissions:
+  contents: read
 
 jobs:
   legacy-python:
@@ -74,9 +81,12 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Versão única do Node (.nvmrc) para CI, Dockerfiles e `engines`: o jsdom 31 exige
+      # ^22.22.2 e o undici 8 dele não carrega no 22.12 (os workers do vitest do web nem sobem).
+      # Fixado por apps/api/src/toolchain.spec.ts.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.12"
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Instala dependências
@@ -91,11 +101,74 @@ jobs:
       - name: Testes unitários
         run: pnpm test
 
-      - name: Testes de integração
-        run: pnpm --filter @carina/api test:int
-
-      - name: Testes E2E
-        run: pnpm --filter @carina/api test:e2e
+      # Integração e E2E da API: uma execução só de unit + int + e2e (projetos em sequência), com
+      # cobertura de src/modules/**; falha em qualquer teste e abaixo de 80% de linhas (limite no
+      # apps/api/vitest.config.ts). Não roda int/e2e duas vezes.
+      - name: Testes de integração e E2E da API, com cobertura (≥ 80% de linhas em src/modules)
+        run: pnpm --filter @carina/api test:cov
 
       - name: Build
         run: pnpm build
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build das imagens
+        run: docker compose build
+
+      - name: Sobe a stack (sem chaves de API, LLM_MODE=mock)
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: Smoke da API e do web
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:3000/api/health
+          test "$(curl -fsS http://localhost:3000/api/ready)" = '{"postgres":"ok","redis":"ok"}'
+          # Chave de demo do seed (pública, só para a demo local).
+          curl -fsS -X POST http://localhost:3000/api/chat \
+            -H "Authorization: Bearer sk-live-demoapp0000000000000000000000000" \
+            -H "Content-Type: application/json" \
+            -d '{"clientId":"cliente-moderado","message":"Como está minha carteira?"}' \
+            | grep -q '"status":"completed"'
+          curl -fsS -o /dev/null http://localhost:5173/
+          # O nginx do web faz proxy de /api para a API (mesma origem do frontend).
+          curl -fsS http://localhost:5173/api/health
+          # index.html nunca em cache; CSP sem destinos de rede além da própria origem.
+          headers="$(curl -fsSI http://localhost:5173/)"
+          grep -qi '^cache-control: no-cache' <<<"$headers"
+          grep -qi "connect-src 'self';" <<<"$headers"
+
+      - name: Fluxo de aprovação pelo proxy do web (api → worker)
+        run: |
+          set -euo pipefail
+          W=http://localhost:5173
+          APP="Authorization: Bearer sk-live-demoapp0000000000000000000000000"
+          APPROVER="Authorization: Bearer sk-live-demoapprover00000000000000000000"
+          JSON="Content-Type: application/json"
+          chat="$(curl -fsS -X POST "$W/api/chat" -H "$APP" -H "$JSON" \
+            -d '{"clientId":"cliente-moderado","message":"compre 100 ações de PETR4"}')"
+          jq -e '.status == "awaiting_approval" and .approval.valueBrl == "3000.00"' <<<"$chat"
+          id="$(jq -r '.approval.id' <<<"$chat")"
+          # A chave app não decide; a aprovadora sim. A execução roda no serviço worker.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$W/api/inbox/$id/decision" \
+            -H "$APP" -H "$JSON" -d '{"approved":true}')" = 403
+          curl -fsS -X POST "$W/api/inbox/$id/decision" -H "$APPROVER" -H "$JSON" \
+            -d '{"approved":true}' | jq -e '.status == "approved"'
+          for _ in $(seq 1 30); do
+            usage="$(curl -fsS "$W/api/usage" -H "$APP")"
+            if jq -e '.byWorkType.execution.count == 1' <<<"$usage" >/dev/null; then break; fi
+            sleep 1
+          done
+          jq -e '.byWorkType.execution == {"count": 1, "totalBrl": "90.00"}' <<<"$usage"
+          curl -fsS "$W/api/clients/cliente-moderado/inbox" -H "$APP" | jq -e 'length == 0'
+
+      - name: Logs dos serviços (se falhar)
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Derruba a stack
+        if: always()
+        run: docker compose down -v

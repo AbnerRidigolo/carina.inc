@@ -1,0 +1,14 @@
+.group {
+  margin-top: 12px;
+}
+
+.groupHead {
+  align-items: baseline;
+  display: flex;
+  justify-content: space-between;
+}
+
+.groupHead h3 {
+  font-size: 1rem;
+  margin: 0;
+}

@@ -5,6 +5,7 @@ import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { WatchtowerModule } from "../../src/modules/watchtower/watchtower.module.js";
 import { WatchtowerService } from "../../src/modules/watchtower/watchtower.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
 describe("Watchtower E2E: GET /api/audit", () => {
   let t: TestApp;
@@ -27,7 +28,10 @@ describe("Watchtower E2E: GET /api/audit", () => {
     });
 
   beforeAll(async () => {
-    t = await createTestApp({ imports: [WatchtowerModule], redisDb: 12 });
+    t = await createTestApp({
+      imports: [WatchtowerModule],
+      redisDb: redisDbOf("watchtower/watchtower.e2e.spec.ts"),
+    });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     watchtower = t.app.get(WatchtowerService);
     A = await t.seedTenant({ name: "A" });
@@ -83,6 +87,31 @@ describe("Watchtower E2E: GET /api/audit", () => {
       expect(ProblemSchema.parse(res.body).status).toBe(422);
     },
   );
+
+  it("a pergunta gravada é mascarada (PII) e truncada; a resposta segue só como digest", async () => {
+    const C = await t.seedTenant({ name: "PII" });
+    const query = `meu cpf é 123.456.789-09 e o e-mail joao@exemplo.com ${"y".repeat(800)}`;
+    await TenantContext.run({ tenantId: C.tenantId }, () =>
+      watchtower.review({
+        channel: "rest",
+        query,
+        agents: [],
+        responseText: "CPF 987.654.321-00",
+        durationMs: 1,
+      }),
+    );
+    const res = await request(server)
+      .get("/api/audit")
+      .set("Authorization", `Bearer ${C.keys.chat}`);
+    expect(res.status).toBe(200);
+    const [ev] = (res.body as unknown[]).map((e) => AuditEventViewSchema.parse(e));
+    expect(ev?.query.startsWith("meu cpf é [cpf] e o e-mail [email] ")).toBe(true);
+    expect(ev?.query).not.toContain("123.456.789-09");
+    expect(ev?.query).not.toContain("joao@exemplo.com");
+    expect([...(ev?.query ?? "")].length).toBe(500);
+    // As flags (da resposta) seguem preservadas.
+    expect(ev?.flags.map((f) => f.code)).toEqual(["lgpd.pii_leak.cpf"]);
+  });
 
   it("sem chave: 401; sem o escopo chat: 403", async () => {
     expect((await get("/api/audit")).status).toBe(401);

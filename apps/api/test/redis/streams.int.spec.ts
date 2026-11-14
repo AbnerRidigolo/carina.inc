@@ -5,15 +5,40 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ValidationError } from "../../src/core/errors/domain-errors.js";
 import { StreamsService, type StreamName } from "../../src/core/redis/streams.service.js";
 import { redisUrl } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
 
-// DB lógico dedicado a este arquivo (o ioredis não aplica keyPrefix ao XGROUP); esvaziado a cada teste.
-const TEST_DB = 11;
+// DB lógico próprio (test/setup/redis-dbs.ts; o ioredis não aplica keyPrefix ao XGROUP); esvaziado a cada teste.
+const TEST_DB = redisDbOf("redis/streams.int.spec.ts");
 function dbUrl(): string {
   const url = new URL(redisUrl());
   url.pathname = `/${TEST_DB}`;
   return url.toString();
 }
 const silent = { error: vi.fn(), warn: vi.fn() };
+
+/**
+ * Registro no formato objeto do pino (R14): `{ msg, err, stream, ... }` com o Error no topo (o
+ * serializador do pino só trata `err` no topo e grava message + stack). Devolve o registro cujo
+ * `err` tem `text` na mensagem e um stack de verdade.
+ */
+function loggedError(calls: unknown[][], text: string): Record<string, unknown> | undefined {
+  for (const [first] of calls) {
+    if (typeof first !== "object" || first === null) continue;
+    const rec = first as Record<string, unknown>;
+    const err = rec["err"];
+    if (
+      err instanceof Error &&
+      err.message.includes(text) &&
+      typeof err.stack === "string" &&
+      err.stack.includes("at ") &&
+      typeof rec["msg"] === "string" &&
+      typeof rec["stream"] === "string"
+    ) {
+      return rec;
+    }
+  }
+  return undefined;
+}
 
 function ev(): StreamEvent {
   return {
@@ -94,7 +119,11 @@ describe("StreamsService", () => {
     await c.stop();
     expect(calls).toBe(2);
     expect(ok).toBe(1);
-    expect(silent.error).toHaveBeenCalled();
+    // A falha do handler é registrada com o stack, no formato objeto (R14).
+    expect(loggedError(silent.error.mock.calls, "falha transitória")).toMatchObject({
+      stream: "notifications",
+      eventId: expect.any(String),
+    });
   });
 
   it("manda para jobs.dlq após 5 entregas", async () => {
@@ -170,17 +199,260 @@ describe("StreamsService", () => {
     expect(Date.now() - t).toBeLessThan(1000);
   });
 
-  it("tail entrega eventos novos sem grupo e para no abort", async () => {
+  describe("tail", () => {
     const stream: StreamName = "inbox.events";
-    const seen: StreamEvent[] = [];
-    const ac = new AbortController();
-    const done = svc.tail(stream, (e) => seen.push(e), ac.signal);
-    await new Promise((r) => setTimeout(r, 200));
-    const e = ev();
-    await svc.publish(stream, e);
-    await until(() => seen.some((s) => s.eventId === e.eventId));
-    ac.abort();
-    await done;
+
+    /** Contador com marcos aguardáveis: sincronização por evento, nunca por sleep. */
+    function counter() {
+      let n = 0;
+      const waiters: { k: number; resolve: () => void }[] = [];
+      return {
+        get n() {
+          return n;
+        },
+        bump() {
+          n++;
+          for (const w of waiters.filter((x) => x.k <= n)) w.resolve();
+        },
+        reached(k: number): Promise<void> {
+          if (n >= k) return Promise.resolve();
+          return new Promise((resolve) => waiters.push({ k, resolve }));
+        },
+      };
+    }
+
+    interface ProbeHooks {
+      /** Antes do XREAD real da n-ésima chamada; lançar simula uma falha transitória. */
+      before?: (n: number) => Promise<void> | void;
+      /** Depois do XREAD real e antes de devolvê-lo ao tail: a janela entre duas leituras. */
+      after?: (n: number, reply: unknown) => Promise<void> | void;
+    }
+
+    /** Instrumenta a conexão bloqueante (duplicate) que o tail usa para o XREAD. */
+    function probeTail(hooks: ProbeHooks = {}) {
+      const conns: Redis[] = [];
+      const cursors: string[] = [];
+      const issued = counter();
+      const completed = counter();
+      const realDuplicate = redis.duplicate.bind(redis);
+      vi.spyOn(redis, "duplicate").mockImplementation((...args) => {
+        const conn = realDuplicate(...args);
+        conns.push(conn);
+        const target = conn as unknown as { xread: (...a: unknown[]) => Promise<unknown> };
+        const realXread = target.xread.bind(conn);
+        target.xread = async (...a: unknown[]) => {
+          const n = issued.n + 1;
+          cursors.push(String(a[a.length - 1]));
+          issued.bump();
+          try {
+            await hooks.before?.(n);
+            const reply = await realXread(...a);
+            await hooks.after?.(n, reply);
+            return reply;
+          } finally {
+            completed.bump();
+          }
+        };
+        return conn;
+      });
+      return { conns, cursors, issued, completed };
+    }
+
+    function collector() {
+      const seen: StreamEvent[] = [];
+      const reached = counter();
+      return {
+        seen,
+        onEvent: (e: StreamEvent) => {
+          seen.push(e);
+          reached.bump();
+        },
+        count: (k: number) => reached.reached(k),
+      };
+    }
+
+    function start(opts: ConstructorParameters<typeof StreamsService>[1] = {}) {
+      const logger = { error: vi.fn(), warn: vi.fn() };
+      const tailSvc = new StreamsService(redis, { tailBlockMs: 50, logger, ...opts });
+      const ac = new AbortController();
+      const c = collector();
+      const done = tailSvc.tail(stream, c.onEvent, ac.signal);
+      return {
+        logger,
+        c,
+        stop: async () => {
+          ac.abort();
+          await done;
+        },
+        ac,
+        done,
+      };
+    }
+
+    it("entrega eventos novos sem grupo e para no abort", async () => {
+      const probe = probeTail();
+      const t = start();
+      await probe.issued.reached(1);
+      const e = ev();
+      await svc.publish(stream, e);
+      await t.c.count(1);
+      await t.stop();
+      expect(t.c.seen).toEqual([e]);
+    });
+
+    it("RACE: evento publicado entre um BLOCK vazio e o próximo XREAD não se perde", async () => {
+      const e = ev();
+      let firstReply: unknown = "unset";
+      const probe = probeTail({
+        after: async (n, reply) => {
+          if (n !== 1) return;
+          firstReply = reply;
+          await svc.publish(stream, e); // a janela: XREAD #1 já voltou vazio, #2 ainda não saiu
+        },
+      });
+      const t = start();
+      await probe.completed.reached(3);
+      await t.stop();
+      expect(firstReply).toBeNull();
+      expect(t.c.seen).toEqual([e]);
+    });
+
+    it("RACE: evento publicado logo após tail() e antes do primeiro XREAD é entregue uma vez", async () => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const probe = probeTail({ before: (n) => (n === 1 ? gate : undefined) });
+      const t = start();
+      const e = ev();
+      await svc.publish(stream, e); // antes de qualquer XREAD do tail ter sido enviado
+      release();
+      await probe.completed.reached(3);
+      await t.stop();
+      expect(t.c.seen).toEqual([e]);
+    });
+
+    it("entrega, em ordem e uma só vez, eventos publicados ao longo de vários BLOCKs", async () => {
+      const probe = probeTail();
+      const t = start({ tailBlockMs: 30 });
+      await probe.issued.reached(1);
+      const published: StreamEvent[] = [];
+      for (let i = 0; i < 4; i++) {
+        await probe.completed.reached(i + 2); // pelo menos mais um BLOCK terminou
+        const e = ev();
+        published.push(e);
+        await svc.publish(stream, e);
+      }
+      await t.c.count(4);
+      await probe.completed.reached(probe.completed.n + 2); // mais leituras: nada duplica
+      await t.stop();
+      expect(t.c.seen).toEqual(published);
+      expect(probe.completed.n).toBeGreaterThanOrEqual(6);
+    });
+
+    it("stream vazio ou inexistente: começa em 0-0 e entrega o primeiro evento", async () => {
+      const probe = probeTail();
+      const t = start();
+      await probe.issued.reached(1);
+      const e = ev();
+      await svc.publish(stream, e);
+      await t.c.count(1);
+      await t.stop();
+      expect(probe.cursors[0]).toBe("0-0");
+      expect(t.c.seen).toEqual([e]);
+    });
+
+    it("stream com histórico: não reenvia o passado e parte do último id", async () => {
+      const history = [ev(), ev(), ev()];
+      let lastHistoryId = "";
+      for (const h of history) lastHistoryId = await svc.publish(stream, h);
+      const probe = probeTail();
+      const t = start();
+      await probe.issued.reached(1);
+      const e = ev();
+      await svc.publish(stream, e);
+      await t.c.count(1);
+      await probe.completed.reached(probe.completed.n + 2);
+      await t.stop();
+      expect(probe.cursors[0]).toBe(lastHistoryId);
+      expect(t.c.seen).toEqual([e]);
+    });
+
+    it("erro de leitura: espera e repete do MESMO cursor (nunca volta a $), com log { msg, err, stream }", async () => {
+      const e0 = ev();
+      const e1 = ev();
+      let id0 = "";
+      const probe = probeTail({
+        before: async (n) => {
+          if (n === 1) {
+            id0 = await svc.publish(stream, e0);
+            throw new Error("blip 1");
+          }
+          if (n === 3) {
+            await svc.publish(stream, e1);
+            throw new Error("blip 3");
+          }
+        },
+      });
+      const t = start();
+      await t.c.count(2);
+      await t.stop();
+      expect(t.c.seen).toEqual([e0, e1]);
+      expect(probe.cursors.slice(0, 4)).toEqual(["0-0", "0-0", id0, id0]);
+      expect(probe.cursors).not.toContain("$");
+      expect(t.logger.warn).toHaveBeenCalledTimes(2);
+      expect(t.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ msg: expect.any(String), err: expect.any(Error), stream }),
+      );
+    });
+
+    it("falha transitória ao resolver o id inicial é repetida e nunca cai em $", async () => {
+      vi.spyOn(redis, "xrevrange").mockRejectedValueOnce(new Error("blip no XREVRANGE"));
+      const probe = probeTail();
+      const t = start();
+      await probe.issued.reached(1);
+      const e = ev();
+      await svc.publish(stream, e);
+      await t.c.count(1);
+      await t.stop();
+      expect(probe.cursors[0]).toBe("0-0");
+      expect(t.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error), stream }),
+      );
+    });
+
+    it("entrada inválida é registrada e ignorada; o cursor avança e o loop segue", async () => {
+      const probe = probeTail();
+      const t = start();
+      await probe.issued.reached(1);
+      await redis.xadd(stream, "*", "data", "{not json");
+      const good = ev();
+      const goodId = await svc.publish(stream, good);
+      await t.c.count(1);
+      await probe.issued.reached(probe.issued.n + 1);
+      await t.stop();
+      expect(t.c.seen).toEqual([good]);
+      expect(probe.cursors[probe.cursors.length - 1]).toBe(goodId);
+      expect(t.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ stream }));
+    });
+
+    it("para prontamente com o abort durante o BLOCK e desconecta a conexão bloqueante", async () => {
+      const probe = probeTail();
+      const t = start({ tailBlockMs: 5000 });
+      await probe.issued.reached(1);
+      const t0 = Date.now();
+      await t.stop();
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(probe.conns[0]?.status).toBe("end");
+    });
+
+    it("abort antes de iniciar retorna sem abrir conexão", async () => {
+      const probe = probeTail();
+      const ac = new AbortController();
+      ac.abort();
+      await svc.tail(stream, () => undefined, ac.signal);
+      expect(probe.conns).toHaveLength(0);
+    });
   });
 
   describe("falhas transitórias do Redis durante o processamento", () => {
@@ -235,10 +507,10 @@ describe("StreamsService", () => {
       expect(c.state()).toBe("pending");
       await c.stop();
       expect(c.state()).toBe("resolved");
-      const withStack = c.logger.error.mock.calls.find((args) =>
-        args.some((a) => typeof a === "string" && a.includes("blip no DEL") && a.includes("at ")),
-      );
-      expect(withStack).toBeDefined();
+      expect(loggedError(c.logger.error.mock.calls, "blip no DEL")).toMatchObject({
+        stream: "jobs",
+        entryId: expect.any(String),
+      });
     });
 
     it("XADD da DLQ falhando de verdade (WRONGTYPE) deixa a entrada pendente até a DLQ voltar", async () => {
@@ -249,11 +521,7 @@ describe("StreamsService", () => {
         throw new Error("sempre falha");
       });
       await svc.publish("jobs", ev());
-      await until(() =>
-        c.logger.error.mock.calls.some(
-          (a) => String(a[0]).includes("WRONGTYPE") && String(a[1]).includes("at "),
-        ),
-      );
+      await until(() => loggedError(c.logger.error.mock.calls, "WRONGTYPE") !== undefined);
       // Algumas tentativas de reprocessar a movimentação, sempre falhando: nada é confirmado.
       await new Promise((r) => setTimeout(r, 500));
       expect(c.state()).toBe("pending");

@@ -77,3 +77,9 @@ export async function migratorSql<R extends pg.QueryResultRow = pg.QueryResultRo
     return ctx ? inRlsTransaction(c, ctx, run) : run();
   });
 }
+
+/** Valor presente ou falha clara (os testes não usam `!`). */
+export function must<T>(value: T | undefined | null, what = "valor"): T {
+  if (value === undefined || value === null) throw new Error(`${what} ausente`);
+  return value;
+}

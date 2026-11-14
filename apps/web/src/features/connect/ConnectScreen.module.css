@@ -1,0 +1,21 @@
+.wrap {
+  display: grid;
+  min-height: 100vh;
+  padding: 16px;
+  place-items: center;
+}
+
+.card {
+  max-width: 480px;
+  width: 100%;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.help {
+  font-size: 0.9rem;
+}

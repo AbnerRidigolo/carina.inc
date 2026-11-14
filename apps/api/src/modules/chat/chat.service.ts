@@ -421,7 +421,9 @@ export class ChatService implements OnModuleDestroy {
     }
     const plan = acc.plan ?? state.plan;
     if (!plan) throw new Error("Turno do orquestrador terminou sem plano");
-    const answer = acc.answer ?? state.answer ?? "";
+    // O `answer` FINAL do estado vence o do evento do Navigator: o nó executor pode acrescentar a
+    // explicação de uma ordem que não pôde ser proposta (falha do preço de servidor, R-M8).
+    const answer = state.answer ?? acc.answer ?? "";
 
     let approval: ApprovalView | undefined;
     let status: ChatTurnStatus = "completed";

@@ -1,8 +1,9 @@
 /**
- * Executor: converte o pedido do cliente numa `ActionProposal`. NUNCA executa nada: `request` só
- * registra a solicitação na inbox (`InboxService.request`), que classifica o risco (ação
- * desconhecida é IRREVERSÍVEL) e pausa até a aprovação humana; a execução acontece depois, em
- * `InboxService.executeOnce`.
+ * Executor: converte o pedido do cliente numa `ActionProposal`. NUNCA executa nem registra nada:
+ * quem leva a proposta à inbox é o nó `executor` do grafo (orchestrator/graph.ts), que aplica o
+ * preço de servidor do `place_trade` antes do `InboxService.request` (spec 5.5); a execução
+ * acontece depois, em `InboxService.executeOnce`. Não há outro caminho da proposta até a inbox,
+ * para que o valor afirmado pelo modelo nunca vire a base da taxa de um ativo cotável.
  *
  * A saída do modelo é não confiável: além do schema (`ActionProposalSchema`, com `MoneySchema` em
  * `valueBrl`), checamos nome da ação (1 a 128), valor não negativo e, para `place_trade`, o
@@ -19,9 +20,8 @@ import { z } from "zod";
 import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
 import { Prisma } from "../../generated/prisma/client.js";
 import { extractValueBrl, payloadNotionalBrl } from "../billing/pricing.js";
-import type { InboxService } from "../inbox/inbox.service.js";
 import type { ModelFactory } from "../llm/model-factory.js";
-import { type AgentInput, type AgentLogger, LlmAgent } from "./agent.js";
+import { type AgentLogger, LlmAgent } from "./agent.js";
 import { checkMoney } from "./output-limits.js";
 import { PROMPTS } from "./prompts.js";
 
@@ -89,11 +89,7 @@ export function refineProposal(p: ActionProposal): ActionProposal {
 }
 
 export class ExecutorAgent extends LlmAgent<ActionProposal> {
-  constructor(
-    models: ModelFactory,
-    logger: AgentLogger,
-    private readonly inbox: Pick<InboxService, "request">,
-  ) {
+  constructor(models: ModelFactory, logger: AgentLogger) {
     super(models, logger, {
       name: "executor",
       role: "reasoning",
@@ -101,23 +97,5 @@ export class ExecutorAgent extends LlmAgent<ActionProposal> {
       schema: ActionProposalSchema,
       refine: refineProposal,
     });
-  }
-
-  /** Propõe e envia à inbox (aprovação humana para o que não for leitura/reversível). */
-  async request(
-    input: AgentInput,
-    threadId: string,
-    turn = 1,
-  ): Promise<{ proposal: ActionProposal; approvalId: string; created: boolean }> {
-    const proposal = (await this.run(input)) as ActionProposal;
-    const { approvalId, created } = await this.inbox.request({
-      threadId,
-      turn,
-      agent: "executor",
-      action: proposal.action,
-      payload: proposal.payload,
-      valueBrl: proposal.valueBrl,
-    });
-    return { proposal, approvalId, created };
   }
 }

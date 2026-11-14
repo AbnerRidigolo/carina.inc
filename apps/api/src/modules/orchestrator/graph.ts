@@ -24,8 +24,9 @@
  *   (c) se já existe (reexecução do nó no mesmo turno), usa o payload e o valor gravados e NÃO cota
  *   de novo (a primeira cotação do turno vale); (d) senão `MarketService.priceFor` + `priceTrade`
  *   e `request` com o payload enriquecido (`idPayload` = proposta do modelo) e o valor do servidor.
- *   Falha da cotação (qualquer erro) → nenhuma aprovação, `agentFailure()` e o código
- *   (`price_unavailable`, `price_stale`, `unknown_asset`) em `errors.executor`. O valor do modelo
+ *   Falha da cotação (qualquer erro) → nenhuma aprovação, o código (`price_unavailable`,
+ *   `price_stale`, `unknown_asset`) em `errors.executor`, `agentFailure()` com `reason`/`message`
+ *   e a frase fixa do código (`PRICE_FAILURE_MESSAGES`) no fim do `answer` final. O valor do modelo
  *   nunca chega à aprovação (nem à taxa) de um ativo cotável.
  * - `approval`: `interrupt({ approvalId })`. É um nó SEPARADO de propósito: na retomada o LangGraph
  *   reexecuta o nó interrompido desde o começo; se a proposta (LLM, não determinístico) estivesse
@@ -124,6 +125,19 @@ const EMPTY_KNOWLEDGE: SearchResult = { chunks: [], entities: [], neighbors: [] 
 /** Código curto e fixo para `errors[...]` (nunca a mensagem do erro, que pode ecoar dados). */
 const errorCode = (err: unknown): string =>
   err instanceof AllProvidersFailedError ? "all_providers_failed" : "failed";
+
+/**
+ * Frase FIXA por código de falha do preço de servidor (ruling R-M8, spec 5.5 item 4): fecha o
+ * `answer` do turno e vai no resultado do executor. Nunca ecoa nada do modelo, do provedor nem do
+ * que o cliente digitou (nem o símbolo).
+ */
+export const PRICE_FAILURE_MESSAGES: Readonly<Record<MarketPriceErrorCode, string>> = {
+  unknown_asset: "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.",
+  price_unavailable:
+    "Não foi possível propor a ordem: a cotação do ativo está indisponível no momento. Tente novamente em instantes.",
+  price_stale:
+    "Não foi possível propor a ordem: a cotação disponível está desatualizada. Tente novamente em instantes.",
+};
 
 /** Código da falha do preço de servidor; erro inesperado (não `MarketPriceError`) → indisponível. */
 const priceErrorCode = (err: unknown): MarketPriceErrorCode =>
@@ -336,9 +350,15 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
               err,
               threadId,
             });
+            // A síntese já rodou (vem antes do executor): a explicação é acrescentada ao fim do
+            // `answer` final do turno (o texto já streamado não muda), e o resultado do executor
+            // leva o código e a mesma frase para o painel de agentes. Nenhuma aprovação.
+            const reason = priceErrorCode(err);
+            const message = PRICE_FAILURE_MESSAGES[reason];
             return {
-              results: { executor: agentFailure() },
-              errors: { executor: priceErrorCode(err) },
+              results: { executor: { ...agentFailure(), reason, message } },
+              errors: { executor: reason },
+              answer: state.answer ? `${state.answer}\n\n${message}` : message,
             };
           }
           idPayload = proposal.payload;

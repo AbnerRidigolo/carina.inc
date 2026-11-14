@@ -25,7 +25,14 @@ const ExecutorResultSchema = z.object({
   rationale: z.string().optional(),
   status: z.string().optional(),
 });
-const FailureSchema = z.object({ failed: z.literal(true) });
+/**
+ * Falha do agente. `message` (opcional) é a frase fixa do servidor para a ordem que não pôde ser
+ * proposta (falha do preço de servidor); entra como texto, como todo o resto.
+ */
+const FailureSchema = z.object({
+  failed: z.literal(true),
+  message: z.string().min(1).max(300).optional(),
+});
 const TextSchema = z.string();
 
 const EXECUTOR_STATUS: Record<string, string> = {
@@ -40,8 +47,13 @@ const EXECUTOR_STATUS: Record<string, string> = {
  * não é renderizado (aviso no lugar).
  */
 function Result({ agent, result }: { agent: AgentName; result: unknown }) {
-  if (FailureSchema.safeParse(result).success) {
-    return <p className={ui.muted}>Este agente não conseguiu concluir a análise.</p>;
+  const failure = FailureSchema.safeParse(result);
+  if (failure.success) {
+    return (
+      <p className={ui.muted}>
+        {failure.data.message ?? "Este agente não conseguiu concluir a análise."}
+      </p>
+    );
   }
   if (agent === "predictor") {
     const parsed = CashFlowForecastSchema.safeParse(result);

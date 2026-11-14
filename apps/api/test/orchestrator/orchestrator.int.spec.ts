@@ -466,7 +466,7 @@ describe("Orquestrador (int)", () => {
         const state = await as(A, () => svc(t1).finalState(threadId));
         expect(state.pending).toBeNull();
         expect(state.errors["executor"]).toBe(code);
-        expect(state.results["executor"]).toEqual(agentFailure());
+        expect(state.results["executor"]).toMatchObject({ ...agentFailure(), reason: code });
         expect(placeTrade).not.toHaveBeenCalled();
       },
     );

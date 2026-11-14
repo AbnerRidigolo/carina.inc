@@ -134,7 +134,7 @@ function setup(responders: Record<string, MockResponder> = {}) {
   };
   const market = { priceFor: vi.fn(async (symbol: string) => quoteOf(symbol)) };
   const agentLogger = { warn: vi.fn(), error: vi.fn() };
-  const agents = new AgentRegistry(models, inbox as never, agentLogger);
+  const agents = new AgentRegistry(models, agentLogger);
   const knowledge = { search: vi.fn(async (): Promise<SearchResult> => KNOWLEDGE) };
   const executed = vi.fn(async (payload: Record<string, unknown>) => ({ ok: true, payload }));
   const executors = { get: vi.fn((action: string) => (action ? executed : undefined)) };
@@ -182,6 +182,15 @@ const turn = (svc: OrchestratorService, threadId: string, question: string) =>
   asClient(() => collect(svc.stream({ threadId, question })));
 
 const types = (events: ChatEvent[]) => events.map((e) => e.type);
+
+/** Frases fixas da falha de preço (ruling R-M8), sem eco do modelo nem do provedor. */
+const PRICE_FAILURE_TEXT: Record<MarketPriceErrorCode, string> = {
+  unknown_asset: "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.",
+  price_unavailable:
+    "Não foi possível propor a ordem: a cotação do ativo está indisponível no momento. Tente novamente em instantes.",
+  price_stale:
+    "Não foi possível propor a ordem: a cotação disponível está desatualizada. Tente novamente em instantes.",
+};
 
 function must<V>(v: V | undefined): V {
   if (v === undefined) throw new Error("valor esperado");
@@ -756,8 +765,23 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
           expect(s.inbox.request).not.toHaveBeenCalled();
           const state = await asClient(() => svc.finalState(threadId));
           expect(state.pending).toBeNull();
-          expect(state.results["executor"]).toEqual(agentFailure());
+          expect(state.results["executor"]).toEqual({
+            ...agentFailure(),
+            reason: code,
+            message: PRICE_FAILURE_TEXT[code],
+          });
           expect(state.errors["executor"]).toBe(code);
+          // R-M8: a frase fixa do código fecha o `answer` final; o texto já streamado não muda.
+          const streamed = events.flatMap((e) => (e.type === "token" ? [e.text] : [])).join("");
+          expect(streamed.length).toBeGreaterThan(0);
+          expect(state.answer).toBe(`${streamed}\n\n${PRICE_FAILURE_TEXT[code]}`);
+          expect(PRICE_FAILURE_TEXT[code]).not.toContain("PETR4");
+          // O evento do executor leva o código e a frase para o painel de agentes.
+          expect(events).toContainEqual({
+            type: "agent_result",
+            agent: "executor",
+            result: { failed: true, reason: code, message: PRICE_FAILURE_TEXT[code] },
+          });
           expect(s.inbox.executeOnce).not.toHaveBeenCalled();
           // Log só com ids e o erro, nunca o payload.
           const logged = [...s.logger.warn.mock.calls, ...s.logger.error.mock.calls].map(
@@ -777,7 +801,24 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
         const state = await asClient(() => svc.finalState(threadId));
         expect(state.pending).toBeNull();
         expect(state.errors["executor"]).toBe("price_unavailable");
-        expect(state.results["executor"]).toEqual(agentFailure());
+        expect(state.results["executor"]).toMatchObject({
+          failed: true,
+          reason: "price_unavailable",
+        });
+        expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.price_unavailable)).toBe(true);
+        expect(state.answer).not.toContain("VALE3");
+      });
+
+      it("navigator sem resposta (contingência): a frase da falha de preço ainda fecha o answer", async () => {
+        s = setup({ navigator: () => "" });
+        svc = s.make();
+        s.market.priceFor.mockRejectedValueOnce(new MarketPriceError("unknown_asset"));
+        const threadId = newThread();
+        await turn(svc, threadId, "compre 100 ações de ZZZZ3");
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.answer).toMatch(/^Não consegui/);
+        expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.unknown_asset)).toBe(true);
+        expect(state.answer).not.toContain("ZZZZ3");
       });
 
       it("aprovação já existente para o id (mesmo turno): usa o payload e o valor gravados e não cota", async () => {

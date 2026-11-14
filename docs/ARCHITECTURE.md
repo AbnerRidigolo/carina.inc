@@ -1,7 +1,9 @@
 # Arquitetura — CARINA (versão TypeScript, fase 1)
 
 Este documento descreve o que está construído em `apps/`, `packages/` e `docker-compose.yml`. A
-visão geral, a demo e as garantias com os testes que as provam estão no [README](../README.md). O
+visão geral e a demo estão no [README](../README.md). As decisões, os defeitos do Python corrigidos
+e as garantias com os testes que as provam estão em
+[DECISOES-E-GARANTIAS.md](DECISOES-E-GARANTIAS.md). O
 desenho original e as razões das decisões estão no
 [spec da migração](superpowers/specs/2026-11-11-migracao-typescript-design.md). A versão Python
 antiga está em `legacy/python`.

@@ -34,6 +34,7 @@ function seedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     MIGRATION_DATABASE_URL: migratorUrl(),
     REDIS_URL: redisDbUrl(REDIS_DB),
     LLM_MODE: "mock",
+    MARKET_MODE: "mock",
     LOG_LEVEL: "silent",
     DEMO_APP_KEY: "",
     DEMO_APPROVER_KEY: "",

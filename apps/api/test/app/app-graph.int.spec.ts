@@ -109,6 +109,7 @@ describe("grafo de módulos de produção", () => {
         "HealthController",
         "InboxController",
         "IngestionController",
+        "MarketController",
         "WatchtowerController",
       ].sort(),
     );

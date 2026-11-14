@@ -299,7 +299,7 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Ticket WS de uso único**; vencido ou malformado → 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("ticket reutilizado…") |
 | **Chave revogada, escopo removido ou tenant suspenso com o socket aberto**: o próximo turno é recusado e o socket fecha; um socket **ocioso** é revalidado a cada heartbeat, para de receber o push da inbox e fecha com 4401 | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("Chat WebSocket: revalidação da chave e tempo máximo de vida" e "revogação com o socket ocioso") |
 | A **mesma ordem pedida de novo** no mesmo thread é um pedido novo (id da aprovação inclui o turno): nova aprovação pendente, executada só depois da decisão | [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("a mesma ordem repetida no mesmo thread") |
-| Aprovação `approved` **órfã** (o thread nunca esperou por ela) termina em `needs_review`, auditada, sem executar e sem republicação infinita | [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("aprovação aprovada órfã") |
+| Aprovação `approved` **órfã** (o thread não espera por ela, conferido no checkpoint pelo worker) termina em `needs_review`, auditada, sem executar. Uma aprovação **esperada** nunca é fechada pela reconciliação: depois de 1 h segue republicada com backoff e aviso, e executa quando o worker volta. Uma espera presa por execução já terminal é curada no próximo turno, sem executar | [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) ("aprovação aprovada órfã", "aprovada e ESPERADA pelo thread além de 1 h", "execução já terminal (needs_review)", "corrida: fechamento de órfã…") |
 | O broadcast da inbox só chega ao socket do **mesmo tenant e cliente** | [`ws.e2e.spec.ts`](apps/api/test/chat/ws.e2e.spec.ts) ("broadcast da inbox") |
 | **Streams**: retentativa, DLQ após 5 entregas, dedup por `eventId`, entrada inválida não derruba o loop | [`streams.int.spec.ts`](apps/api/test/redis/streams.int.spec.ts), [`resume.int.spec.ts`](apps/api/test/orchestrator/resume.int.spec.ts) |
 | **Ingestão idempotente**: o mesmo lote duas vezes não duplica; lote cobrado ⇔ lote gravado | [`ingestion.e2e.spec.ts`](apps/api/test/data-ingestion/ingestion.e2e.spec.ts) |
@@ -371,9 +371,9 @@ Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos 
 - **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401;
   sockets abertos fecham no próximo turno ou heartbeat), mas hoje só se altera direto no banco.
 - **O valor que define a taxa de execução é afirmado pelo modelo.** O `valueBrl` da proposta vem
-  da saída do LLM. Ele é validado (formato, sinal, limite de `numeric(18,2)`) e, quando o payload
-  traz como conferir (valor explícito, ou quantidade × preço unitário), tem de bater, senão a
-  proposta é recusada. O aprovador vê o valor junto com o payload antes de decidir. Não há fonte
+  da saída do LLM. Ele é validado (formato, sinal, limite de `numeric(18,2)`) e, nas ações que
+  movem dinheiro (`place_trade`, `transfer`, `rebalance`), quando o payload traz como conferir
+  (valor explícito, ou quantidade × preço unitário), tem de bater, senão a proposta é recusada. O aprovador vê o valor junto com o payload antes de decidir. Não há fonte
   de preço no servidor: na fase 2 o valor deve vir de uma cotação do servidor, não do modelo.
 - **CSP do web**: `connect-src 'self'`. Pela CSP Level 3, `'self'` cobre o `ws:`/`wss:` da mesma
   origem; verificamos isso no Chromium. Um navegador antigo que não siga a CSP3 bloquearia o

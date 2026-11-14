@@ -176,7 +176,8 @@ flowchart LR
   payload): idempotente entre as tentativas do mesmo turno, e a mesma ordem pedida em outro turno
   vira outra aprovação. O `turn` é um contador do estado, incrementado pelo `classify`. A chamada
   de modelo fica fora do nó que pausa. O `valueBrl` da proposta é afirmado pelo modelo; quando o
-  payload traz um valor explícito ou quantidade × preço unitário, ele tem de bater.
+  payload de uma ação que move dinheiro (`place_trade`, `transfer`, `rebalance`) traz um valor
+  explícito ou quantidade × preço unitário, ele tem de bater.
 - **`approval`** chama `interrupt({ approvalId })`. Na retomada, o valor do `resume` é só um
   sinal: o nó relê a aprovação no banco e só chama `executeOnce` se ela estiver `approved`.
 - O estado por thread fica no `PostgresSaver`, no schema `langgraph`, criado pela migração 0005.
@@ -185,7 +186,9 @@ flowchart LR
   cada chamada ao modelo usa as últimas 12.
 - Um turno por thread de cada vez: um lock Redis por thread dá 409 `thread_busy`. Um thread que
   aguarda aprovação pendente dá 409. Uma espera já resolvida no banco (rejeitada ou vencida com o
-  `resume` perdido) é curada no próximo turno.
+  `resume` perdido, ou aprovada com execução já terminal: `succeeded`, `failed`, `needs_review`) é
+  curada no próximo turno pelo caminho do `resume`, sem executar nada. Aprovada sem execução dá 409
+  "sendo retomada"; com execução `started`, 409 "em andamento".
 
 ## 8. Aprovação e execução única (`inbox`)
 
@@ -206,7 +209,9 @@ flowchart LR
 4. **`ReconciliationJob`** (a cada 60 s, lock por tick):
    - vence as solicitações pendentes expiradas e retoma o grafo como rejeitado;
    - republica `resume` para aprovações `approved` sem `executed_action` há mais de 2 min; depois
-     de 1 h sem execução, fecha a aprovação como órfã em vez de republicar (sem laço infinito);
+     de 1 h, com backoff de 15 min por aprovação e um aviso sem payload. A reconciliação nunca
+     fecha uma aprovação sozinha (não sabe se o thread a espera); a órfã verdadeira é fechada pelo
+     worker ao receber o republish;
    - marca `started` há mais de 5 min como `needs_review`, que **nunca é reexecutado**.
 
    Os tenants vêm de `active_tenant_ids()` (`SECURITY DEFINER`) e cada um é processado sob RLS

@@ -16,6 +16,7 @@ const TEST_DB = redisDbOf("market/market-service.int.spec.ts");
 const T0 = Date.parse("2026-11-13T14:00:00.000Z");
 
 const ENV = {
+  NODE_ENV: "test" as const,
   MARKET_MODE: "live" as const,
   MARKET_QUOTE_MAX_AGE_MS: 300_000,
   MARKET_CLOSED_MAX_AGE_DAYS: 5,
@@ -71,7 +72,7 @@ describe("MarketService (Redis real)", () => {
     const { service, fetchQuotes, advance } = build(redis);
     await service.quotes(["PETR4"]);
     expect(fetchQuotes).toHaveBeenCalledTimes(1);
-    const ttl = await redis.pttl("market:quote:PETR4");
+    const ttl = await redis.pttl("market:live:quote:PETR4");
     expect(ttl).toBeGreaterThan(0);
 
     advance(59_999);
@@ -83,15 +84,15 @@ describe("MarketService (Redis real)", () => {
     expect(fetchQuotes).toHaveBeenCalledTimes(2);
   });
 
-  it('valor corrompido (SET market:quote:PETR4 "{lixo") faz a busca ir ao provedor e regrava', async () => {
-    await redis.set("market:quote:PETR4", "{lixo");
+  it('valor corrompido (SET market:live:quote:PETR4 "{lixo") faz a busca ir ao provedor e regrava', async () => {
+    await redis.set("market:live:quote:PETR4", "{lixo");
     const { service, fetchQuotes, logger } = build(redis);
     const quote = await service.priceFor("PETR4");
     expect(quote.price).toBe("30.00");
     expect(fetchQuotes).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalled();
 
-    const stored = JSON.parse((await redis.get("market:quote:PETR4")) ?? "null") as {
+    const stored = JSON.parse((await redis.get("market:live:quote:PETR4")) ?? "null") as {
       value: unknown;
       fetchedAt: number;
     };

@@ -17,7 +17,12 @@ const FRIDAY_OPEN = Date.parse("2026-11-13T14:00:00.000Z");
 /** Sábado 14/11/2026 às 12:00 em São Paulo (mercado fechado). */
 const SATURDAY_NOON = Date.parse("2026-11-14T15:00:00.000Z");
 
-function rawQuote(symbol: string, updatedAtMs: number, price = "30.00"): RawQuote {
+function rawQuote(
+  symbol: string,
+  updatedAtMs: number,
+  price = "30.00",
+  source: RawQuote["source"] = "brapi",
+): RawQuote {
   return {
     symbol,
     name: symbol,
@@ -28,9 +33,12 @@ function rawQuote(symbol: string, updatedAtMs: number, price = "30.00"): RawQuot
     volume: "1000",
     currency: "BRL",
     updatedAt: new Date(updatedAtMs).toISOString(),
-    source: "brapi",
+    source,
   };
 }
+
+/** Chave da cotação de PETR4 no cache do modo live (o modo entra no prefixo). */
+const LIVE_QUOTE_KEY = "market:live:quote:PETR4";
 
 class FakeRedis {
   readonly store = new Map<string, string>();
@@ -43,12 +51,14 @@ class FakeRedis {
 
 interface SetupOptions {
   mode?: "live" | "mock";
+  nodeEnv?: "development" | "test" | "production";
   now?: number;
   quotes?: (symbols: string[]) => Promise<RawQuote[]>;
-  redis?: { get: (key: string) => Promise<string | null>; set: (...args: unknown[]) => unknown };
+  redis?: { get: (key: string) => Promise<string | null>; set: (...args: never[]) => unknown };
 }
 
 function setup(opts: SetupOptions = {}) {
+  const mode = opts.mode ?? "live";
   let now = opts.now ?? FRIDAY_OPEN;
   const clock = () => now;
   const advance = (ms: number) => {
@@ -59,7 +69,9 @@ function setup(opts: SetupOptions = {}) {
       opts.quotes ??
         ((symbols: string[]) =>
           Promise.resolve(
-            symbols.filter((s) => s !== "XXXX3").map((s) => rawQuote(s, clock() - 1000)),
+            symbols
+              .filter((s) => s !== "XXXX3")
+              .map((s) => rawQuote(s, clock() - 1000, "30.00", mode === "mock" ? "mock" : "brapi")),
           )),
     ),
     fetchHistory: vi.fn((): Promise<HistoricalBar[]> =>
@@ -85,7 +97,8 @@ function setup(opts: SetupOptions = {}) {
   const redis = opts.redis ?? new FakeRedis();
   const logger: MarketLogger = { warn: vi.fn() };
   const env = {
-    MARKET_MODE: opts.mode ?? ("live" as const),
+    NODE_ENV: opts.nodeEnv ?? ("test" as const),
+    MARKET_MODE: mode,
     MARKET_QUOTE_MAX_AGE_MS: 300_000,
     MARKET_CLOSED_MAX_AGE_DAYS: 5,
   };
@@ -103,7 +116,7 @@ function setup(opts: SetupOptions = {}) {
 /** Grava no cache falso uma cotação com fetchedAt = agora (cache ainda válido pelo CLOCK). */
 function seedCache(redis: unknown, quote: RawQuote, fetchedAt = FRIDAY_OPEN): void {
   (redis as FakeRedis).store.set(
-    `market:quote:${quote.symbol}`,
+    `market:live:quote:${quote.symbol}`,
     JSON.stringify({ value: quote, fetchedAt }),
   );
 }
@@ -208,7 +221,7 @@ describe("MarketService.quotes", () => {
 
     const store = (redis as FakeRedis).store;
     store.set(
-      "market:quote:PETR4",
+      LIVE_QUOTE_KEY,
       JSON.stringify({ value: rawQuote("PETR4", FRIDAY_OPEN), fetchedAt: FRIDAY_OPEN + 10 * MIN }),
     );
     await service.quotes(["PETR4"]);
@@ -219,12 +232,12 @@ describe("MarketService.quotes", () => {
     const { service, provider, redis, logger } = setup();
     const store = (redis as FakeRedis).store;
     store.set(
-      "market:quote:PETR4",
+      LIVE_QUOTE_KEY,
       JSON.stringify({ value: rawQuote("VALE3", FRIDAY_OPEN), fetchedAt: FRIDAY_OPEN }),
     );
     await service.quotes(["PETR4"]);
     store.set(
-      "market:quote:PETR4",
+      LIVE_QUOTE_KEY,
       JSON.stringify({ value: { ...rawQuote("PETR4", FRIDAY_OPEN), price: "-1" }, fetchedAt: 0 }),
     );
     await service.quotes(["PETR4"]);
@@ -347,7 +360,7 @@ describe("MarketService.priceFor", () => {
       quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
     });
     (redis as FakeRedis).store.set(
-      "market:quote:PETR4",
+      LIVE_QUOTE_KEY,
       JSON.stringify({
         value: rawQuote("PETR4", FRIDAY_OPEN - MIN, "29.00"),
         fetchedAt: FRIDAY_OPEN - MIN,
@@ -362,7 +375,7 @@ describe("MarketService.priceFor", () => {
     const { service } = setup({
       mode: "mock",
       now: SATURDAY_NOON,
-      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, SATURDAY_NOON))),
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, SATURDAY_NOON, "30.00", "mock"))),
     });
     expect((await service.priceFor("PETR4")).marketState).toBe("open");
   });
@@ -405,7 +418,7 @@ describe("MarketService.priceFor", () => {
 
   it("valor corrompido no cache: acerto perdido, preço do provedor", async () => {
     const { service, provider, redis, logger } = setup();
-    (redis as FakeRedis).store.set("market:quote:PETR4", "{lixo");
+    (redis as FakeRedis).store.set(LIVE_QUOTE_KEY, "{lixo");
     await expect(service.priceFor("PETR4")).resolves.toMatchObject({ price: "30.00" });
     expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalled();
@@ -454,7 +467,7 @@ describe("MarketService.priceFor: cotação velha do cache é buscada de novo um
     expect(quote).toMatchObject({ price: "31.00", marketState: "open" });
     expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
     expect(provider.fetchQuotes).toHaveBeenCalledWith(["PETR4"]);
-    const stored = JSON.parse((redis as FakeRedis).store.get("market:quote:PETR4") ?? "null") as {
+    const stored = JSON.parse((redis as FakeRedis).store.get(LIVE_QUOTE_KEY) ?? "null") as {
       value: RawQuote;
     };
     expect(stored.value.price).toBe("31.00");
@@ -511,5 +524,87 @@ describe("MarketService.priceFor: cotação velha do cache é buscada de novo um
     const [quote] = await service.quotes(["PETR4"]);
     expect(quote?.price).toBe("29.00");
     expect(provider.fetchQuotes).not.toHaveBeenCalled();
+  });
+});
+
+describe("MarketService: mock e live não se misturam (cache por modo e origem conferida)", () => {
+  it("as chaves do cache levam o modo: market:<modo>:quote|history|macro", async () => {
+    for (const mode of ["live", "mock"] as const) {
+      const { service, redis } = setup({ mode });
+      await service.quotes(["PETR4"]);
+      await service.history("PETR4", "3mo");
+      await service.macro();
+      expect([...(redis as FakeRedis).store.keys()].sort()).toEqual([
+        `market:${mode}:history:PETR4:3mo`,
+        `market:${mode}:macro`,
+        `market:${mode}:quote:PETR4`,
+      ]);
+    }
+  });
+
+  it("um Redis compartilhado: a cotação gravada pelo mock não é lida pelo live", async () => {
+    const shared = new FakeRedis();
+    const mock = setup({ mode: "mock", redis: shared });
+    await mock.service.quotes(["PETR4"]);
+    const live = setup({
+      redis: shared,
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
+    });
+    const quote = await live.service.priceFor("PETR4");
+    expect(quote).toMatchObject({ price: "31.00", source: "brapi" });
+    expect(live.provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("cotação com source mock na chave do live: acerto perdido (busca no provedor), o preço mock nunca é usado", async () => {
+    const { service, provider, redis, logger } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
+    });
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 1000, "1.00", "mock"));
+    expect((await service.priceFor("PETR4")).price).toBe("31.00");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect((await service.quotes(["PETR4"]))[0]?.source).toBe("brapi");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ msg: expect.stringContaining("origem") }),
+    );
+  });
+
+  it.each([
+    ["live", "mock"],
+    ["mock", "brapi"],
+  ] as const)(
+    "modo %s com o provedor devolvendo source %s: priceFor → price_unavailable e nada vai para o cache",
+    async (mode, source) => {
+      const { service, redis } = setup({
+        mode,
+        quotes: (s) =>
+          Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "30.00", source))),
+      });
+      expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+      expect((redis as FakeRedis).store.size).toBe(0);
+    },
+  );
+
+  it("preço zero vindo do provedor não é gravado no cache", async () => {
+    const { service, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "0.00"))),
+    });
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+    expect((redis as FakeRedis).store.has(LIVE_QUOTE_KEY)).toBe(false);
+  });
+
+  it("boot com NODE_ENV=production e MARKET_MODE=mock: warn de preços simulados (sem recusar)", () => {
+    const prodMock = setup({ mode: "mock", nodeEnv: "production" });
+    prodMock.service.onModuleInit();
+    expect(prodMock.logger.warn).toHaveBeenCalledWith({
+      msg: "preços simulados (MARKET_MODE=mock)",
+    });
+    for (const opts of [
+      { mode: "mock", nodeEnv: "development" },
+      { mode: "live", nodeEnv: "production" },
+    ] as const) {
+      const other = setup(opts);
+      other.service.onModuleInit();
+      expect(other.logger.warn).not.toHaveBeenCalled();
+    }
   });
 });

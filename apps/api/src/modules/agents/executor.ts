@@ -8,6 +8,11 @@
  * `valueBrl`), checamos nome da ação (1 a 128), valor não negativo e, para `place_trade`, o
  * formato do payload. Falhou: `AllProvidersFailedError` (mensagem fixa, sem eco da saída do
  * modelo), o mesmo contrato das demais saídas ruins do modelo.
+ *
+ * Valor de `place_trade`: o servidor vence. Com o payload no formato (ativo cotável), o valor e o
+ * preço vêm da cotação (`priceTrade`, em `trade-pricing.ts`) e o que o modelo afirmou é descartado,
+ * então a conferência de coerência do `valueBrl` com o payload não se aplica a ele. Ela continua
+ * para `transfer` e `rebalance`, que não têm preço de servidor.
  */
 import { type ActionProposal, ActionProposalSchema, QuantitySchema } from "@carina/shared";
 import { z } from "zod";
@@ -24,7 +29,11 @@ export const MAX_ACTION_CHARS = 128;
 export const MAX_RATIONALE_CHARS = 2000;
 export const MAX_TRADE_QUANTITY = 1_000_000_000;
 
-const PlaceTradePayloadSchema = z
+/**
+ * Formato do payload de `place_trade` (lado, código do ativo da B3, quantidade positiva até
+ * `MAX_TRADE_QUANTITY`). Também validado por `priceTrade` antes de precificar.
+ */
+export const PlaceTradePayloadSchema = z
   .object({
     side: z.enum(["buy", "sell"]),
     assetCode: z.string().regex(/^[A-Z]{4}\d{1,2}$/),
@@ -49,9 +58,9 @@ export const MONEY_MOVING_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * O `valueBrl` é afirmado pelo modelo e é a base da taxa de execução. Não há fonte de preço no
- * servidor para derivá-lo (fase 2), então ele não é recalculado; mas, quando o próprio payload
- * permite conferir, a proposta incoerente é recusada:
+ * Em `transfer` e `rebalance`, o `valueBrl` é afirmado pelo modelo e é a base da taxa de execução.
+ * Não há fonte de preço no servidor para derivá-lo, então ele não é recalculado; mas, quando o
+ * próprio payload permite conferir, a proposta incoerente é recusada:
  * - valor explícito no payload (`value_brl`, `valueBrl`, `amount`, `value`, `valor`): tem de ser
  *   igual ao `valueBrl` (em módulo);
  * - quantidade × preço unitário (`unitPriceBrl`, `unit_price_brl`, `priceBrl`, `price`): tem de dar o
@@ -70,9 +79,11 @@ export function refineProposal(p: ActionProposal): ActionProposal {
   const action = p.action.trim();
   if (action.length === 0 || action.length > MAX_ACTION_CHARS) throw invalid();
   checkMoney(p.valueBrl, { nonNegative: true });
-  assertValueMatchesPayload(p);
-  if (action === "place_trade" && !PlaceTradePayloadSchema.safeParse(p.payload).success) {
-    throw invalid();
+  if (action === "place_trade") {
+    // O servidor vence: o valor vem da cotação (`priceTrade`), sem conferir o do modelo.
+    if (!PlaceTradePayloadSchema.safeParse(p.payload).success) throw invalid();
+  } else {
+    assertValueMatchesPayload(p);
   }
   return { ...p, action, rationale: p.rationale.slice(0, MAX_RATIONALE_CHARS) };
 }

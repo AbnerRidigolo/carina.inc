@@ -149,9 +149,18 @@ describe("fluxo completo: chat → aprovação → execução única, cobrada e 
 
     const inbox = await appKey.get(`/api/clients/${CLIENT}/inbox`);
     expect(inbox.status).toBe(200);
-    expect((inbox.body as unknown[]).map((v) => ApprovalViewSchema.parse(v).id)).toEqual([
-      approvalId,
-    ]);
+    const listed = (inbox.body as unknown[]).map((v) => ApprovalViewSchema.parse(v));
+    expect(listed.map((v) => v.id)).toEqual([approvalId]);
+    // O aprovador vê o preço de servidor (spec 5.5): R$ 30,00 do mock, não um valor do modelo.
+    expect(listed[0]).toMatchObject({
+      valueBrl: "3000.00",
+      payload: {
+        unitPriceBrl: "30.00",
+        notionalBrl: "3000.00",
+        priceSource: "mock",
+        marketState: "open",
+      },
+    });
   });
 
   it("2. a chave app não tem inbox:decide: 403 e nada é executado", async () => {

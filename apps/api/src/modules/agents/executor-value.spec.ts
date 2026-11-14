@@ -18,6 +18,15 @@ const proposal = (over: Partial<ActionProposal>): ActionProposal => ({
 });
 
 describe("refineProposal: coerência do valueBrl com o payload", () => {
+  it("ação que não move dinheiro (create_alert) não é conferida: `price` é o limite do alerta", () => {
+    const alert = proposal({
+      action: "create_alert",
+      payload: { assetCode: "PETR4", price: 42.5, value: 10, description: "avise" },
+      valueBrl: "0.00",
+    });
+    expect(refineProposal(alert).valueBrl).toBe("0.00");
+  });
+
   it("sem dados no payload para conferir: aceita (o valor fica como afirmado)", () => {
     expect(refineProposal(proposal({ payload: { to: "x" } })).valueBrl).toBe("100.00");
     const trade = proposal({

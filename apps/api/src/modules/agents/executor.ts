@@ -38,6 +38,17 @@ const PlaceTradePayloadSchema = z
 const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
 
 /**
+ * Ações que movem dinheiro (as execuções com executor registrado: ordem, transferência e
+ * rebalanceamento). Só nelas o `valueBrl` é a base da taxa e vale conferir o payload; em outras
+ * ações chaves como `price`/`value` têm outro sentido (ex.: o limite de um `create_alert`).
+ */
+export const MONEY_MOVING_ACTIONS: ReadonlySet<string> = new Set([
+  "place_trade",
+  "transfer",
+  "rebalance",
+]);
+
+/**
  * O `valueBrl` é afirmado pelo modelo e é a base da taxa de execução. Não há fonte de preço no
  * servidor para derivá-lo (fase 2), então ele não é recalculado; mas, quando o próprio payload
  * permite conferir, a proposta incoerente é recusada:
@@ -47,6 +58,7 @@ const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
  *   `valueBrl` (2 casas, meio para cima); preço presente mas não numérico também é recusado.
  */
 function assertValueMatchesPayload(p: ActionProposal): void {
+  if (!MONEY_MOVING_ACTIONS.has(p.action.trim())) return;
   const declared = new Prisma.Decimal(p.valueBrl);
   const explicit = extractValueBrl(p.payload);
   if (explicit !== undefined && !explicit.eq(declared)) throw invalid();

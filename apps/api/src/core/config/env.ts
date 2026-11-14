@@ -27,6 +27,23 @@ export const EnvSchema = z
     OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
     GROQ_BASE_URL: z.string().url().default("https://api.groq.com/openai/v1"),
     NVIDIA_BASE_URL: z.string().url().default("https://integrate.api.nvidia.com/v1"),
+    /**
+     * `mock` (padrão fora de produção) ou `live` (brapi.dev + BCB SGS). Com NODE_ENV=production é
+     * OBRIGATÓRIA, como o LLM_MODE.
+     */
+    MARKET_MODE: z.preprocess(emptyToUndefined, z.enum(["live", "mock"]).optional()),
+    /** Token da brapi.dev (opcional: sem ele a brapi limita os símbolos e a taxa). */
+    BRAPI_TOKEN: optionalSecret,
+    BRAPI_BASE_URL: z.string().url().default("https://brapi.dev/api"),
+    BCB_SGS_BASE_URL: z.string().url().default("https://api.bcb.gov.br/dados/serie"),
+    /** Timeout de cada chamada ao provedor de mercado (ms). */
+    MARKET_FETCH_TIMEOUT_MS: z.coerce.number().int().min(1).max(60_000).default(8000),
+    /** Tamanho máximo aceito da resposta do provedor (bytes). */
+    MARKET_MAX_RESPONSE_BYTES: z.coerce.number().int().min(1).default(1_048_576),
+    /** Idade máxima de uma cotação com o mercado aberto (ms). */
+    MARKET_QUOTE_MAX_AGE_MS: z.coerce.number().int().min(1).default(300_000),
+    /** Idade máxima (dias) de uma cotação com o mercado fechado (fins de semana e feriados). */
+    MARKET_CLOSED_MAX_AGE_DAYS: z.coerce.number().int().min(1).default(5),
     EXECUTION_FEE_PCT: z.coerce.number().nonnegative().default(0.5),
     APPROVAL_TTL_HOURS: z.coerce.number().positive().default(24),
     /** Única origem aceita pelo CORS da API (o frontend). Sem curinga. */
@@ -56,7 +73,15 @@ export const EnvSchema = z
     path: ["LLM_MODE"],
     message: "LLM_MODE (live|mock) é obrigatória com NODE_ENV=production",
   })
-  .transform((e) => ({ ...e, LLM_MODE: e.LLM_MODE ?? ("mock" as const) }));
+  .refine((e) => e.NODE_ENV !== "production" || e.MARKET_MODE !== undefined, {
+    path: ["MARKET_MODE"],
+    message: "MARKET_MODE (live|mock) é obrigatória com NODE_ENV=production",
+  })
+  .transform((e) => ({
+    ...e,
+    LLM_MODE: e.LLM_MODE ?? ("mock" as const),
+    MARKET_MODE: e.MARKET_MODE ?? ("mock" as const),
+  }));
 
 export type Env = z.infer<typeof EnvSchema>;
 

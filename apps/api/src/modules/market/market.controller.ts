@@ -4,18 +4,24 @@ import {
   type MarketHistoryResponse,
   type MarketMacroResponse,
   type MarketQuotesResponse,
+  MarketUsageSchema,
   type MarketUsage,
 } from "@carina/shared";
 import { Controller, Get, Inject, Param, Query } from "@nestjs/common";
 import { ZodValidationPipe } from "nestjs-zod";
 import { z } from "zod";
 import { BillingService } from "../billing/billing.service.js";
+import { PRICE_BRL } from "../billing/pricing.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { RequireScopes } from "../tenancy/scopes.decorator.js";
 import { SYMBOL_RE } from "./asset-class.js";
 import { MAX_SYMBOLS, MarketService } from "./market.service.js";
 
-const USAGE: MarketUsage = { workType: "data_query", priceBrl: "0.05" };
+/** O preço devolvido vem da mesma tabela que o billing cobra. */
+const USAGE = MarketUsageSchema.parse({
+  workType: "data_query",
+  priceBrl: PRICE_BRL.data_query,
+}) satisfies MarketUsage;
 
 /**
  * `?symbols=A,B`: separa por vírgula, apara espaços e descarta itens vazios. Nada é posto em

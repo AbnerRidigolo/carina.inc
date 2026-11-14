@@ -17,6 +17,8 @@ import { StreamsService, type ConsumeOptions } from "../../src/core/redis/stream
 import { ChatGateway } from "../../src/modules/chat/chat.gateway.js";
 import { InboxBroadcast } from "../../src/modules/chat/inbox-broadcast.js";
 import { SyncWorker } from "../../src/modules/data-ingestion/sync.worker.js";
+import { MarketService } from "../../src/modules/market/market.service.js";
+import { MarketController } from "../../src/modules/market/market.controller.js";
 import { HealthController } from "../../src/modules/health/health.controller.js";
 import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js";
 import { ResumeWorker } from "../../src/modules/orchestrator/resume.worker.js";
@@ -124,6 +126,8 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(true);
     expect(groups.sort()).toEqual(["jobs:resumers", "jobs:sync"]);
     expect(controllersOf(ref)).toEqual([]);
+    expect(ref.get(MarketService)).toBeInstanceOf(MarketService);
+    expect(() => ref?.get(MarketController, { strict: false })).toThrow();
     expect(() => ref?.get(InboxBroadcast)).toThrow();
     expect(() => ref?.get(ChatGateway)).toThrow();
   });

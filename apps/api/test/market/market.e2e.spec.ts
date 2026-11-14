@@ -105,6 +105,10 @@ describe("Market E2E (mock)", () => {
       "21 símbolos",
       `/api/market/quotes?symbols=${Array.from({ length: 21 }, (_, i) => `AAA${String(i + 10)}`).join(",")}`,
     ],
+    ["%2e%2e codificado", "/api/market/quotes?symbols=%2e%2e"],
+    ["byte nulo", "/api/market/quotes?symbols=PETR4%00"],
+    ["quebra de linha", "/api/market/quotes?symbols=PETR4%0AVALE3"],
+    ["query muito longa", `/api/market/quotes?symbols=${"A".repeat(8000)}`],
     ["range inválido", "/api/market/history/PETR4?range=10y"],
     ["símbolo inválido no histórico", "/api/market/history/petr4"],
   ])("422 sem cobrança: %s", async (_name, path) => {
@@ -113,6 +117,12 @@ describe("Market E2E (mock)", () => {
     expect(res.status).toBe(422);
     expect(res.headers["content-type"]).toContain("application/problem+json");
     expect(await dataQueries()).toBe(before);
+  });
+
+  it("21 símbolos com repetidos que ficam em 20 após o dedupe → 200", async () => {
+    const list = Array.from({ length: 20 }, (_, i) => `AAA${String(i + 10)}`);
+    const res = await get(`/api/market/quotes?symbols=${[...list, "AAA10"].join(",")}`, key());
+    expect(res.status).toBe(200);
   });
 
   it("history: padrão 3mo devolve barras do mock e cobra", async () => {

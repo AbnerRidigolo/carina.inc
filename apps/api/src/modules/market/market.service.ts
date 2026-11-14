@@ -11,8 +11,9 @@
  * mapa ao terminar, inclusive em erro.
  *
  * `priceFor` falha fechado com `MarketPriceError`: ativo ausente → `unknown_asset`; provedor fora
- * do ar (qualquer erro) → `price_unavailable`; cotação velha ou com hora futura → `price_stale`. O
- * frescor é medido sobre o `updatedAt` da cotação, nunca sobre o `fetchedAt` do cache.
+ * do ar (qualquer erro) ou preço não positivo → `price_unavailable`; cotação velha ou com hora
+ * futura → `price_stale`. O frescor é medido sobre o `updatedAt` da cotação, nunca sobre o
+ * `fetchedAt` do cache; cotação do cache reprovada no frescor é buscada de novo uma vez.
  */
 import {
   type HistoricalBar,
@@ -22,6 +23,7 @@ import {
   type MacroIndicator,
   MacroIndicatorSchema,
   type MarketState,
+  PriceSchema,
   type Quote,
   QuoteSchema,
 } from "@carina/shared";
@@ -65,6 +67,22 @@ const RawQuoteSchema = QuoteSchema.omit({ marketState: true });
 const HistorySchema = z.array(HistoricalBarSchema);
 const MacroSchema = z.array(MacroIndicatorSchema);
 
+/** Cotação e sua origem: `priceFor` só busca de novo a que veio do cache. */
+interface QuoteEntry {
+  quote: RawQuote;
+  fromCache: boolean;
+}
+
+/** Zero em qualquer grafia decimal ("0", "0.00", "000.0"): o formato já foi validado pelo schema. */
+const ZERO_PRICE_RE = /^0+(\.0+)?$/;
+
+/** Preço de servidor tem de ser estritamente positivo; caso contrário a ordem não sai. */
+function assertPositivePrice(quote: RawQuote): void {
+  if (!PriceSchema.safeParse(quote.price).success || ZERO_PRICE_RE.test(quote.price)) {
+    throw new MarketPriceError("price_unavailable");
+  }
+}
+
 const quoteKey = (symbol: string) => `${PREFIX}quote:${symbol}`;
 const historyKey = (symbol: string, range: HistoryRange) => `${PREFIX}history:${symbol}:${range}`;
 const MACRO_KEY = `${PREFIX}macro`;
@@ -89,7 +107,7 @@ export class MarketService {
     const list = this.validSymbols(symbols);
     const raw = await this.rawQuotes(list);
     const state = this.marketState(this.clock());
-    return raw.flatMap((q) => (q ? [{ ...q, marketState: state }] : []));
+    return raw.flatMap((e) => (e ? [{ ...e.quote, marketState: state }] : []));
   }
 
   async history(symbol: string, range: HistoryRange): Promise<HistoricalBar[]> {
@@ -111,32 +129,63 @@ export class MarketService {
     );
   }
 
-  /** Preço de servidor para a execução de uma ordem. Só lança `MarketPriceError`. */
+  /**
+   * Preço de servidor para a execução de uma ordem. Só lança `MarketPriceError`.
+   *
+   * Uma cotação servida do cache que falha o frescor é buscada de novo UMA vez, sem cache, por um
+   * single-flight próprio (`market:quote:<SYM>:refresh`); a nova é gravada no cache e passa pela
+   * mesma regra. Ainda velha → `price_stale` (sem laço); provedor falhando no refresh →
+   * `price_unavailable`; ativo sumido no refresh → `unknown_asset`. Preço que não é estritamente
+   * positivo → `price_unavailable` (conferido na string, nunca por `number`).
+   */
   async priceFor(symbol: string): Promise<Quote> {
     if (typeof symbol !== "string" || !SYMBOL_RE.test(symbol)) {
       throw new MarketPriceError("unknown_asset");
     }
-    let raw: RawQuote | null | undefined;
+    let entry: QuoteEntry | null | undefined;
     try {
-      [raw] = await this.rawQuotes([symbol]);
+      [entry] = await this.rawQuotes([symbol]);
     } catch {
       // Sem `cause`: o erro do provedor não viaja para quem registra a recusa.
       throw new MarketPriceError("price_unavailable");
     }
-    if (!raw) throw new MarketPriceError("unknown_asset");
+    if (!entry) throw new MarketPriceError("unknown_asset");
+    assertPositivePrice(entry.quote);
 
+    let quote = entry.quote;
+    if (!this.isFresh(quote)) {
+      if (!entry.fromCache) throw new MarketPriceError("price_stale");
+      let refreshed: RawQuote | null;
+      try {
+        refreshed = await this.refreshQuote(symbol);
+      } catch {
+        throw new MarketPriceError("price_unavailable");
+      }
+      if (!refreshed) throw new MarketPriceError("unknown_asset");
+      assertPositivePrice(refreshed);
+      if (!this.isFresh(refreshed)) throw new MarketPriceError("price_stale");
+      quote = refreshed;
+    }
+    return { ...quote, marketState: this.marketState(this.clock()) };
+  }
+
+  /** Idade = clock − updatedAt dentro do limite do estado do mercado; negativa/ilegível não vale. */
+  private isFresh(quote: RawQuote): boolean {
     const now = this.clock();
-    const state = this.marketState(now);
-    const age = now - Date.parse(raw.updatedAt);
+    const age = now - Date.parse(quote.updatedAt);
     const maxAge =
-      state === "open"
+      this.marketState(now) === "open"
         ? this.env.MARKET_QUOTE_MAX_AGE_MS
         : this.env.MARKET_CLOSED_MAX_AGE_DAYS * DAY_MS;
-    // Idade negativa (hora no futuro) ou ilegível também é recusada.
-    if (!Number.isFinite(age) || age < 0 || age > maxAge) {
-      throw new MarketPriceError("price_stale");
-    }
-    return { ...raw, marketState: state };
+    return Number.isFinite(age) && age >= 0 && age <= maxAge;
+  }
+
+  /** Busca o símbolo no provedor sem ler o cache; `priceFor` concorrentes dividem a mesma busca. */
+  private refreshQuote(symbol: string): Promise<RawQuote | null> {
+    return this.singleFlight(`${quoteKey(symbol)}:refresh`, async () => {
+      const found = await this.fetchAndStore([symbol]);
+      return found.get(symbol) ?? null;
+    });
   }
 
   private marketState(now: number): MarketState {
@@ -157,15 +206,15 @@ export class MarketService {
   /**
    * Cotações por símbolo (null = ausente do provedor). Os símbolos sem busca em andamento entram
    * numa busca só; cada um ganha a sua promessa no mapa, para que chamadas concorrentes do mesmo
-   * símbolo esperem a mesma busca.
+   * símbolo esperem a mesma busca. Cada cotação diz se veio do cache ou da busca.
    */
-  private rawQuotes(symbols: string[]): Promise<(RawQuote | null)[]> {
+  private rawQuotes(symbols: string[]): Promise<(QuoteEntry | null)[]> {
     const missing = symbols.filter((s) => !this.flights.has(quoteKey(s)));
     if (missing.length > 0) {
       const batch = this.loadQuotes(missing);
       for (const symbol of missing) {
         const key = quoteKey(symbol);
-        const flight: Promise<RawQuote | null> = batch
+        const flight: Promise<QuoteEntry | null> = batch
           .then((found) => found.get(symbol) ?? null)
           .finally(() => {
             if (this.flights.get(key) === flight) this.flights.delete(key);
@@ -174,12 +223,12 @@ export class MarketService {
       }
     }
     return Promise.all(
-      symbols.map((s) => this.flights.get(quoteKey(s)) as Promise<RawQuote | null>),
+      symbols.map((s) => this.flights.get(quoteKey(s)) as Promise<QuoteEntry | null>),
     );
   }
 
-  private async loadQuotes(symbols: string[]): Promise<Map<string, RawQuote>> {
-    const found = new Map<string, RawQuote>();
+  private async loadQuotes(symbols: string[]): Promise<Map<string, QuoteEntry>> {
+    const found = new Map<string, QuoteEntry>();
     const hits = await Promise.all(
       symbols.map((s) => this.readCache(quoteKey(s), QUOTE_TTL_MS, RawQuoteSchema)),
     );
@@ -187,7 +236,7 @@ export class MarketService {
     symbols.forEach((symbol, i) => {
       const hit = hits[i];
       if (hit && hit.symbol === symbol) {
-        found.set(symbol, hit);
+        found.set(symbol, { quote: hit, fromCache: true });
         return;
       }
       if (hit) this.logger.warn({ msg: "Cache de cotação com outro símbolo; descartado", symbol });
@@ -195,10 +244,18 @@ export class MarketService {
     });
     if (toFetch.length === 0) return found;
 
-    const fetched = await this.market.fetchQuotes(toFetch);
+    for (const [symbol, quote] of await this.fetchAndStore(toFetch)) {
+      found.set(symbol, { quote, fromCache: false });
+    }
+    return found;
+  }
+
+  /** Busca no provedor (sem ler o cache), valida, grava no cache e devolve por símbolo. */
+  private async fetchAndStore(symbols: string[]): Promise<Map<string, RawQuote>> {
+    const fetched = await this.market.fetchQuotes(symbols);
     const fetchedAt = this.clock();
-    const wanted = new Set(toFetch);
-    const fresh: RawQuote[] = [];
+    const wanted = new Set(symbols);
+    const found = new Map<string, RawQuote>();
     for (const quote of fetched) {
       const parsed = RawQuoteSchema.safeParse(quote);
       if (!parsed.success) {
@@ -208,10 +265,11 @@ export class MarketService {
       const q = parsed.data;
       if (!wanted.has(q.symbol) || found.has(q.symbol)) continue;
       found.set(q.symbol, q);
-      fresh.push(q);
     }
     await Promise.all(
-      fresh.map((q) => this.writeCache(quoteKey(q.symbol), q, fetchedAt, QUOTE_TTL_MS)),
+      [...found.values()].map((q) =>
+        this.writeCache(quoteKey(q.symbol), q, fetchedAt, QUOTE_TTL_MS),
+      ),
     );
     return found;
   }

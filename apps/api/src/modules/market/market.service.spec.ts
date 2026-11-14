@@ -100,6 +100,14 @@ function setup(opts: SetupOptions = {}) {
   return { service, provider, macroProvider, redis, logger, clock, advance };
 }
 
+/** Grava no cache falso uma cotação com fetchedAt = agora (cache ainda válido pelo CLOCK). */
+function seedCache(redis: unknown, quote: RawQuote, fetchedAt = FRIDAY_OPEN): void {
+  (redis as FakeRedis).store.set(
+    `market:quote:${quote.symbol}`,
+    JSON.stringify({ value: quote, fetchedAt }),
+  );
+}
+
 async function priceError(p: Promise<unknown>): Promise<MarketPriceError> {
   const err = await p.then(
     () => {
@@ -269,6 +277,8 @@ describe("MarketService.priceFor", () => {
       quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 5 * MIN - 1))),
     });
     expect((await priceError(stale.service.priceFor("PETR4"))).code).toBe("price_stale");
+    // Velha já na busca (não no cache): sem refresh, uma busca só.
+    expect(stale.provider.fetchQuotes).toHaveBeenCalledTimes(1);
   });
 
   it("mercado fechado (sábado 12:00 SP): aceita fechamento de exatamente 5 dias e recusa com 5 dias + 1 ms", async () => {
@@ -285,6 +295,8 @@ describe("MarketService.priceFor", () => {
       quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, SATURDAY_NOON - 5 * DAY - 1))),
     });
     expect((await priceError(stale.service.priceFor("PETR4"))).code).toBe("price_stale");
+    // Velha já na busca (não no cache): sem refresh, uma busca só.
+    expect(stale.provider.fetchQuotes).toHaveBeenCalledTimes(1);
   });
 
   it("mercado aberto não aceita a tolerância de fechado (cotação de 1 dia com pregão aberto)", async () => {
@@ -320,15 +332,14 @@ describe("MarketService.priceFor", () => {
     expect(err.message).not.toContain("fetch failed");
   });
 
-  it("cotação velha em cache válido não parece nova: o frescor é medido sobre updatedAt", async () => {
-    const { service, provider, redis } = setup();
+  it("cotação velha em cache válido não parece nova: o frescor é medido sobre updatedAt e o provedor é consultado", async () => {
+    const { service, provider, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 10 * MIN))),
+    });
     // fetchedAt agora (cache válido), mas a cotação é de 10 min atrás.
-    (redis as FakeRedis).store.set(
-      "market:quote:PETR4",
-      JSON.stringify({ value: rawQuote("PETR4", FRIDAY_OPEN - 10 * MIN), fetchedAt: FRIDAY_OPEN }),
-    );
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 10 * MIN));
     expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_stale");
-    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
   });
 
   it("não usa cache cujo fetchedAt + 60 s expirou: vai ao provedor e devolve a cotação dele", async () => {
@@ -398,5 +409,107 @@ describe("MarketService.priceFor", () => {
     await expect(service.priceFor("PETR4")).resolves.toMatchObject({ price: "30.00" });
     expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe("MarketService.priceFor: preço zero (falha fechada)", () => {
+  it.each(["0", "0.00"])("preço %s vindo da busca → price_unavailable", async (price) => {
+    const { service } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, price))),
+    });
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+  });
+
+  it.each(["0", "0.00"])("preço %s vindo do cache → price_unavailable", async (price) => {
+    const { service, provider, redis } = setup();
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 1000, price));
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+  });
+
+  it.each(["0.01", "0.000001"])(
+    "preço positivo mínimo %s é aceito (busca e cache)",
+    async (price) => {
+      const fetched = setup({
+        quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, price))),
+      });
+      expect((await fetched.service.priceFor("PETR4")).price).toBe(price);
+      const cached = setup();
+      seedCache(cached.redis, rawQuote("PETR4", FRIDAY_OPEN - 1000, price));
+      expect((await cached.service.priceFor("PETR4")).price).toBe(price);
+      expect(cached.provider.fetchQuotes).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("MarketService.priceFor: cotação velha do cache é buscada de novo uma vez", () => {
+  const staleCached = () => rawQuote("PETR4", FRIDAY_OPEN - 10 * MIN, "29.00");
+
+  it("cache velho + provedor com cotação fresca → sucesso com exatamente 1 busca, regravada no cache", async () => {
+    const { service, provider, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
+    });
+    seedCache(redis, staleCached());
+    const quote = await service.priceFor("PETR4");
+    expect(quote).toMatchObject({ price: "31.00", marketState: "open" });
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(provider.fetchQuotes).toHaveBeenCalledWith(["PETR4"]);
+    const stored = JSON.parse((redis as FakeRedis).store.get("market:quote:PETR4") ?? "null") as {
+      value: RawQuote;
+    };
+    expect(stored.value.price).toBe("31.00");
+    // A próxima chamada usa o cache regravado.
+    await service.priceFor("PETR4");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("cache velho + provedor ainda velho → price_stale com exatamente 1 busca (sem laço)", async () => {
+    const { service, provider, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 6 * MIN))),
+    });
+    seedCache(redis, staleCached());
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_stale");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("cache velho + provedor falhando no refresh → price_unavailable", async () => {
+    const { service, provider, redis } = setup({
+      quotes: () => Promise.reject(new MarketDataUnavailableError()),
+    });
+    seedCache(redis, staleCached());
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("cache velho + ativo sumiu do provedor no refresh → unknown_asset", async () => {
+    const { service, redis } = setup({ quotes: () => Promise.resolve([]) });
+    seedCache(redis, staleCached());
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("unknown_asset");
+  });
+
+  it("cache velho + refresh com preço zero → price_unavailable", async () => {
+    const { service, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "0.00"))),
+    });
+    seedCache(redis, staleCached());
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+  });
+
+  it("20 priceFor concorrentes com cache velho → 1 busca de refresh", async () => {
+    const { service, provider, redis } = setup({
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
+    });
+    seedCache(redis, staleCached());
+    const results = await Promise.all(Array.from({ length: 20 }, () => service.priceFor("PETR4")));
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    for (const q of results) expect(q.price).toBe("31.00");
+  });
+
+  it("quotes() não faz refresh: devolve a cotação do cache como está", async () => {
+    const { service, provider, redis } = setup();
+    seedCache(redis, staleCached());
+    const [quote] = await service.quotes(["PETR4"]);
+    expect(quote?.price).toBe("29.00");
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
   });
 });

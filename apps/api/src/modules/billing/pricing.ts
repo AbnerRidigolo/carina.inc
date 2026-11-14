@@ -85,6 +85,13 @@ export function payloadNotionalBrl(payload: Record<string, unknown>): Decimal | 
 }
 
 /**
+ * Todas as chaves de valor e de preço unitário que um modelo pode pôr no payload (as que
+ * `extractValueBrl` e `payloadNotionalBrl` leem). Para testes de que o payload precificado pelo
+ * servidor não as carrega.
+ */
+export const MODEL_VALUE_KEYS: readonly string[] = [...VALUE_KEYS, ...UNIT_PRICE_KEYS];
+
+/**
  * Preço de uma execução: `fee = round_half_up(value × feePct / 100, 2)` e `price = 75.00 + fee`.
  * Sem valor movimentado positivo não há fee.
  */

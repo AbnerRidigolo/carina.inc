@@ -4,6 +4,7 @@ import { LoggingModule } from "./core/logging/logging.module.js";
 import { RedisModule } from "./core/redis/redis.module.js";
 import { DataIngestionCoreModule } from "./modules/data-ingestion/data-ingestion-core.module.js";
 import { InboxCoreModule } from "./modules/inbox/inbox-core.module.js";
+import { MarketCoreModule } from "./modules/market/market-core.module.js";
 import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.js";
 
 /**
@@ -12,6 +13,7 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
  *
  * - DataIngestionCoreModule → SyncWorker (grupo `sync` do stream `jobs`);
  * - OrchestratorModule → ResumeWorker (grupo `resumers` do stream `jobs`);
+ * - MarketCoreModule → MarketService e provedores (por MARKET_MODE), sem rotas;
  * - InboxCoreModule → ReconciliationJob (timer; um lock Redis global por tick evita ticks simultâneos).
  */
 @Module({
@@ -21,6 +23,7 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
     RedisModule,
     DataIngestionCoreModule,
     InboxCoreModule,
+    MarketCoreModule,
     OrchestratorModule,
   ],
 })

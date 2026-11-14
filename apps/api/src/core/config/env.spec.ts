@@ -22,6 +22,35 @@ describe("loadEnv", () => {
     expect(env.API_KEY_REVALIDATE_TTL_MS).toBe(60_000);
   });
 
+  it("MARKET_MODE: mock por padrão fora de produção e defaults de mercado", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_MODE).toBe("mock");
+    expect(env.BRAPI_TOKEN).toBeUndefined();
+    expect(env.BRAPI_BASE_URL).toBe("https://brapi.dev/api");
+    expect(env.BCB_SGS_BASE_URL).toBe("https://api.bcb.gov.br/dados/serie");
+    expect(env.MARKET_FETCH_TIMEOUT_MS).toBe(8000);
+    expect(env.MARKET_MAX_RESPONSE_BYTES).toBe(1_048_576);
+    expect(env.MARKET_QUOTE_MAX_AGE_MS).toBe(300_000);
+    expect(env.MARKET_CLOSED_MAX_AGE_DAYS).toBe(5);
+  });
+
+  it("MARKET_MODE é obrigatória com NODE_ENV=production", () => {
+    expect(() => loadEnv({ ...min, NODE_ENV: "production", LLM_MODE: "mock" })).toThrow(
+      /MARKET_MODE/,
+    );
+    expect(
+      loadEnv({ ...min, NODE_ENV: "production", LLM_MODE: "mock", MARKET_MODE: "live" })
+        .MARKET_MODE,
+    ).toBe("live");
+  });
+
+  it("MARKET_MODE só aceita live|mock; MARKET_FETCH_TIMEOUT_MS=0 falha", () => {
+    expect(() => loadEnv({ ...min, MARKET_MODE: "fake" })).toThrow(/MARKET_MODE/);
+    expect(() => loadEnv({ ...min, MARKET_FETCH_TIMEOUT_MS: "0" })).toThrow(
+      /MARKET_FETCH_TIMEOUT_MS/,
+    );
+  });
+
   it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {
     expect(loadEnv(min).LOG_LEVEL).toBe("info");
     expect(loadEnv({ ...min, LOG_LEVEL: "silent" }).LOG_LEVEL).toBe("silent");
@@ -69,7 +98,7 @@ describe("loadEnv", () => {
   });
 
   it("produção exige LLM_MODE explícito (sem default silencioso para mock)", () => {
-    const prod = { ...min, NODE_ENV: "production" };
+    const prod = { ...min, NODE_ENV: "production", MARKET_MODE: "mock" };
     expect(() => loadEnv(prod)).toThrow(/LLM_MODE/);
     expect(() => loadEnv({ ...prod, LLM_MODE: "" })).toThrow(/LLM_MODE/);
     expect(loadEnv({ ...prod, LLM_MODE: "mock" }).LLM_MODE).toBe("mock");

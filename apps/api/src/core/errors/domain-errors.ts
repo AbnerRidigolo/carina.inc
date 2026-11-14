@@ -64,3 +64,15 @@ export class AllProvidersFailedError extends DomainError {
     super(message, 30);
   }
 }
+/**
+ * Provedor de mercado (brapi.dev, SGS do BCB) fora do ar ou com resposta inválida. A mensagem é
+ * fixa e nunca carrega texto do provedor: o detalhe vai só para o log.
+ */
+export class MarketDataUnavailableError extends DomainError {
+  readonly code = "market_data_unavailable";
+  readonly status = 502;
+
+  constructor() {
+    super("Dados de mercado indisponíveis");
+  }
+}

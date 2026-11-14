@@ -34,6 +34,7 @@ function seedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     MIGRATION_DATABASE_URL: migratorUrl(),
     REDIS_URL: redisDbUrl(REDIS_DB),
     LLM_MODE: "mock",
+    MARKET_MODE: "mock",
     LOG_LEVEL: "silent",
     DEMO_APP_KEY: "",
     DEMO_APPROVER_KEY: "",
@@ -134,6 +135,20 @@ describe("seed de demo", () => {
       await migratorSql(`UPDATE tenant SET suspended_at = NULL WHERE id = $1`, [tenantId]);
     }, 120_000);
 
+    it("rodar o seed de novo reescopa uma chave existente (banco semeado antes ganha market:read)", async () => {
+      await migratorSql(`UPDATE api_key SET scopes = $2::text[] WHERE hash = $1`, [
+        hashApiKey(DEFAULT_DEMO_APP_KEY),
+        ["chat", "data:write"],
+      ]);
+      await redis.flushdb();
+      await seed({ env: seedEnv(), logger: captureLogger() });
+      const [row] = await migratorSql<{ scopes: string[] }>(
+        `SELECT scopes FROM api_key WHERE hash = $1`,
+        [hashApiKey(DEFAULT_DEMO_APP_KEY)],
+      );
+      expect(must(row).scopes.sort()).toEqual(["chat", "data:write", "market:read"]);
+    }, 120_000);
+
     it("deixa 1 tenant demo (rpm 120, cota 0), 2 chaves e 3 clientes", async () => {
       expect(await demoTenantIds()).toEqual([tenantId]);
       const [tenant] = await migratorSql<{ rpm: number; monthly_quota: number }>(
@@ -150,7 +165,7 @@ describe("seed de demo", () => {
       expect(keys).toHaveLength(2);
       const byHash = new Map(keys.map((k) => [k.hash, k]));
       expect(byHash.get(hashApiKey(DEFAULT_DEMO_APP_KEY))?.scopes.sort()).toEqual(
-        ["chat", "data:write"].sort(),
+        ["chat", "data:write", "market:read"].sort(),
       );
       expect(byHash.get(hashApiKey(DEFAULT_DEMO_APPROVER_KEY))?.scopes.sort()).toEqual(
         ["chat", "inbox:decide"].sort(),

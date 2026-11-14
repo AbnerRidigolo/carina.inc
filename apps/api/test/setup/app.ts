@@ -17,13 +17,14 @@ import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
 import { appUrl, migratorSql, migratorUrl, redisDbUrl } from "./db.js";
 
-export type SeedKeyName = "chat" | "approver" | "ingest";
+export type SeedKeyName = "chat" | "approver" | "ingest" | "market";
 
 /** Escopos de cada chave criada por `seedTenant`. */
 export const SEED_KEY_SCOPES: Record<SeedKeyName, string[]> = {
   chat: ["chat"],
   approver: ["chat", "inbox:decide"],
   ingest: ["data:write"],
+  market: ["market:read"],
 };
 
 export interface SeedTenantOptions {

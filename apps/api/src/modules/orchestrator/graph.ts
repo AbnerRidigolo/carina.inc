@@ -27,7 +27,9 @@
  *   Falha da cotação (qualquer erro) → nenhuma aprovação, o código (`price_unavailable`,
  *   `price_stale`, `unknown_asset`) em `errors.executor`, `agentFailure()` com `reason`/`message`
  *   e a frase fixa do código (`PRICE_FAILURE_MESSAGES`) no fim do `answer` final. O valor do modelo
- *   nunca chega à aprovação (nem à taxa) de um ativo cotável.
+ *   nunca chega à aprovação (nem à taxa) de um ativo cotável. `place_trade` FORA do formato (payload
+ *   malformado ou nome com espaços) falha do mesmo jeito (`price_unavailable`), sem lookup, cotação
+ *   nem aprovação: a guarda é local, não depende do `refineProposal`.
  * - `approval`: `interrupt({ approvalId })`. É um nó SEPARADO de propósito: na retomada o LangGraph
  *   reexecuta o nó interrompido desde o começo; se a proposta (LLM, não determinístico) estivesse
  *   no mesmo nó, rodaria de novo e poderia gerar outra proposta/aprovação. Aqui nada vem antes do
@@ -294,6 +296,21 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
         rationale: proposal.rationale,
       });
 
+      /**
+       * Falha do preço de servidor. A síntese já rodou (vem antes do executor): a explicação é
+       * acrescentada ao fim do `answer` final do turno (o texto já streamado não muda), e o
+       * resultado do executor leva o código e a mesma frase para o painel de agentes. Nenhuma
+       * aprovação.
+       */
+      const priceFailure = (reason: MarketPriceErrorCode): GraphStateUpdate => {
+        const message = PRICE_FAILURE_MESSAGES[reason];
+        return {
+          results: { executor: { ...agentFailure(), reason, message } },
+          errors: { executor: reason },
+          answer: state.answer ? `${state.answer}\n\n${message}` : message,
+        };
+      };
+
       if (risk === "irreversible") {
         /** Uma nova tentativa em falha que não seja ValidationError (que não muda ao repetir). */
         const once = async <R>(what: string, fn: () => Promise<R>): Promise<R> => {
@@ -314,6 +331,14 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
           proposal.action === "place_trade"
             ? PlaceTradePayloadSchema.safeParse(proposal.payload)
             : undefined;
+        // Guarda local (não depende do `refineProposal` de outro módulo): um `place_trade` que não
+        // tem o formato cotável (payload malformado, ou o nome com espaços, que o registro de
+        // executores não distingue do resto) nunca segue com o valor do modelo. Mesma falha fechada
+        // e mesma frase da cotação indisponível; nenhuma aprovação, nenhuma consulta.
+        if (proposal.action.trim() === "place_trade" && trade?.success !== true) {
+          logger.warn({ msg: "place_trade fora do formato; ordem não proposta", threadId });
+          return priceFailure("price_unavailable");
+        }
         if (trade?.success) {
           // (a) id sobre a proposta do modelo.
           const id = approvalIdOf(threadId, state.turn, proposal.action, proposal.payload);
@@ -350,16 +375,7 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
               err,
               threadId,
             });
-            // A síntese já rodou (vem antes do executor): a explicação é acrescentada ao fim do
-            // `answer` final do turno (o texto já streamado não muda), e o resultado do executor
-            // leva o código e a mesma frase para o painel de agentes. Nenhuma aprovação.
-            const reason = priceErrorCode(err);
-            const message = PRICE_FAILURE_MESSAGES[reason];
-            return {
-              results: { executor: { ...agentFailure(), reason, message } },
-              errors: { executor: reason },
-              answer: state.answer ? `${state.answer}\n\n${message}` : message,
-            };
+            return priceFailure(priceErrorCode(err));
           }
           idPayload = proposal.payload;
         }

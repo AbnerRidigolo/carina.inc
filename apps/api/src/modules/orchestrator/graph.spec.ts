@@ -923,6 +923,42 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
         expect(state.results["executor"]).toEqual(agentFailure());
       });
 
+      it.each<[string, Record<string, unknown>]>([
+        [
+          "payload malformado",
+          { action: "place_trade", payload: { side: "buy", assetCode: "petr4", quantity: 100 } },
+        ],
+        ["payload vazio", { action: "place_trade", payload: {} }],
+        [
+          "ação com espaços",
+          { action: " place_trade ", payload: { side: "buy", assetCode: "PETR4", quantity: 100 } },
+        ],
+      ])(
+        "place_trade fora do formato vindo de um executor que pula o refineProposal (%s): price_unavailable, valor do modelo nunca vai para a inbox",
+        async (_n, partial) => {
+          // Agente executor stub: não passa por `refineProposal` (a guarda do grafo não pode depender dela).
+          vi.spyOn(s.agents, "executor").mockReturnValue({
+            run: async () => ({ valueBrl: "999999.00", rationale: "modelo", ...partial }),
+          } as never);
+          const threadId = newThread();
+          const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+          expect(types(events)).not.toContain("approval_required");
+          expect(s.inbox.request).not.toHaveBeenCalled();
+          expect(s.inbox.lookup).not.toHaveBeenCalled();
+          expect(s.market.priceFor).not.toHaveBeenCalled();
+          const state = await asClient(() => svc.finalState(threadId));
+          expect(state.pending).toBeNull();
+          expect(state.errors["executor"]).toBe("price_unavailable");
+          expect(state.results["executor"]).toEqual({
+            ...agentFailure(),
+            reason: "price_unavailable",
+            message: PRICE_FAILURE_TEXT.price_unavailable,
+          });
+          expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.price_unavailable)).toBe(true);
+          expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+        },
+      );
+
       it("transfer segue o caminho de hoje: valor do modelo, sem cotação nem idPayload", async () => {
         s = setup({
           executor: () => ({

@@ -32,7 +32,10 @@ export const EnvSchema = z
      * OBRIGATÓRIA, como o LLM_MODE.
      */
     MARKET_MODE: z.preprocess(emptyToUndefined, z.enum(["live", "mock"]).optional()),
-    /** Token da brapi.dev (opcional: sem ele a brapi limita os símbolos e a taxa). */
+    /**
+     * Token da brapi.dev (opcional: sem ele só PETR4, MGLU3, VALE3 e ITUB4 respondem; ver a
+     * documentação da brapi).
+     */
     BRAPI_TOKEN: optionalSecret,
     BRAPI_BASE_URL: z.string().url().default("https://brapi.dev/api"),
     BCB_SGS_BASE_URL: z.string().url().default("https://api.bcb.gov.br/dados/serie"),
@@ -40,7 +43,19 @@ export const EnvSchema = z
     MARKET_FETCH_TIMEOUT_MS: z.coerce.number().int().min(1).max(60_000).default(8000),
     /** Tamanho máximo aceito da resposta do provedor (bytes). */
     MARKET_MAX_RESPONSE_BYTES: z.coerce.number().int().min(1).default(1_048_576),
-    /** Idade máxima de uma cotação com o mercado aberto (ms). */
+    /**
+     * Símbolos por requisição de cotação à brapi. Padrão 1: o plano gratuito aceita 1 ativo por
+     * requisição (os pagos aceitam mais; ver a documentação de planos da brapi). Até 20, o teto
+     * de símbolos de uma consulta.
+     */
+    MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: z.coerce.number().int().min(1).max(20).default(1),
+    /** Requisições simultâneas à brapi por processo (fila no processo). Padrão 1 (plano gratuito). */
+    MARKET_PROVIDER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
+    /**
+     * Idade máxima de uma cotação com o mercado aberto (ms). Padrão 5 min; no live precisa ser pelo
+     * menos o atraso do plano da brapi (ex.: ~35 min no gratuito), senão toda ordem em pregão é
+     * recusada como `price_stale`.
+     */
     MARKET_QUOTE_MAX_AGE_MS: z.coerce.number().int().min(1).default(300_000),
     /** Idade máxima (dias) de uma cotação com o mercado fechado (fins de semana e feriados). */
     MARKET_CLOSED_MAX_AGE_DAYS: z.coerce.number().int().min(1).default(5),

@@ -140,4 +140,18 @@ describe("MarketCoreModule: escolha do provedor", () => {
       MarketDataUnavailableError,
     );
   });
+  it("live: lotes de MARKET_BRAPI_MAX_SYMBOLS_PER_CALL símbolos vindos do ENV", async () => {
+    ref = await boot({
+      MARKET_MODE: "live",
+      BRAPI_BASE_URL: BRAPI_BASE,
+      BCB_SGS_BASE_URL: BCB_BASE,
+      MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: "2",
+    });
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(QUOTE)));
+    await ref.get(MarketService).quotes(["PETR4", "VALE3", "ITUB4"]);
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/api/quote/PETR4,VALE3",
+      "/api/quote/ITUB4",
+    ]);
+  });
 });

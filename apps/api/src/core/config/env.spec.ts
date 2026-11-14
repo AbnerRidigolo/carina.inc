@@ -51,6 +51,29 @@ describe("loadEnv", () => {
     );
   });
 
+  it("lotes e concorrência da brapi: padrão 1 e 1; limites 1..20 e 1..10", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL).toBe(1);
+    expect(env.MARKET_PROVIDER_CONCURRENCY).toBe(1);
+    const ok = loadEnv({
+      ...min,
+      MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: "20",
+      MARKET_PROVIDER_CONCURRENCY: "10",
+    });
+    expect(ok.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL).toBe(20);
+    expect(ok.MARKET_PROVIDER_CONCURRENCY).toBe(10);
+    for (const bad of ["0", "21", "1.5", "x"]) {
+      expect(() => loadEnv({ ...min, MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: bad })).toThrow(
+        /MARKET_BRAPI_MAX_SYMBOLS_PER_CALL/,
+      );
+    }
+    for (const bad of ["0", "11"]) {
+      expect(() => loadEnv({ ...min, MARKET_PROVIDER_CONCURRENCY: bad })).toThrow(
+        /MARKET_PROVIDER_CONCURRENCY/,
+      );
+    }
+  });
+
   it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {
     expect(loadEnv(min).LOG_LEVEL).toBe("info");
     expect(loadEnv({ ...min, LOG_LEVEL: "silent" }).LOG_LEVEL).toBe("silent");

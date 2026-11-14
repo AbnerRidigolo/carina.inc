@@ -11,7 +11,9 @@ import { MockMarketProvider } from "./providers/mock.provider.js";
 
 /**
  * Provedor por `MARKET_MODE`: `mock` nunca constrói os provedores live (nem toca a rede); `live`
- * monta brapi + BCB a partir do ENV (token só no cabeçalho, dentro do provedor).
+ * monta brapi + BCB a partir do ENV (token só no cabeçalho, dentro do provedor; lotes de
+ * `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL` símbolos e no máximo `MARKET_PROVIDER_CONCURRENCY`
+ * requisições simultâneas à brapi).
  */
 const dataProvider: Provider = {
   provide: MARKET_DATA_PROVIDER,
@@ -23,6 +25,8 @@ const dataProvider: Provider = {
           token: env.BRAPI_TOKEN,
           timeoutMs: env.MARKET_FETCH_TIMEOUT_MS,
           maxBytes: env.MARKET_MAX_RESPONSE_BYTES,
+          maxSymbolsPerCall: env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL,
+          concurrency: env.MARKET_PROVIDER_CONCURRENCY,
           fetchImpl: globalThis.fetch,
           now: clock,
         })

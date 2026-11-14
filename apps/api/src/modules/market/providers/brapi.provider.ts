@@ -20,6 +20,14 @@
  *   `now + 2 min` (tolerância de relógio): hora futura daria idade negativa e passaria no frescor.
  * NÃO verificado contra uma resposta real (sem rede): as fixtures são reconstruídas do exemplo da
  * especificação. O mapeamento de campos segue o `BrapiProvider` do legado Python.
+ *
+ * Planos da brapi: o número de ativos por requisição e de requisições concorrentes depende do plano
+ * (o gratuito aceita 1 e 1). Por isso as cotações vão em lotes de `maxSymbolsPerCall` símbolos
+ * (`MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`, padrão 1), um lote depois do outro, e toda requisição à
+ * brapi (cotação e histórico) passa por uma fila no processo com `concurrency` vagas
+ * (`MARKET_PROVIDER_CONCURRENCY`, padrão 1). Um lote que falha encerra a busca inteira com
+ * `MarketDataUnavailableError`: nenhum resultado parcial sai daqui (o símbolo de um lote falho não
+ * pode parecer "ausente", que o serviço trataria como ativo desconhecido).
  */
 import {
   HistoricalBarSchema,
@@ -41,13 +49,17 @@ import {
   withNetworkRetry,
   type MarketLogger,
 } from "./safe-fetch.js";
+import { ConcurrencyLimiter } from "./concurrency-limiter.js";
 import type { MarketDataProvider, RawQuote } from "./types.js";
 
 const Decimal = Prisma.Decimal;
 type Decimal = Prisma.Decimal;
 
-/** Teto de símbolos por chamada (a rota repete a regra com 422). */
+/** Teto de símbolos por chamada a `fetchQuotes` (a rota repete a regra com 422). */
 export const MAX_SYMBOLS_PER_CALL = 20;
+/** Padrões que cabem em todos os planos da brapi: 1 ativo por requisição, 1 requisição por vez. */
+export const DEFAULT_SYMBOLS_PER_REQUEST = 1;
+export const DEFAULT_CONCURRENCY = 1;
 /** 5 anos de pregões são ~1.260 barras; acima disso a resposta é recusada. */
 const MAX_BARS = 2000;
 const MAX_NAME_LENGTH = 120;
@@ -175,16 +187,28 @@ export interface BrapiProviderOptions {
   logger?: MarketLogger;
   /** Relógio (`CLOCK`): limita a hora das cotações e a data das barras ao presente. */
   now: Clock;
+  /** Símbolos por requisição de cotação, de 1 a 20 (`MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`). */
+  maxSymbolsPerCall?: number | undefined;
+  /** Requisições simultâneas à brapi neste processo (`MARKET_PROVIDER_CONCURRENCY`). */
+  concurrency?: number | undefined;
 }
 
 export class BrapiProvider implements MarketDataProvider {
   private readonly fetchImpl: typeof fetch;
   private readonly logger: MarketLogger;
+  private readonly limiter: ConcurrencyLimiter;
+  private readonly chunkSize: number;
 
   constructor(private readonly opts: BrapiProviderOptions) {
     const base = opts.fetchImpl ?? ((input, init) => fetch(input, init));
     this.fetchImpl = withNetworkRetry(base);
     this.logger = opts.logger ?? defaultMarketLogger();
+    this.limiter = new ConcurrencyLimiter(opts.concurrency ?? DEFAULT_CONCURRENCY);
+    const chunk = opts.maxSymbolsPerCall ?? DEFAULT_SYMBOLS_PER_REQUEST;
+    if (!Number.isInteger(chunk) || chunk < 1 || chunk > MAX_SYMBOLS_PER_CALL) {
+      throw new RangeError("maxSymbolsPerCall fora de 1..20");
+    }
+    this.chunkSize = chunk;
   }
 
   async fetchQuotes(symbols: string[]): Promise<RawQuote[]> {
@@ -195,8 +219,14 @@ export class BrapiProvider implements MarketDataProvider {
     if (symbols.length === 0) return [];
 
     const requested = [...new Set(symbols)];
-    const url = buildProviderUrl(this.opts.baseUrl, ["quote", requested]);
-    const results = await this.fetchResults(url);
+    // Lotes em série; o primeiro erro propaga e descarta o que os anteriores trouxeram.
+    const results: unknown[] = [];
+    for (let i = 0; i < requested.length; i += this.chunkSize) {
+      const chunk = requested.slice(i, i + this.chunkSize);
+      results.push(
+        ...(await this.fetchResults(buildProviderUrl(this.opts.baseUrl, ["quote", chunk]))),
+      );
+    }
 
     const wanted = new Set(requested);
     const seen = new Set<string>();
@@ -251,14 +281,17 @@ export class BrapiProvider implements MarketDataProvider {
   private async fetchResults(url: URL): Promise<unknown[]> {
     const headers: Record<string, string> = {};
     if (this.opts.token) headers.Authorization = `Bearer ${this.opts.token}`;
-    const { status, body } = await safeFetchJsonResponse(url, {
-      fetchImpl: this.fetchImpl,
-      timeoutMs: this.opts.timeoutMs,
-      maxBytes: this.opts.maxBytes,
-      headers,
-      logger: this.logger,
-      allowStatuses: [404],
-    });
+    // Na fila: o prazo (`timeoutMs`) só começa a contar quando a requisição sai de fato.
+    const { status, body } = await this.limiter.run(() =>
+      safeFetchJsonResponse(url, {
+        fetchImpl: this.fetchImpl,
+        timeoutMs: this.opts.timeoutMs,
+        maxBytes: this.opts.maxBytes,
+        headers,
+        logger: this.logger,
+        allowStatuses: [404],
+      }),
+    );
     if (status === 404) {
       if (BrapiNotFoundSchema.safeParse(body).success) return [];
       throw this.badShape(url, status);

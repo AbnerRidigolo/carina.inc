@@ -103,7 +103,7 @@ describe("BrapiProvider.fetchQuotes", () => {
   });
 
   it("token vai no cabeçalho Authorization e nunca na URL; símbolos codificados no caminho", async () => {
-    const { provider, fetchImpl } = setup(QUOTE_BODY);
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { maxSymbolsPerCall: 20 });
     await provider.fetchQuotes(["PETR4", "^BVSP"]);
     const [input, init] = fetchImpl.mock.calls[0] ?? [];
     const url = String(input);
@@ -333,12 +333,147 @@ describe("BrapiProvider: 404 de ticker inexistente", () => {
   });
 
   it("lote misto: 200 sem o ticker desconhecido devolve só os encontrados", async () => {
-    const { provider, fetchImpl } = setup(quoteBody({}));
+    const { provider, fetchImpl } = setup(quoteBody({}), { maxSymbolsPerCall: 20 });
     const quotes = await provider.fetchQuotes(["PETR4", "ZZZZ4"]);
     expect(quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
       "https://brapi.example/api/quote/PETR4,ZZZZ4",
     );
+  });
+});
+
+/** Corpo com uma cotação válida para cada símbolo pedido na URL `/quote/A,B`. */
+function bodyForUrl(input: Parameters<typeof fetch>[0]): string {
+  const path = new URL(String(input)).pathname;
+  const symbols = decodeURIComponent(path.slice(path.lastIndexOf("/") + 1)).split(",");
+  return JSON.stringify({
+    results: symbols.map((symbol) => ({
+      symbol,
+      currency: "BRL",
+      regularMarketPrice: 10,
+      regularMarketTime: "2026-02-08T16:24:54.000Z",
+    })),
+  });
+}
+
+describe("BrapiProvider: lotes e chamadas em série (planos da brapi)", () => {
+  it.each([0, 21, 1.5])("maxSymbolsPerCall %s fora de 1..20 recusa na construção", (n) => {
+    expect(() => setup(QUOTE_BODY, { maxSymbolsPerCall: n })).toThrow(RangeError);
+  });
+
+  it.each([0, -1, 1.5])("concurrency %s inválida recusa na construção", (n) => {
+    expect(() => setup(QUOTE_BODY, { concurrency: n })).toThrow(RangeError);
+  });
+
+  it("padrão: 1 símbolo por requisição (cabe em todos os planos)", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { maxSymbolsPerCall: undefined });
+    fetchImpl.mockImplementation((input) => Promise.resolve(new Response(bodyForUrl(input))));
+    const quotes = await provider.fetchQuotes(["PETR4", "VALE3"]);
+    expect(quotes.map((q) => q.symbol)).toEqual(["PETR4", "VALE3"]);
+    expect(fetchImpl.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://brapi.example/api/quote/PETR4",
+      "https://brapi.example/api/quote/VALE3",
+    ]);
+  });
+
+  it("5 símbolos com N = 2 viram ceil(5/2) = 3 requisições, todas com o mesmo cabeçalho", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { maxSymbolsPerCall: 2 });
+    fetchImpl.mockImplementation((input) => Promise.resolve(new Response(bodyForUrl(input))));
+    const symbols = ["PETR4", "VALE3", "ITUB4", "MGLU3", "BBAS3"];
+    const quotes = await provider.fetchQuotes(symbols);
+    expect(quotes.map((q) => q.symbol)).toEqual(symbols);
+    expect(fetchImpl.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://brapi.example/api/quote/PETR4,VALE3",
+      "https://brapi.example/api/quote/ITUB4,MGLU3",
+      "https://brapi.example/api/quote/BBAS3",
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.headers).toEqual({
+        Accept: "application/json",
+        Authorization: `Bearer ${TOKEN}`,
+      });
+    }
+  });
+
+  it("um lote falhando: nada de resultado parcial, o erro propaga como MarketDataUnavailableError", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { maxSymbolsPerCall: 1 });
+    fetchImpl.mockImplementation((input) =>
+      Promise.resolve(
+        String(input).endsWith("/VALE3")
+          ? new Response("falha", { status: 500 })
+          : new Response(bodyForUrl(input)),
+      ),
+    );
+    await expect(provider.fetchQuotes(["PETR4", "VALE3", "ITUB4"])).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+    // Os lotes rodam em ordem e o primeiro erro encerra a busca: o terceiro nem é pedido.
+    expect(fetchImpl.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://brapi.example/api/quote/PETR4",
+      "https://brapi.example/api/quote/VALE3",
+    ]);
+  });
+
+  it("concorrência 1 (padrão): a segunda chamada só começa quando a primeira termina", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { concurrency: undefined });
+    const pending: { url: string; resolve: () => void }[] = [];
+    fetchImpl.mockImplementation(
+      (input) =>
+        new Promise<Response>((resolve) => {
+          pending.push({
+            url: String(input),
+            resolve: () => resolve(new Response(bodyForUrl(input))),
+          });
+        }),
+    );
+    const first = provider.fetchQuotes(["PETR4"]);
+    const second = provider.fetchHistory("VALE3", "5d");
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    // Dá tempo para a segunda tentar entrar: continua na fila.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pending.map((p) => p.url)).toEqual(["https://brapi.example/api/quote/PETR4"]);
+    pending[0]?.resolve();
+    await expect(first).resolves.toHaveLength(1);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[1]?.url).toContain("/quote/VALE3?");
+    pending[1]?.resolve();
+    await expect(second).resolves.toEqual([]);
+  });
+
+  it("uma chamada que falha libera a vez da próxima", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY);
+    fetchImpl
+      .mockResolvedValueOnce(new Response("falha", { status: 500 }))
+      .mockImplementation((input) => Promise.resolve(new Response(bodyForUrl(input))));
+    const results = await Promise.allSettled([
+      provider.fetchQuotes(["PETR4"]),
+      provider.fetchQuotes(["VALE3"]),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["rejected", "fulfilled"]);
+  });
+
+  it("concorrência 2: duas chamadas ao mesmo tempo, a terceira espera", async () => {
+    const { provider, fetchImpl } = setup(QUOTE_BODY, { concurrency: 2 });
+    const pending: (() => void)[] = [];
+    fetchImpl.mockImplementation(
+      (input) =>
+        new Promise<Response>((resolve) => {
+          pending.push(() => resolve(new Response(bodyForUrl(input))));
+        }),
+    );
+    const calls = [
+      provider.fetchQuotes(["PETR4"]),
+      provider.fetchQuotes(["VALE3"]),
+      provider.fetchQuotes(["ITUB4"]),
+    ];
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pending).toHaveLength(2);
+    pending[0]?.();
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+    pending[1]?.();
+    pending[2]?.();
+    await expect(Promise.all(calls)).resolves.toHaveLength(3);
   });
 });
 

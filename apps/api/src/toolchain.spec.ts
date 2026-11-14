@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 const root = resolve(import.meta.dirname, "../../..");
 const read = (p: string) => readFileSync(resolve(root, p), "utf8");
@@ -107,5 +108,22 @@ describe("versão do Node", () => {
       expect(images.length, file).toBeGreaterThan(0);
       expect(new Set(images), file).toEqual(new Set([nvmrc]));
     }
+  });
+});
+
+/**
+ * Em produção a API recusa subir sem `MARKET_MODE` explícita (nunca cai em mock sem querer). O
+ * compose da demo precisa defini-la em todo serviço que carrega o grafo do orquestrador: api e
+ * worker (e o seed, que usa o mesmo ambiente comum).
+ */
+describe("docker-compose.yml: MARKET_MODE", () => {
+  type Service = { environment?: Record<string, unknown> };
+  const compose = parseYaml(read("docker-compose.yml"), { merge: true }) as {
+    services: Record<string, Service>;
+  };
+
+  it.each(["api", "worker", "seed"])("o serviço %s define MARKET_MODE com padrão mock", (name) => {
+    const value = compose.services[name]?.environment?.MARKET_MODE;
+    expect(value, name).toBe("${MARKET_MODE:-mock}");
   });
 });

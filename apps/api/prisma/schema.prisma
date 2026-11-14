@@ -102,7 +102,7 @@ model Client {
 // ─── Inbox de aprovações ────────────────────────────────────────────────────
 
 model ApprovalRequest {
-  /// determinístico: hash(thread_id, ação, payload)
+  /// determinístico: sha256(thread_id|turno|ação|payload) (ver inbox/approval-id.ts)
   id             String    @id
   tenantId       String    @map("tenant_id") @db.Uuid
   clientId       String    @map("client_id") @db.Uuid

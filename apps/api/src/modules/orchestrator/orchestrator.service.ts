@@ -107,7 +107,10 @@ export class OrchestratorService {
    *   espera pelo mesmo caminho do `resume` (o grafo grava `rejected`, nada executa) e segue o
    *   turno. Se outro chamador (outro turno ou o ResumeWorker) fechou a espera entre a leitura e
    *   a cura, a cura vira no-op e o turno segue (ver `closeResolvedWait`).
-   * - `approved`: ApprovalConflictError; a execução é retomada pelo worker/reconciliação.
+   * - `approved` sem execução: ApprovalConflictError; o worker/reconciliação retoma.
+   * - `approved` com execução `started`: ApprovalConflictError ("em andamento").
+   * - `approved` com execução terminal (`succeeded`/`failed`/`needs_review`) e o thread ainda
+   *   esperando: fecha a espera pelo caminho do `resume` (nada executa: a cerca já existe) e segue.
    * - `pending` válida: ApprovalConflictError.
    *
    * Concorrência: este serviço NÃO serializa turnos do mesmo thread. Dois `stream` inteiros ao
@@ -203,9 +206,29 @@ export class OrchestratorService {
       throw new ApprovalConflictError("A aprovação ainda não foi decidida");
     }
     if (status === "approved") {
-      throw new ApprovalConflictError(
-        "A aprovação foi aprovada e a execução está sendo retomada; tente de novo em instantes",
-      );
+      const execution = await this.inbox.executionOf(approvalId);
+      if (!execution) {
+        // Ainda não executou: o worker (ou o republish da reconciliação) vai retomar.
+        throw new ApprovalConflictError(
+          "A aprovação foi aprovada e a execução está sendo retomada; tente de novo em instantes",
+        );
+      }
+      if (execution.status === "started") {
+        throw new ApprovalConflictError(
+          "A execução desta aprovação está em andamento; tente de novo em instantes",
+        );
+      }
+      // succeeded / failed / needs_review: a execução já terminou (ou foi encerrada sem
+      // executar), mas o thread não recebeu o resume. Fecha a espera pelo caminho do resume: o nó
+      // `approval` relê o banco, o `executeOnce` vê a cerca existente (nada executa) e o grafo
+      // grava o status real.
+      this.logger.warn({
+        msg: "Espera de aprovação com execução já terminal fechada no novo turno",
+        approvalId,
+        threadId,
+        executionStatus: execution.status,
+      });
+      return this.resumeTolerant(threadId, approvalId, true);
     }
     // rejected / expired: o `resume` perdido nunca vai chegar (a reconciliação só republica
     // aprovadas). Fecha a espera pelo caminho do resume; `approved: false` é só o sinal.
@@ -214,8 +237,17 @@ export class OrchestratorService {
       approvalId,
       threadId,
     });
+    return this.resumeTolerant(threadId, approvalId, false);
+  }
+
+  /** `resume` da cura do guard, tolerante à corrida com outro chamador que já fechou a espera. */
+  private async resumeTolerant(
+    threadId: string,
+    approvalId: string,
+    approved: boolean,
+  ): Promise<void> {
     try {
-      await this.resume(threadId, false);
+      await this.resume(threadId, approved);
     } catch (err) {
       // Corrida: entre a leitura do guard e esta cura, outro chamador já fechou a espera e um
       // turno novo começou (o `classify` zera `pending`), então `resume` não acha a aprovação.

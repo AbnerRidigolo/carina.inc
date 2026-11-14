@@ -122,7 +122,7 @@ const HOUR_MS = 3_600_000;
  */
 export const ORPHAN_GRACE_MS = 2 * 60_000;
 
-export type OrphanReason = "thread_not_waiting" | "republish_window";
+export type OrphanReason = "thread_not_waiting";
 const APPROVAL_ID_RE = /^[0-9a-f]{64}$/;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_ERROR_CHARS = 500;
@@ -193,8 +193,8 @@ export class InboxService {
   ) {}
 
   /**
-   * Upsert idempotente da solicitação (id = hash(thread, ação, payload)): o nó executor roda de
-   * novo ao retomar e não duplica. Roda sob o TenantContext do tenant E do cliente (o `threadId`
+   * Upsert idempotente da solicitação (id = sha256(thread|turno|ação|payload)): uma nova tentativa
+   * do nó executor no mesmo turno não duplica, e a mesma ordem em outro turno é outro pedido. Roda sob o TenantContext do tenant E do cliente (o `threadId`
    * é `tenantId:clientId:uuid`). Só publica `approval.created` quando a linha foi criada agora.
    * `valueBrl` é validado ANTES de qualquer SQL (MoneySchema, não negativo): valor ruim → 422 e
    * nenhuma linha.
@@ -352,7 +352,7 @@ export class InboxService {
         channel: "worker",
         query: `orphan:${row.action}`,
         agents: [row.agent],
-        responseText: `Aprovação ${id} aprovada sem thread à espera (${reason}); marcada needs_review, sem executar`,
+        responseText: `Aprovação ${id} aprovada, mas o thread não espera por ela (${reason}); marcada needs_review, sem executar`,
         durationMs: 0,
       });
       this.logger.warn({

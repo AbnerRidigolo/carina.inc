@@ -16,7 +16,7 @@ import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { ApprovalConflictError } from "../../src/core/errors/domain-errors.js";
 import { StreamsService } from "../../src/core/redis/streams.service.js";
 import { ExecutorRegistry } from "../../src/modules/inbox/executors.js";
-import { InboxService } from "../../src/modules/inbox/inbox.service.js";
+import { INBOX_LOGGER, InboxService } from "../../src/modules/inbox/inbox.service.js";
 import { KnowledgeService } from "../../src/modules/knowledge/knowledge.service.js";
 import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js";
 import { CLOCK } from "../../src/modules/limits/clock.js";
@@ -69,6 +69,7 @@ describe("ResumeWorker (int)", () => {
       overrides: [
         { token: CLOCK, useValue: () => Date.now() + offset },
         { token: RESUME_LOGGER, useValue: logger },
+        { token: INBOX_LOGGER, useValue: logger },
       ],
     });
     t.app.get(ExecutorRegistry).register("place_trade", placeTrade);
@@ -610,24 +611,69 @@ describe("ResumeWorker (int)", () => {
       expect(await audits(A)).toEqual([]);
     });
 
-    it("reconciliação: aprovada sem execução além da janela de republicação vira needs_review (sem laço infinito)", async () => {
+    it("reconciliação além de 1 h: nunca fecha sozinha; republica com backoff e o worker fecha a órfã", async () => {
       const t = await start();
       const A = await party(t, "Órfã janela");
-      const { approvalId } = await orphan(t, A);
+      const { threadId, approvalId } = await orphan(t, A);
       const job = t.app.get(ReconciliationJob);
 
-      offset = 3 * 60_000; // dentro da janela: republica
+      offset = 2 * HOUR;
       await job.run({ onlyTenants: [A.tenantId] });
       expect((await resumesOf(A)).map((e) => e.approvalId)).toEqual([approvalId]);
+      expect(await execution(A, approvalId)).toBeUndefined();
       await redis.del("jobs");
-
-      offset = 2 * HOUR; // além da janela: fecha em vez de republicar
+      // Backoff: o tick seguinte não republica de novo.
       await job.run({ onlyTenants: [A.tenantId] });
       expect(await resumesOf(A)).toEqual([]);
+
+      // O worker, que relê o checkpoint, é quem fecha a órfã verdadeira.
+      await t.app.get(ResumeWorker).handle(resumeEvent(A, threadId, approvalId));
       expect(await execution(A, approvalId)).toEqual({ status: "needs_review" });
       expect(await audits(A)).toHaveLength(1);
       expect(await activeTenants()).not.toContain(A.tenantId);
       expect(placeTrade).not.toHaveBeenCalled();
+    });
+
+    it("aprovada e ESPERADA pelo thread além de 1 h: não fecha, segue republicada (aviso sem payload) e executa quando o worker volta", async () => {
+      const t = await start();
+      const A = await party(t, "Esperada além da janela");
+      const { threadId, approvalId } = await paused(t, A);
+      await decide(t, A, approvalId, true);
+      await redis.del("jobs"); // o resume se perdeu (worker fora, DLQ…)
+
+      offset = 2 * HOUR;
+      await t.app.get(ReconciliationJob).run({ onlyTenants: [A.tenantId] });
+      expect(await execution(A, approvalId)).toBeUndefined();
+      expect(await audits(A)).toEqual([]);
+      const resumes = await resumesOf(A);
+      expect(resumes.map((e) => e.approvalId)).toEqual([approvalId]);
+      const warned = logger.warn.mock.calls.map((c) => c[0] as Record<string, unknown>);
+      const alert = warned.find((w) => w["approvalId"] === approvalId);
+      expect(alert?.["msg"]).toMatch(/mais de 1 h/);
+      expect(JSON.stringify(alert)).not.toContain("PETR4");
+
+      // A infraestrutura volta: a entrega republicada executa uma vez.
+      await t.app.get(ResumeWorker).handle(must(resumes[0]));
+      expect(await execution(A, approvalId)).toEqual({ status: "succeeded" });
+      expect(placeTrade).toHaveBeenCalledTimes(1);
+      expect((await turn(t, A, threadId, "e agora?")).length).toBeGreaterThan(0);
+    });
+
+    it("corrida: fechamento de órfã contra um resume legítimo de uma aprovação esperada não perde nem duplica a execução", async () => {
+      const t = await start();
+      const A = await party(t, "Corrida órfã x resume");
+      const { threadId, approvalId } = await paused(t, A);
+      await decide(t, A, approvalId, true);
+      await redis.del("jobs");
+      offset = 2 * HOUR;
+      const svc = t.app.get(OrchestratorService);
+      const [closed] = await as(A, () =>
+        Promise.all([svc.closeOrphan(threadId, approvalId), svc.resume(threadId, true)]),
+      );
+      expect(closed).toBe(false);
+      expect(await execution(A, approvalId)).toEqual({ status: "succeeded" });
+      expect(placeTrade).toHaveBeenCalledTimes(1);
+      expect(await audits(A)).toEqual([]);
     });
   });
 
@@ -744,6 +790,43 @@ describe("ResumeWorker (int)", () => {
       expect(await approvalStatus(A, approvalId)).toBe("rejected");
       expect(placeTrade).not.toHaveBeenCalled();
       expect(await execution(A, approvalId)).toBeUndefined();
+    });
+
+    it("aprovada com execução já terminal (needs_review) e o thread ainda esperando: o próximo turno cura e passa, sem executar", async () => {
+      const t = await start();
+      const A = await party(t, "Cura needs_review");
+      const { threadId, approvalId } = await lost(t, A);
+      await decide(t, A, approvalId, true);
+      await redis.del("jobs");
+      // Estado deixado por um fechamento antigo (ou por um executor que caiu): needs_review.
+      await migratorSql(
+        `INSERT INTO executed_action (approval_request_id, tenant_id, client_id, status, started_at, finished_at)
+         VALUES ($1, $2, $3, 'needs_review', now(), now())`,
+        [approvalId, A.tenantId, A.clientId],
+        { tenantId: A.tenantId },
+      );
+      const events = await turn(t, A, threadId, "como está minha carteira?");
+      expect(events.length).toBeGreaterThan(0);
+      expect(placeTrade).not.toHaveBeenCalled();
+      expect(await execution(A, approvalId)).toEqual({ status: "needs_review" });
+      expect(await awaiting(t, A, threadId)).toBe(false);
+      expect((await turn(t, A, threadId, "e agora?")).length).toBeGreaterThan(0);
+    });
+
+    it("aprovada com a execução em andamento (started): 409 dizendo que está em andamento", async () => {
+      const t = await start();
+      const A = await party(t, "Em andamento");
+      const { threadId, approvalId } = await lost(t, A);
+      await decide(t, A, approvalId, true);
+      await redis.del("jobs");
+      await migratorSql(
+        `INSERT INTO executed_action (approval_request_id, tenant_id, client_id, status, started_at)
+         VALUES ($1, $2, $3, 'started', now())`,
+        [approvalId, A.tenantId, A.clientId],
+        { tenantId: A.tenantId },
+      );
+      await expect(turn(t, A, threadId, "olá")).rejects.toThrow(/em andamento/);
+      expect(placeTrade).not.toHaveBeenCalled();
     });
 
     it("pending válida: continua 409 e nada executa", async () => {

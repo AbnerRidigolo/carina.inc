@@ -34,7 +34,7 @@ import { TenantPrismaService } from "../../core/database/tenant-prisma.service.j
 import { LockService } from "../../core/redis/lock.service.js";
 import { StreamsService } from "../../core/redis/streams.service.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
-import { INBOX_LOGGER, InboxService, publishResume, type InboxLogger } from "./inbox.service.js";
+import { INBOX_LOGGER, publishResume, type InboxLogger } from "./inbox.service.js";
 
 export const RECONCILIATION_INTERVAL_MS = 60_000;
 export const RECONCILIATION_LOCK_KEY = "inbox:reconciliation:lock";
@@ -42,11 +42,15 @@ const LOCK_TTL_MS = 50_000;
 const APPROVED_GRACE_MS = 2 * 60_000;
 const STARTED_STALE_MS = 5 * 60_000;
 /**
- * Janela de republicação de uma aprovação `approved` sem execução. Passada a janela, o `resume`
- * não é mais republicado e a aprovação é fechada como órfã (needs_review, auditada): sem laço
- * infinito de republicação nem tenant eterno em `active_tenant_ids()`.
+ * Uma aprovação `approved` sem execução é republicada a cada tick na primeira hora. Depois, com
+ * backoff (no máximo uma vez a cada APPROVED_BACKOFF_MS por aprovação, marcado no Redis) e com um
+ * aviso sem payload. A reconciliação NUNCA fecha a aprovação sozinha: ela não sabe se o thread a
+ * espera (pode ser só o worker fora). Quem fecha uma órfã verdadeira é o ResumeWorker, que relê o
+ * checkpoint ao receber o republish (`OrchestratorService.closeOrphan`).
  */
 export const APPROVED_REPUBLISH_WINDOW_MS = 60 * 60_000;
+export const APPROVED_BACKOFF_MS = 15 * 60_000;
+export const republishBackoffKey = (approvalId: string) => `inbox:republish-backoff:${approvalId}`;
 const BATCH = 500;
 
 interface ApprovalRef {
@@ -75,7 +79,6 @@ export class ReconciliationJob
     @Inject(LockService) private readonly locks: LockService,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(INBOX_LOGGER) private readonly logger: InboxLogger,
-    @Inject(InboxService) private readonly inbox: Pick<InboxService, "closeOrphan">,
   ) {}
 
   /** O timer está ligado. */
@@ -176,7 +179,7 @@ export class ReconciliationJob
       });
     }
 
-    // 2. approved sem execução há > 2 min → republica resume; além da janela → fecha como órfã
+    // 2. approved sem execução há > 2 min → republica resume (além de 1 h, com backoff e aviso)
     const stuck = await this.db.tx(
       (tx) =>
         tx.$queryRaw<(ApprovalRef & { expired_window: boolean })[]>`
@@ -189,8 +192,17 @@ export class ReconciliationJob
     );
     for (const row of stuck) {
       if (row.expired_window) {
-        await this.inbox.closeOrphan(row.id, "republish_window", { minAgeMs: 0 });
-        continue;
+        // Sem `release`: a chave vence sozinha e marca o próximo republish permitido.
+        const slot = await this.locks.acquire(republishBackoffKey(row.id), APPROVED_BACKOFF_MS, {
+          heartbeat: false,
+        });
+        if (!slot) continue;
+        this.logger.warn({
+          msg: "Aprovação aprovada sem execução há mais de 1 h; resume republicado com backoff",
+          tenantId,
+          clientId: row.client_id,
+          approvalId: row.id,
+        });
       }
       await publishResume(this.streams, this.logger, {
         tenantId,

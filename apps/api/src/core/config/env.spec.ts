@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadEnv } from "./env.js";
+import { brapiUrlAllowsToken, loadEnv } from "./env.js";
 
 const min = {
   NODE_ENV: "test",
@@ -84,6 +84,25 @@ describe("loadEnv", () => {
         expect(() => loadEnv({ ...min, [name]: bad })).toThrow(new RegExp(name));
       }
     }
+  });
+
+  it("BRAPI_TOKEN definido exige BRAPI_BASE_URL https (o token não vai em claro)", () => {
+    for (const url of ["http://brapi.dev/api", "http://localhost:8080/api"]) {
+      expect(() => loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: url })).toThrow(
+        /BRAPI_BASE_URL: .*https/,
+      );
+      // Sem token, http segue aceito (ex.: um provedor falso local em teste).
+      expect(loadEnv({ ...min, BRAPI_BASE_URL: url }).BRAPI_BASE_URL).toBe(url);
+    }
+    expect(
+      loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: "https://brapi.dev/api" }).BRAPI_TOKEN,
+    ).toBe("tok");
+    expect(brapiUrlAllowsToken("não é url", "tok")).toBe(false);
+    expect(brapiUrlAllowsToken("não é url", undefined)).toBe(true);
+    // Token vazio conta como ausente.
+    expect(
+      loadEnv({ ...min, BRAPI_TOKEN: "", BRAPI_BASE_URL: "http://x.test/api" }).BRAPI_TOKEN,
+    ).toBeUndefined();
   });
 
   it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {

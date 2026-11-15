@@ -3,6 +3,19 @@ import { z } from "zod";
 const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
 const optionalSecret = z.preprocess(emptyToUndefined, z.string().min(1).optional());
 
+/**
+ * Com token da brapi, a URL base precisa ser `https:` (o token vai no cabeçalho `Authorization` e
+ * iria em claro). Sem token, `http:` continua aceito. Também usada pela fumaça manual (smoke.ts).
+ */
+export function brapiUrlAllowsToken(baseUrl: string, token: string | undefined): boolean {
+  if (token === undefined) return true;
+  try {
+    return new URL(baseUrl).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export const EnvSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -34,7 +47,7 @@ export const EnvSchema = z
     MARKET_MODE: z.preprocess(emptyToUndefined, z.enum(["live", "mock"]).optional()),
     /**
      * Token da brapi.dev (opcional: sem ele só PETR4, MGLU3, VALE3 e ITUB4 respondem; ver a
-     * documentação da brapi).
+     * documentação da brapi). Com token, `BRAPI_BASE_URL` precisa ser `https:`.
      */
     BRAPI_TOKEN: optionalSecret,
     BRAPI_BASE_URL: z.string().url().default("https://brapi.dev/api"),
@@ -95,6 +108,10 @@ export const EnvSchema = z
   .refine((e) => e.NODE_ENV !== "production" || e.LLM_MODE !== undefined, {
     path: ["LLM_MODE"],
     message: "LLM_MODE (live|mock) é obrigatória com NODE_ENV=production",
+  })
+  .refine((e) => brapiUrlAllowsToken(e.BRAPI_BASE_URL, e.BRAPI_TOKEN), {
+    path: ["BRAPI_BASE_URL"],
+    message: "BRAPI_BASE_URL precisa ser https quando BRAPI_TOKEN está definido",
   })
   .refine((e) => e.NODE_ENV !== "production" || e.MARKET_MODE !== undefined, {
     path: ["MARKET_MODE"],

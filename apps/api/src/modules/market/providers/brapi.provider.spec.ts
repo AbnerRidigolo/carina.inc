@@ -281,13 +281,17 @@ describe("BrapiProvider: hora da cotação", () => {
     expect(await provider.fetchQuotes(["PETR4"])).toEqual([]);
   });
 
-  it("hora exatamente em now + 2 min passa; 1 ms a mais descarta", async () => {
+  it("hora exatamente em now + 2 min passa (limitada a now); 1 ms a mais descarta", async () => {
     const { provider: atLimit } = setup(
       quoteBody({ regularMarketTime: new Date(NOW + SKEW_MS).toISOString() }),
     );
-    expect((await atLimit.fetchQuotes(["PETR4"]))[0]?.updatedAt).toBe(
-      new Date(NOW + SKEW_MS).toISOString(),
+    // Relógio adiantado tolerado, mas a hora sai limitada a `now`: idade 0, nunca negativa (senão
+    // a cotação passaria nas rotas e o priceFor a recusaria como price_stale).
+    expect((await atLimit.fetchQuotes(["PETR4"]))[0]?.updatedAt).toBe(new Date(NOW).toISOString());
+    const { provider: ahead } = setup(
+      quoteBody({ regularMarketTime: new Date(NOW + 30_000).toISOString() }),
     );
+    expect((await ahead.fetchQuotes(["PETR4"]))[0]?.updatedAt).toBe(new Date(NOW).toISOString());
     const { provider: past } = setup(
       quoteBody({ regularMarketTime: new Date(NOW + SKEW_MS + 1).toISOString() }),
     );

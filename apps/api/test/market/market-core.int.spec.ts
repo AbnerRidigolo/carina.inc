@@ -13,6 +13,7 @@ import { MarketCoreModule } from "../../src/modules/market/market-core.module.js
 import {
   MACRO_PROVIDER,
   MARKET_DATA_PROVIDER,
+  MARKET_LOGGER,
   MarketService,
 } from "../../src/modules/market/market.service.js";
 import { BcbProvider } from "../../src/modules/market/providers/bcb.provider.js";
@@ -41,7 +42,10 @@ const QUOTE = JSON.stringify({
   ],
 });
 
-async function boot(extra: Record<string, string>): Promise<TestingModule> {
+async function boot(
+  extra: Record<string, string>,
+  logger?: { warn: (fields: unknown) => void },
+): Promise<TestingModule> {
   const env = loadEnv({
     ...process.env,
     NODE_ENV: "test",
@@ -52,10 +56,11 @@ async function boot(extra: Record<string, string>): Promise<TestingModule> {
     LOG_LEVEL: "silent",
     ...extra,
   });
-  const ref = await Test.createTestingModule({ imports: [ConfigModule, MarketCoreModule] })
+  let builder = Test.createTestingModule({ imports: [ConfigModule, MarketCoreModule] })
     .overrideProvider(ENV)
-    .useValue(env)
-    .compile();
+    .useValue(env);
+  if (logger) builder = builder.overrideProvider(MARKET_LOGGER).useValue(logger);
+  const ref = await builder.compile();
   await ref.init();
   return ref;
 }
@@ -153,5 +158,14 @@ describe("MarketCoreModule: escolha do provedor", () => {
       "/api/quote/PETR4,VALE3",
       "/api/quote/ITUB4",
     ]);
+  });
+
+  it("MARKET_LOGGER é provido pelo módulo; NODE_ENV=production + mock registra o warn no boot", async () => {
+    const plain = await boot({ MARKET_MODE: "mock" });
+    expect(plain.get(MARKET_LOGGER)).toBeDefined();
+    await plain.close();
+    const warn = vi.fn();
+    ref = await boot({ NODE_ENV: "production", MARKET_MODE: "mock" }, { warn });
+    expect(warn).toHaveBeenCalledWith({ msg: "preços simulados (MARKET_MODE=mock)" });
   });
 });

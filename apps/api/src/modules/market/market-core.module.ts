@@ -4,7 +4,12 @@ import type { Env } from "../../core/config/env.js";
 import { RedisModule } from "../../core/redis/redis.module.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { LimitsCoreModule } from "../limits/limits-core.module.js";
-import { MACRO_PROVIDER, MARKET_DATA_PROVIDER, MarketService } from "./market.service.js";
+import {
+  MACRO_PROVIDER,
+  MARKET_DATA_PROVIDER,
+  MarketService,
+  marketLoggerProvider,
+} from "./market.service.js";
 import { BcbProvider } from "./providers/bcb.provider.js";
 import { BrapiProvider } from "./providers/brapi.provider.js";
 import { MockMarketProvider } from "./providers/mock.provider.js";
@@ -51,7 +56,7 @@ const macroProvider: Provider = {
 /** MarketService e provedores, sem rotas nem guards (orquestrador e WorkerModule). */
 @Module({
   imports: [RedisModule, LimitsCoreModule],
-  providers: [dataProvider, macroProvider, MarketService],
+  providers: [dataProvider, macroProvider, marketLoggerProvider, MarketService],
   exports: [MarketService],
 })
 export class MarketCoreModule {}

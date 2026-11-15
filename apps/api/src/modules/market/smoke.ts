@@ -6,9 +6,12 @@
  * símbolo, preço e hora. Serve para rodar UMA vez com rede e registrar respostas reais: as
  * fixtures dos provedores foram reconstruídas da documentação (o sandbox de desenvolvimento não
  * alcançava os provedores). Lê `BRAPI_TOKEN` (opcional) e as URLs-base do ambiente; nunca imprime
- * o token nem URLs. Sai com código ≠ 0 se qualquer chamada falhar.
+ * o token nem URLs completas (o logger dos provedores registra só host e motivo). Recusa, antes de
+ * qualquer chamada, limites que não são inteiros positivos e token com URL base sem https (a
+ * mesma regra do env.ts). Sai com código ≠ 0 se qualquer chamada falhar.
  */
 import { pathToFileURL } from "node:url";
+import { brapiUrlAllowsToken } from "../../core/config/env.js";
 import { BcbProvider } from "./providers/bcb.provider.js";
 import { BrapiProvider } from "./providers/brapi.provider.js";
 
@@ -18,14 +21,31 @@ const SGS_EXPECTED = 4;
 const nonEmpty = (v: string | undefined): string | undefined =>
   v === undefined || v.trim() === "" ? undefined : v.trim();
 
+/** Inteiro positivo da variável (ou o padrão); senão lança com o nome, sem o valor. */
+function positiveInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = Number(nonEmpty(raw) ?? fallback);
+  if (!Number.isInteger(value) || value < 1)
+    throw new Error(`${name} precisa ser inteiro positivo`);
+  return value;
+}
+
 export async function smoke(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const timeoutMs = Number(nonEmpty(env.MARKET_FETCH_TIMEOUT_MS) ?? 8000);
-  const maxBytes = Number(nonEmpty(env.MARKET_MAX_RESPONSE_BYTES) ?? 1_048_576);
+  const timeoutMs = positiveInt("MARKET_FETCH_TIMEOUT_MS", env.MARKET_FETCH_TIMEOUT_MS, 8000);
+  const maxBytes = positiveInt(
+    "MARKET_MAX_RESPONSE_BYTES",
+    env.MARKET_MAX_RESPONSE_BYTES,
+    1_048_576,
+  );
   const now = () => Date.now();
+  const baseUrl = nonEmpty(env.BRAPI_BASE_URL) ?? "https://brapi.dev/api";
+  const token = nonEmpty(env.BRAPI_TOKEN);
+  if (!brapiUrlAllowsToken(baseUrl, token)) {
+    throw new Error("BRAPI_BASE_URL precisa ser https quando BRAPI_TOKEN está definido");
+  }
 
   const brapi = new BrapiProvider({
-    baseUrl: nonEmpty(env.BRAPI_BASE_URL) ?? "https://brapi.dev/api",
-    token: nonEmpty(env.BRAPI_TOKEN),
+    baseUrl,
+    token,
     timeoutMs,
     maxBytes,
     fetchImpl: fetch,

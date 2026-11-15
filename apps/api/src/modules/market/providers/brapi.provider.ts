@@ -18,6 +18,8 @@
  *   `MarketDataUnavailableError`.
  * - `regularMarketTime` só vale como ISO 8601 estrito com `Z` ou offset, entre 2000-01-01 e
  *   `now + 2 min` (tolerância de relógio): hora futura daria idade negativa e passaria no frescor.
+ *   Dentro da tolerância, a hora sai limitada a `now` (idade 0): o `priceFor` exige idade ≥ 0, e
+ *   sem o limite uma cotação aceita pelas rotas seria recusada no preço.
  * NÃO verificado contra uma resposta real (sem rede): as fixtures são reconstruídas do exemplo da
  * especificação. O mapeamento de campos segue o `BrapiProvider` do legado Python.
  *
@@ -147,14 +149,17 @@ function toVolume(raw: unknown): string | null {
   return QuoteSchema.shape.volume.safeParse(text).success ? text : null;
 }
 
-/** Hora da cotação em UTC, ou `null` se não for ISO estrito ou estiver fora de [piso, now + 2 min]. */
+/**
+ * Hora da cotação em UTC, limitada a `now`, ou `null` se não for ISO estrito ou estiver fora de
+ * [piso, now + 2 min].
+ */
 function toQuoteTime(raw: unknown, nowMs: number): string | null {
   if (typeof raw !== "string" || raw.length > 40 || !QuoteTimeSchema.safeParse(raw).success) {
     return null;
   }
   const ms = Date.parse(raw);
   if (!Number.isFinite(ms) || ms < MIN_QUOTE_TIME_MS || ms > nowMs + CLOCK_SKEW_MS) return null;
-  return new Date(ms).toISOString();
+  return new Date(Math.min(ms, nowMs)).toISOString();
 }
 
 /** Remove caracteres de controle e de formatação, junta espaços e limita o tamanho. */

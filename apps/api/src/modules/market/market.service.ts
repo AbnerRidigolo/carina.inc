@@ -55,7 +55,7 @@ import {
   type Quote,
   QuoteSchema,
 } from "@carina/shared";
-import { Inject, Injectable, Logger, type OnModuleInit, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import type { Redis } from "ioredis";
 import { type ZodType, z } from "zod";
 import { ENV } from "../../core/config/config.module.js";
@@ -74,6 +74,7 @@ import type { MacroProvider, MarketDataProvider, RawQuote } from "./providers/ty
 
 export const MARKET_DATA_PROVIDER = Symbol("MARKET_DATA_PROVIDER");
 export const MACRO_PROVIDER = Symbol("MACRO_PROVIDER");
+/** Logger do serviço, provido por `marketLoggerProvider` (substituível com `overrideProvider`). */
 export const MARKET_LOGGER = Symbol("MARKET_LOGGER");
 
 /** Forma de OBJETO no 1º argumento (nestjs-pino): `err` no topo; só ids. */
@@ -150,9 +151,7 @@ export class MarketService implements OnModuleInit {
     @Inject(REDIS) private readonly redis: Pick<Redis, "get" | "set" | "eval">,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ENV) private readonly env: MarketEnv,
-    @Optional()
-    @Inject(MARKET_LOGGER)
-    private readonly logger: MarketLogger = new Logger(MarketService.name),
+    @Inject(MARKET_LOGGER) private readonly logger: MarketLogger,
   ) {}
 
   /**
@@ -521,3 +520,9 @@ export class MarketService implements OnModuleInit {
     }
   }
 }
+
+/** Provider do logger do serviço (o mesmo padrão de `ingestionLoggerProvider`). */
+export const marketLoggerProvider = {
+  provide: MARKET_LOGGER,
+  useFactory: (): MarketLogger => new Logger(MarketService.name),
+};

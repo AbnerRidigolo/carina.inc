@@ -50,6 +50,8 @@ const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
  * Ações que movem dinheiro (as execuções com executor registrado: ordem, transferência e
  * rebalanceamento). Só nelas o `valueBrl` é a base da taxa e vale conferir o payload; em outras
  * ações chaves como `price`/`value` têm outro sentido (ex.: o limite de um `create_alert`).
+ * Fixado contra o `ExecutorRegistry` em executor-value.spec.ts: toda ação registrada que pede
+ * aprovação (irreversível) tem de estar aqui, e vice-versa.
  */
 export const MONEY_MOVING_ACTIONS: ReadonlySet<string> = new Set([
   "place_trade",

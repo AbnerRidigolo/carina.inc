@@ -8,7 +8,9 @@
 import type { ActionProposal } from "@carina/shared";
 import { describe, expect, it } from "vitest";
 import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
-import { refineProposal } from "./executor.js";
+import { ExecutorRegistry } from "../inbox/executors.js";
+import { classifyRisk } from "../inbox/risk.js";
+import { MONEY_MOVING_ACTIONS, refineProposal } from "./executor.js";
 
 const proposal = (over: Partial<ActionProposal>): ActionProposal => ({
   action: "transfer",
@@ -109,5 +111,25 @@ describe("refineProposal: place_trade, o servidor vence", () => {
     expect(() => refineProposal(proposal({ payload: { amount: 10 }, valueBrl: "100.00" }))).toThrow(
       AllProvidersFailedError,
     );
+  });
+});
+
+describe("MONEY_MOVING_ACTIONS × ExecutorRegistry (pino contra divergência)", () => {
+  // Registro com os executores padrão do boot; o banco não é tocado (só leituras usam).
+  const registry = new ExecutorRegistry({} as never);
+  const registered = [
+    ...(registry as unknown as { executors: Map<string, unknown> }).executors.keys(),
+  ];
+
+  it("toda ação com executor registrado que pede aprovação (irreversível) move dinheiro e está no conjunto", () => {
+    const irreversible = registered.filter((a) => classifyRisk(a) === "irreversible").sort();
+    expect(irreversible).toEqual([...MONEY_MOVING_ACTIONS].sort());
+  });
+
+  it("toda ação do conjunto tem executor registrado e é irreversível", () => {
+    for (const action of MONEY_MOVING_ACTIONS) {
+      expect(registry.get(action)).toBeTypeOf("function");
+      expect(classifyRisk(action)).toBe("irreversible");
+    }
   });
 });

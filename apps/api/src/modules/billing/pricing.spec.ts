@@ -1,7 +1,13 @@
 import { WorkTypeSchema } from "@carina/shared";
 import { describe, expect, it } from "vitest";
 import { Prisma } from "../../generated/prisma/client.js";
-import { classifyWork, computeExecutionPrice, extractValueBrl, PRICE_BRL } from "./pricing.js";
+import {
+  classifyWork,
+  computeExecutionPrice,
+  extractValueBrl,
+  payloadNotionalBrl,
+  PRICE_BRL,
+} from "./pricing.js";
 
 const Decimal = Prisma.Decimal;
 
@@ -120,6 +126,15 @@ describe("computeExecutionPrice", () => {
     expect(big.priceBrl.toFixed(2)).toBe("50000000000075.00");
   });
 
+  it("precisão de 64 dígitos: valor ~1e16 com taxa de várias casas não erra o centavo", () => {
+    // 9899468931549282.82 × 0,1234% = 12215944661531.81499988 → ...531.81 (com 20 dígitos daria .82).
+    const r = computeExecutionPrice(new Decimal("9899468931549282.82"), 0.1234);
+    expect(r.feeBrl.toFixed(2)).toBe("12215944661531.81");
+    expect(r.priceBrl.toFixed(2)).toBe("12215944661606.81");
+    expect(r.feeBrl).toBeInstanceOf(Decimal);
+    expect(r.priceBrl).toBeInstanceOf(Decimal);
+  });
+
   it("valor negativo não gera fee negativo", () => {
     expect(computeExecutionPrice(new Decimal("-100"), 0.5).feeBrl.toFixed(2)).toBe("0.00");
   });
@@ -127,5 +142,21 @@ describe("computeExecutionPrice", () => {
   it("rejeita percentual inválido", () => {
     expect(() => computeExecutionPrice(new Decimal(1), -1)).toThrow(RangeError);
     expect(() => computeExecutionPrice(new Decimal(1), Number.NaN)).toThrow(RangeError);
+  });
+});
+
+describe("payloadNotionalBrl", () => {
+  it("quantidade × preço exato (64 dígitos) antes das 2 casas", () => {
+    // Exato: 0,00499999999999999999999 → 0,00; com 20 dígitos o produto viraria 0,005 → 0,01.
+    const n = payloadNotionalBrl({ unitPriceBrl: "0.00499999999999999999999", quantity: 1 });
+    expect(n?.toFixed(2)).toBe("0.00");
+    expect(n).toBeInstanceOf(Decimal);
+    expect(payloadNotionalBrl({ price: "30.00", quantity: "100" })?.toFixed(2)).toBe("3000.00");
+  });
+
+  it("sem preço → undefined; preço ou quantidade não numéricos → null", () => {
+    expect(payloadNotionalBrl({ quantity: 1 })).toBeUndefined();
+    expect(payloadNotionalBrl({ price: "x", quantity: 1 })).toBeNull();
+    expect(payloadNotionalBrl({ price: "1", quantity: "y" })).toBeNull();
   });
 });

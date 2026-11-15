@@ -14,20 +14,11 @@
  */
 import { PriceSchema, type Quote } from "@carina/shared";
 import { Prisma } from "../../generated/prisma/client.js";
+import { ExactDecimal } from "../billing/exact-decimal.js";
 import { MAX_MONEY_BRL } from "../billing/pricing.js";
 import { MarketPriceError } from "../market/market-price-error.js";
 import { PlaceTradePayloadSchema } from "./executor.js";
 
-/**
- * Decimal com precisão que cobre o produto exato. O `Prisma.Decimal` arredonda cada operação para
- * 20 dígitos significativos, e quantidade (até 10 inteiros e 8 casas) × preço (até 12 inteiros e 6
- * casas) chega a 36: com 20, um produto como 9999999900.00499999995 viraria ...00.0050000000 e o
- * meio para cima subiria um centavo. Com 64 o produto é exato e só a regra das 2 casas arredonda.
- */
-const ExactDecimal = Prisma.Decimal.clone({
-  precision: 64,
-  rounding: Prisma.Decimal.ROUND_HALF_UP,
-});
 const MAX_NOTIONAL = new ExactDecimal(MAX_MONEY_BRL.toFixed());
 
 const unavailable = (): MarketPriceError => new MarketPriceError("price_unavailable");

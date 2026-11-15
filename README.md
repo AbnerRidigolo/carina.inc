@@ -73,6 +73,10 @@ curl -s -X POST localhost:3000/api/inbox/<approval.id>/decision -H "$APPROVER" \
 curl -s localhost:3000/api/usage -H "$APP"                                    # → execution: 90.00
 ```
 
+Com a chave app, a decisão devolve **403**: ela não tem `inbox:decide`. Esse roteiro roda no CI
+(job `compose-smoke`) e no teste
+[`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
+
 Dados de mercado (escopo `market:read`, que a chave app da demo tem):
 
 ```bash
@@ -81,17 +85,15 @@ curl -s "localhost:3000/api/market/quotes?symbols=PETR4,VALE3" -H "$APP"
 curl -s localhost:3000/api/market/macro -H "$APP"
 ```
 
-`GET /api/market/history/:symbol?range=` completa as três rotas. Cada chamada bem-sucedida custa
-R$ 0,05 (`data_query`), inclusive quando a resposta vem do cache; provedor fora devolve 502 e nada
-é cobrado. Por padrão (`MARKET_MODE=mock`) os preços vêm de uma tabela fixa: PETR4, VALE3, ITUB4,
+`GET /api/market/history/:symbol?range=` completa as três rotas. No CI, o `compose-smoke` só
+consulta a cotação de PETR4; as três rotas são cobertas por
+[`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts). Cada
+chamada bem-sucedida custa R$ 0,05 (`data_query`), inclusive quando a resposta vem do cache;
+provedor fora (502) ou orçamento de chamadas ao provedor esgotado (503) não é cobrado. Por padrão (`MARKET_MODE=mock`) os preços vêm de uma tabela fixa: PETR4, VALE3, ITUB4,
 BBDC4, BBAS3, MGLU3, WEGE3, PRIO3, HGLG11, KNRI11, MXRF11, XPML11, IVVB11 e BOVA11. Qualquer outro
 ticker é `unknown_asset` na demo. Com `MARKET_MODE=live` as cotações vêm da brapi.dev
 (`BRAPI_TOKEN` opcional) e os indicadores do BCB SGS; para conferir os provedores reais uma vez,
 com rede, rode `pnpm build` e `pnpm --filter @carina/api market:smoke` (manual, fora do CI).
-
-Com a chave app, a decisão devolve **403**: ela não tem `inbox:decide`. Esse roteiro roda no CI
-(job `compose-smoke`) e no teste
-[`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
 Com `LLM_MODE=live` e `OPENROUTER_API_KEY` os agentes usam os modelos de
 [`apps/api/config/models.yaml`](apps/api/config/models.yaml). Os modos live de LLM e de mercado
@@ -166,8 +168,10 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("R-M7…"),
   [`trade-pricing.spec.ts`](apps/api/src/modules/agents/trade-pricing.spec.ts),
   [`market.service.spec.ts`](apps/api/src/modules/market/market.service.spec.ts).
-- **Rotas de mercado** com escopo `market:read` e cobrança só após o sucesso:
-  [`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts).
+- **Rotas de mercado** com escopo `market:read`, cobrança só após o sucesso e orçamento de
+  chamadas ao provedor (cache negativo, 503 sem cobrança):
+  [`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts),
+  [`market.service.spec.ts`](apps/api/src/modules/market/market.service.spec.ts).
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -210,8 +214,12 @@ limite conhecido:
   aberto e a cotação velha é recusada como `price_stale`.
 - **Modo live de mercado sem teste no CI.** As fixtures de brapi.dev e BCB SGS foram reconstruídas
   da documentação (o sandbox de desenvolvimento não alcançava os provedores); rode
-  `market:smoke` uma vez com rede para registrar respostas reais. Os limites do plano gratuito da
-  brapi.dev estão na documentação deles; não os repetimos aqui.
+  `market:smoke` uma vez com rede para registrar respostas reais.
+- **Live de mercado depende do plano da brapi.** Os padrões (1 ativo por requisição, 1 por vez)
+  cabem no plano gratuito, mas `MARKET_QUOTE_MAX_AGE_MS` (5 min) precisa ser pelo menos o atraso
+  do plano (~30 min no gratuito), senão toda ordem em pregão é recusada como `price_stale`; e um
+  orçamento de 30 chamadas por minuto (rotas e preço, separados) protege, mas não confere, a cota
+  mensal do token. Ver [Limitações conhecidas](docs/DECISOES-E-GARANTIAS.md#limitações-conhecidas-e-próximos-passos).
 - **PII vai ao provedor de LLM no modo live**, e as conversas ficam nos checkpoints do LangGraph
   sem RLS, sem TTL e sem caminho de eliminação (LGPD). A auditoria guarda a pergunta mascarada
   por padrões e a resposta só como digest.

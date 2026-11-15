@@ -6,6 +6,7 @@
 import { QuoteSchema } from "@carina/shared";
 import { Redis } from "ioredis";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MarketDataBusyError } from "../../src/core/errors/domain-errors.js";
 import { MarketService } from "../../src/modules/market/market.service.js";
 import type { RawQuote } from "../../src/modules/market/providers/types.js";
 import { redisDbUrl } from "../setup/db.js";
@@ -20,9 +21,12 @@ const ENV = {
   MARKET_MODE: "live" as const,
   MARKET_QUOTE_MAX_AGE_MS: 300_000,
   MARKET_CLOSED_MAX_AGE_DAYS: 5,
+  MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: 1,
+  MARKET_PROVIDER_MAX_CALLS_PER_MIN: 2,
+  MARKET_PRICE_MAX_CALLS_PER_MIN: 30,
 };
 
-function build(redis: Pick<Redis, "get" | "set">) {
+function build(redis: Pick<Redis, "get" | "set" | "eval">) {
   let now = T0;
   const clock = () => now;
   const fetchQuotes = vi.fn((symbols: string[]): Promise<RawQuote[]> =>
@@ -129,5 +133,32 @@ describe("MarketService (Redis real)", () => {
     } finally {
       down.disconnect();
     }
+  });
+
+  it("orçamento das rotas no Redis real: EVAL soma por janela com expiração, esgota com 503 e zera no minuto seguinte", async () => {
+    const { service, fetchQuotes, advance } = build(redis);
+    const window = Math.floor(T0 / 60_000);
+    await service.quotes(["PETR4"]);
+    await service.quotes(["VALE3"]);
+    expect(await redis.get(`market:live:budget:${String(window)}`)).toBe("2");
+    const ttl = await redis.pttl(`market:live:budget:${String(window)}`);
+    expect(ttl).toBeGreaterThan(60_000);
+    expect(ttl).toBeLessThanOrEqual(120_000);
+    await expect(service.quotes(["ITUB4"])).rejects.toBeInstanceOf(MarketDataBusyError);
+    expect(fetchQuotes).toHaveBeenCalledTimes(2);
+    // O preço tem a sua cota: segue funcionando.
+    await expect(service.priceFor("ITUB4")).resolves.toMatchObject({ symbol: "ITUB4" });
+    expect(await redis.get(`market:live:budget:price:${String(window)}`)).toBe("1");
+    advance(60_000);
+    await expect(service.quotes(["BBAS3"])).resolves.toHaveLength(1);
+  });
+
+  it("cache negativo no Redis real: símbolo ausente é lembrado por 60 s", async () => {
+    const { service, fetchQuotes } = build(redis);
+    fetchQuotes.mockResolvedValue([]);
+    await service.quotes(["ZZZZ1"]);
+    await service.quotes(["ZZZZ1"]);
+    expect(fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(await redis.pttl("market:live:quote:ZZZZ1")).toBeGreaterThan(0);
   });
 });

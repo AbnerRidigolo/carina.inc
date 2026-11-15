@@ -5,7 +5,11 @@
  */
 import type { HistoricalBar, MacroIndicator } from "@carina/shared";
 import { describe, expect, it, vi } from "vitest";
-import { MarketDataUnavailableError, ValidationError } from "../../core/errors/domain-errors.js";
+import {
+  MarketDataBusyError,
+  MarketDataUnavailableError,
+  ValidationError,
+} from "../../core/errors/domain-errors.js";
 import { MarketPriceError } from "./market-price-error.js";
 import { type MarketLogger, MarketService } from "./market.service.js";
 import type { MacroProvider, MarketDataProvider, RawQuote } from "./providers/types.js";
@@ -42,19 +46,37 @@ const LIVE_QUOTE_KEY = "market:live:quote:PETR4";
 
 class FakeRedis {
   readonly store = new Map<string, string>();
+  readonly ttls = new Map<string, number>();
   get = vi.fn((key: string) => Promise.resolve(this.store.get(key) ?? null));
   set = vi.fn((key: string, value: string) => {
     this.store.set(key, value);
     return Promise.resolve("OK" as const);
   });
+  /** Só o script do orçamento: INCRBY KEYS[1] ARGV[1] + PEXPIRE ARGV[2]. */
+  eval = vi.fn((_script: string, _n: number, key: string, units: string, ttl: string) => {
+    const next = Number(this.store.get(key) ?? "0") + Number(units);
+    this.store.set(key, String(next));
+    this.ttls.set(key, Number(ttl));
+    return Promise.resolve(next);
+  });
+  /** Chaves de cache (sem os contadores do orçamento). */
+  cacheKeys(): string[] {
+    return [...this.store.keys()].filter((k) => !k.includes(":budget:")).sort();
+  }
 }
 
 interface SetupOptions {
+  routeBudget?: number;
+  priceBudget?: number;
   mode?: "live" | "mock";
   nodeEnv?: "development" | "test" | "production";
   now?: number;
   quotes?: (symbols: string[]) => Promise<RawQuote[]>;
-  redis?: { get: (key: string) => Promise<string | null>; set: (...args: never[]) => unknown };
+  redis?: {
+    get: (key: string) => Promise<string | null>;
+    set: (...args: never[]) => unknown;
+    eval?: (...args: never[]) => unknown;
+  };
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -101,6 +123,9 @@ function setup(opts: SetupOptions = {}) {
     MARKET_MODE: mode,
     MARKET_QUOTE_MAX_AGE_MS: 300_000,
     MARKET_CLOSED_MAX_AGE_DAYS: 5,
+    MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: 1,
+    MARKET_PROVIDER_MAX_CALLS_PER_MIN: opts.routeBudget ?? 30,
+    MARKET_PRICE_MAX_CALLS_PER_MIN: opts.priceBudget ?? 30,
   };
   const service = new MarketService(
     provider,
@@ -144,6 +169,7 @@ describe("MarketService.quotes", () => {
     const failing = {
       get: vi.fn(() => Promise.reject(new Error("redis down"))),
       set: vi.fn(() => Promise.reject(new Error("redis down"))),
+      eval: vi.fn(() => Promise.resolve(1)),
     };
     const { service, provider } = setup({ redis: failing });
     await Promise.all(Array.from({ length: 30 }, () => service.quotes(["PETR4"])));
@@ -156,6 +182,7 @@ describe("MarketService.quotes", () => {
       redis: {
         get: () => Promise.resolve(null),
         set: () => Promise.resolve("OK"),
+        eval: () => Promise.resolve(1),
       },
       quotes: (symbols) =>
         fail
@@ -534,7 +561,7 @@ describe("MarketService: mock e live não se misturam (cache por modo e origem c
       await service.quotes(["PETR4"]);
       await service.history("PETR4", "3mo");
       await service.macro();
-      expect([...(redis as FakeRedis).store.keys()].sort()).toEqual([
+      expect((redis as FakeRedis).cacheKeys()).toEqual([
         `market:${mode}:history:PETR4:3mo`,
         `market:${mode}:macro`,
         `market:${mode}:quote:PETR4`,
@@ -580,7 +607,7 @@ describe("MarketService: mock e live não se misturam (cache por modo e origem c
           Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "30.00", source))),
       });
       expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
-      expect((redis as FakeRedis).store.size).toBe(0);
+      expect((redis as FakeRedis).cacheKeys()).toEqual([]);
     },
   );
 
@@ -606,5 +633,149 @@ describe("MarketService: mock e live não se misturam (cache por modo e origem c
       other.service.onModuleInit();
       expect(other.logger.warn).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("MarketService: cache negativo e orçamento de chamadas ao provedor", () => {
+  const UNKNOWN = Array.from({ length: 20 }, (_, i) => `ZZZZ${String(i + 1)}`);
+  const minuteOf = (t: number) => Math.floor(t / MIN);
+
+  it("20 chamadas de rota com 20 símbolos desconhecidos: 1 busca por símbolo em 60 s", async () => {
+    const { service, provider, advance } = setup({ quotes: () => Promise.resolve([]) });
+    for (let i = 0; i < 20; i++) expect(await service.quotes(UNKNOWN)).toEqual([]);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(provider.fetchQuotes).toHaveBeenCalledWith(UNKNOWN);
+    // O ausente em cache também vale para o preço: unknown_asset sem ir ao provedor.
+    expect((await priceError(service.priceFor("ZZZZ1"))).code).toBe("unknown_asset");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    advance(MIN);
+    await service.quotes(UNKNOWN);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(2);
+  });
+
+  it("ausente em cache tem envelope validado: marcador malformado é acerto perdido", async () => {
+    const { service, provider, redis } = setup({ quotes: () => Promise.resolve([]) });
+    (redis as FakeRedis).store.set(
+      "market:live:quote:ZZZZ1",
+      JSON.stringify({ value: { absent: "sim", symbol: "ZZZZ1" }, fetchedAt: FRIDAY_OPEN }),
+    );
+    await service.quotes(["ZZZZ1"]);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse((redis as FakeRedis).store.get("market:live:quote:ZZZZ1") ?? "{}");
+    expect(stored).toEqual({ value: { absent: true, symbol: "ZZZZ1" }, fetchedAt: FRIDAY_OPEN });
+  });
+
+  it("orçamento das rotas: unidades = requisições (lotes), chave market:<modo>:budget:<minuto> com expiração", async () => {
+    const { service, redis } = setup();
+    await service.quotes(["PETR4", "VALE3", "ITUB4"]);
+    const key = `market:live:budget:${String(minuteOf(FRIDAY_OPEN))}`;
+    expect((redis as FakeRedis).store.get(key)).toBe("3");
+    expect((redis as FakeRedis).ttls.get(key)).toBe(2 * MIN);
+    await service.quotes(["PETR4"]); // acerto de cache: não consome
+    expect((redis as FakeRedis).store.get(key)).toBe("3");
+  });
+
+  it("esgotado o orçamento das rotas: 503 com Retry-After até a próxima janela, sem ir ao provedor; priceFor segue; zera na janela seguinte", async () => {
+    const { service, provider, advance } = setup({ routeBudget: 2 });
+    advance(15_000); // 15 s dentro do minuto
+    await service.quotes(["PETR4"]);
+    await service.history("VALE3", "3mo");
+    const err = await service.quotes(["ITUB4"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MarketDataBusyError);
+    expect((err as MarketDataBusyError).status).toBe(503);
+    expect((err as MarketDataBusyError).retryAfterSeconds).toBe(45);
+    expect((err as MarketDataBusyError).message).toBe(
+      "Limite de consultas ao provedor de mercado atingido; tente novamente em instantes",
+    );
+    await expect(service.history("ITUB4", "1y")).rejects.toBeInstanceOf(MarketDataBusyError);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(provider.fetchHistory).toHaveBeenCalledTimes(1);
+
+    // O preço das ordens tem cota própria.
+    await expect(service.priceFor("ITUB4")).resolves.toMatchObject({ symbol: "ITUB4" });
+
+    advance(45_000); // janela seguinte
+    await expect(service.quotes(["BBAS3"])).resolves.toHaveLength(1);
+  });
+
+  it("macro não consome o orçamento (uma chave só, cache de 1 h)", async () => {
+    const { service, macroProvider } = setup({ routeBudget: 1 });
+    await service.quotes(["PETR4"]);
+    await expect(service.macro()).resolves.toHaveLength(1);
+    expect(macroProvider.fetchMacro).toHaveBeenCalledTimes(1);
+  });
+
+  it("esgotado o orçamento do preço: price_unavailable sem ir ao provedor; as rotas seguem", async () => {
+    const { service, provider, redis } = setup({ priceBudget: 1 });
+    await service.priceFor("PETR4");
+    expect((await priceError(service.priceFor("VALE3"))).code).toBe("price_unavailable");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(
+      (redis as FakeRedis).store.get(`market:live:budget:price:${String(minuteOf(FRIDAY_OPEN))}`),
+    ).toBe("2");
+    await expect(service.quotes(["VALE3"])).resolves.toHaveLength(1);
+  });
+
+  it("o refresh do priceFor (cache velho) também consome o orçamento do preço", async () => {
+    const { service, provider, redis } = setup({
+      priceBudget: 0,
+      quotes: (s) => Promise.resolve(s.map((sym) => rawQuote(sym, FRIDAY_OPEN - 1000, "31.00"))),
+    });
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 10 * MIN, "29.00"));
+    expect((await priceError(service.priceFor("PETR4"))).code).toBe("price_unavailable");
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+  });
+
+  it("orçamentos separados por modo: mock e live nunca dividem o contador", async () => {
+    const shared = new FakeRedis();
+    await setup({ mode: "mock", redis: shared }).service.quotes(["PETR4"]);
+    await setup({ redis: shared }).service.quotes(["PETR4"]);
+    const minute = String(minuteOf(FRIDAY_OPEN));
+    expect(shared.store.get(`market:mock:budget:${minute}`)).toBe("1");
+    expect(shared.store.get(`market:live:budget:${minute}`)).toBe("1");
+  });
+
+  it("Redis fora do ar no orçamento: rotas falham fechado (502, sem provedor); priceFor falha aberto com log", async () => {
+    const down = {
+      get: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+      set: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+      eval: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+    };
+    const { service, provider, logger } = setup({ redis: down });
+    await expect(service.quotes(["PETR4"])).rejects.toBeInstanceOf(MarketDataUnavailableError);
+    await expect(service.history("PETR4", "3mo")).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+    expect(provider.fetchHistory).not.toHaveBeenCalled();
+    await expect(service.priceFor("PETR4")).resolves.toMatchObject({ price: "30.00" });
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        msg: expect.stringContaining("Orçamento"),
+        err: expect.any(Error),
+      }),
+    );
+  });
+
+  it("resposta estranha do Redis no orçamento é tratada como Redis fora do ar", async () => {
+    const odd = {
+      get: () => Promise.resolve(null),
+      set: () => Promise.resolve("OK"),
+      eval: () => Promise.resolve("x"),
+    };
+    const { service, provider } = setup({ redis: odd });
+    await expect(service.quotes(["PETR4"])).rejects.toBeInstanceOf(MarketDataUnavailableError);
+    await expect(service.priceFor("PETR4")).resolves.toMatchObject({ price: "30.00" });
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("histórico fora do contrato vindo do provedor: 502 e nada vai para o cache", async () => {
+    const { service, provider, redis } = setup();
+    provider.fetchHistory.mockResolvedValueOnce([{ date: "ontem" }] as never);
+    await expect(service.history("PETR4", "3mo")).rejects.toBeInstanceOf(
+      MarketDataUnavailableError,
+    );
+    expect((redis as FakeRedis).cacheKeys()).toEqual([]);
   });
 });

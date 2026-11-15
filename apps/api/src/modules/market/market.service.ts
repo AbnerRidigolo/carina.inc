@@ -12,10 +12,34 @@
  * vira acerto perdido (log `warn`) e a busca segue no provedor: nada aqui depende do cache funcionar.
  *
  * Uma busca por vez por chave dentro do processo: a promessa em andamento é compartilhada e sai do
- * mapa ao terminar, inclusive em erro.
+ * mapa ao terminar, inclusive em erro. As buscas das rotas e as do `priceFor` não se juntam (cada
+ * uma paga o seu orçamento, abaixo).
+ *
+ * Cache negativo: símbolo pedido que não volta do provedor é gravado como ausente
+ * (`{ absent: true, symbol }`, mesmo envelope validado) por 60 s; as rotas o omitem e o `priceFor`
+ * responde `unknown_asset`, sem ir ao provedor. Símbolos desconhecidos ou rotativos não queimam a
+ * cota do token a cada requisição.
+ *
+ * Orçamento de chamadas ao provedor (janela FIXA de 1 minuto pelo `CLOCK`, contador no Redis com
+ * INCRBY + PEXPIRE atômicos num EVAL; uma unidade por requisição ao provedor, ou seja, por lote de
+ * `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL` símbolos). Só conta o que vai ao provedor (acerto de cache
+ * não consome). Dois orçamentos, por modo:
+ * - rotas (`quotes`/`history`): `market:<modo>:budget:<minuto>`, `MARKET_PROVIDER_MAX_CALLS_PER_MIN`.
+ *   Esgotado → `MarketDataBusyError` (503 problem+json, mensagem fixa, `Retry-After` = segundos até
+ *   a próxima janela), sem chamar o provedor e sem cobrança (o controller só cobra depois do
+ *   sucesso). Redis fora do ar → falha FECHADA (`MarketDataUnavailableError`, 502): sem Redis também
+ *   não há cache, então cada rota iria ao provedor — exatamente a queima de cota que o orçamento
+ *   evita; e o limite por tenant (RateLimitGuard) já depende do mesmo Redis.
+ * - preço (`priceFor`, inclusive o refresh): `market:<modo>:budget:price:<minuto>`,
+ *   `MARKET_PRICE_MAX_CALLS_PER_MIN`, separado para um tenant nas rotas não esgotar o preço das ordens
+ *   dos outros. Esgotado → `price_unavailable` (falha fechada da ordem). Redis fora do ar → falha
+ *   ABERTA (log `warn`): o preço não pode depender do Redis (nada no `priceFor` depende) e ele só
+ *   roda em propostas de ordem, já limitadas por tenant no chat e por busca única por símbolo.
+ * `macro` não consome: uma chave só, cache de 1 h (no máximo uma busca por hora por processo).
  *
  * `priceFor` falha fechado com `MarketPriceError`: ativo ausente → `unknown_asset`; provedor fora
- * do ar (qualquer erro), preço não positivo ou origem de outro modo → `price_unavailable`; cotação velha ou com hora
+ * do ar (qualquer erro), orçamento do preço esgotado, preço não positivo ou origem de outro modo →
+ * `price_unavailable`; cotação velha ou com hora
  * futura → `price_stale`. O frescor é medido sobre o `updatedAt` da cotação, nunca sobre o
  * `fetchedAt` do cache; cotação do cache reprovada no frescor é buscada de novo uma vez.
  */
@@ -36,7 +60,11 @@ import type { Redis } from "ioredis";
 import { type ZodType, z } from "zod";
 import { ENV } from "../../core/config/config.module.js";
 import type { Env } from "../../core/config/env.js";
-import { ValidationError } from "../../core/errors/domain-errors.js";
+import {
+  MarketDataBusyError,
+  MarketDataUnavailableError,
+  ValidationError,
+} from "../../core/errors/domain-errors.js";
 import { REDIS } from "../../core/redis/redis.tokens.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { SYMBOL_RE } from "./asset-class.js";
@@ -55,7 +83,13 @@ export interface MarketLogger {
 
 export type MarketEnv = Pick<
   Env,
-  "NODE_ENV" | "MARKET_MODE" | "MARKET_QUOTE_MAX_AGE_MS" | "MARKET_CLOSED_MAX_AGE_DAYS"
+  | "NODE_ENV"
+  | "MARKET_MODE"
+  | "MARKET_QUOTE_MAX_AGE_MS"
+  | "MARKET_CLOSED_MAX_AGE_DAYS"
+  | "MARKET_BRAPI_MAX_SYMBOLS_PER_CALL"
+  | "MARKET_PROVIDER_MAX_CALLS_PER_MIN"
+  | "MARKET_PRICE_MAX_CALLS_PER_MIN"
 >;
 
 export const MAX_SYMBOLS = 20;
@@ -65,8 +99,26 @@ export const MACRO_TTL_MS = 3_600_000;
 /** Limite de cada operação no Redis: um Redis pendurado não segura a resposta. */
 export const CACHE_OP_TIMEOUT_MS = 250;
 const DAY_MS = 86_400_000;
+/** Janela fixa do orçamento de chamadas ao provedor. */
+export const BUDGET_WINDOW_MS = 60_000;
+
+/**
+ * Soma `ARGV[1]` unidades ao contador da janela e (re)define a expiração (`ARGV[2]` ms), num só
+ * EVAL (atômico); devolve o total da janela já com estas unidades.
+ */
+export const BUDGET_LUA = `
+local used = redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return used
+`;
+
+/** Quem paga a busca no provedor: as rotas ou o preço das ordens. */
+type Payer = "routes" | "price";
 
 const RawQuoteSchema = QuoteSchema.omit({ marketState: true });
+/** Marcador do cache negativo: o provedor não devolveu este símbolo. */
+const AbsentSchema = z.object({ absent: z.literal(true), symbol: z.string() }).strict();
+const QuoteCacheSchema = z.union([RawQuoteSchema, AbsentSchema]);
 const HistorySchema = z.array(HistoricalBarSchema);
 const MacroSchema = z.array(MacroIndicatorSchema);
 
@@ -95,7 +147,7 @@ export class MarketService implements OnModuleInit {
   constructor(
     @Inject(MARKET_DATA_PROVIDER) private readonly market: MarketDataProvider,
     @Inject(MACRO_PROVIDER) private readonly macroProvider: MacroProvider,
-    @Inject(REDIS) private readonly redis: Pick<Redis, "get" | "set">,
+    @Inject(REDIS) private readonly redis: Pick<Redis, "get" | "set" | "eval">,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ENV) private readonly env: MarketEnv,
     @Optional()
@@ -142,7 +194,7 @@ export class MarketService implements OnModuleInit {
   /** De 1 a 20 símbolos já normalizados (maiúsculos); repetidos viram um. Ausentes são omitidos. */
   async quotes(symbols: string[]): Promise<Quote[]> {
     const list = this.validSymbols(symbols);
-    const raw = await this.rawQuotes(list);
+    const raw = await this.rawQuotes(list, "routes");
     const state = this.marketState(this.clock());
     return raw.flatMap((e) => (e ? [{ ...e.quote, marketState: state }] : []));
   }
@@ -154,9 +206,10 @@ export class MarketService implements OnModuleInit {
     if (!HistoryRangeSchema.safeParse(range).success) throw new ValidationError("Período inválido");
     const key = this.historyKey(symbol, range);
     return this.singleFlight(key, () =>
-      this.cached(key, HISTORY_TTL_MS, HistorySchema, () =>
-        this.market.fetchHistory(symbol, range),
-      ),
+      this.cached(key, HISTORY_TTL_MS, HistorySchema, async () => {
+        await this.consumeBudget("routes", 1);
+        return this.market.fetchHistory(symbol, range);
+      }),
     );
   }
 
@@ -183,7 +236,7 @@ export class MarketService implements OnModuleInit {
     }
     let entry: QuoteEntry | null | undefined;
     try {
-      [entry] = await this.rawQuotes([symbol]);
+      [entry] = await this.rawQuotes([symbol], "price");
     } catch {
       // Sem `cause`: o erro do provedor não viaja para quem registra a recusa.
       throw new MarketPriceError("price_unavailable");
@@ -222,6 +275,7 @@ export class MarketService implements OnModuleInit {
   /** Busca o símbolo no provedor sem ler o cache; `priceFor` concorrentes dividem a mesma busca. */
   private refreshQuote(symbol: string): Promise<RawQuote | null> {
     return this.singleFlight(`${this.quoteKey(symbol)}:refresh`, async () => {
+      await this.consumeBudget("price", 1);
       const found = await this.fetchAndStore([symbol]);
       return found.get(symbol) ?? null;
     });
@@ -247,12 +301,13 @@ export class MarketService implements OnModuleInit {
    * numa busca só; cada um ganha a sua promessa no mapa, para que chamadas concorrentes do mesmo
    * símbolo esperem a mesma busca. Cada cotação diz se veio do cache ou da busca.
    */
-  private rawQuotes(symbols: string[]): Promise<(QuoteEntry | null)[]> {
-    const missing = symbols.filter((s) => !this.flights.has(this.quoteKey(s)));
+  private rawQuotes(symbols: string[], payer: Payer): Promise<(QuoteEntry | null)[]> {
+    const flightKey = (s: string) => `${payer}:${this.quoteKey(s)}`;
+    const missing = symbols.filter((s) => !this.flights.has(flightKey(s)));
     if (missing.length > 0) {
-      const batch = this.loadQuotes(missing);
+      const batch = this.loadQuotes(missing, payer);
       for (const symbol of missing) {
-        const key = this.quoteKey(symbol);
+        const key = flightKey(symbol);
         const flight: Promise<QuoteEntry | null> = batch
           .then((found) => found.get(symbol) ?? null)
           .finally(() => {
@@ -262,19 +317,26 @@ export class MarketService implements OnModuleInit {
       }
     }
     return Promise.all(
-      symbols.map((s) => this.flights.get(this.quoteKey(s)) as Promise<QuoteEntry | null>),
+      symbols.map((s) => this.flights.get(flightKey(s)) as Promise<QuoteEntry | null>),
     );
   }
 
-  private async loadQuotes(symbols: string[]): Promise<Map<string, QuoteEntry>> {
+  private async loadQuotes(symbols: string[], payer: Payer): Promise<Map<string, QuoteEntry>> {
     const found = new Map<string, QuoteEntry>();
     const hits = await Promise.all(
-      symbols.map((s) => this.readCache(this.quoteKey(s), QUOTE_TTL_MS, RawQuoteSchema)),
+      symbols.map((s) => this.readCache(this.quoteKey(s), QUOTE_TTL_MS, QuoteCacheSchema)),
     );
     const toFetch: string[] = [];
     symbols.forEach((symbol, i) => {
       const hit = hits[i];
       const expected = SOURCE_OF_MODE[this.env.MARKET_MODE];
+      // Ausente em cache (cache negativo): fica fora do mapa e não vai ao provedor.
+      if (hit && "absent" in hit && hit.symbol === symbol) return;
+      if (hit && "absent" in hit) {
+        this.logger.warn({ msg: "Cache de cotação com outro símbolo; descartado", symbol });
+        toFetch.push(symbol);
+        return;
+      }
       if (hit && hit.symbol === symbol && hit.source === expected) {
         found.set(symbol, { quote: hit, fromCache: true });
         return;
@@ -288,6 +350,10 @@ export class MarketService implements OnModuleInit {
     });
     if (toFetch.length === 0) return found;
 
+    await this.consumeBudget(
+      payer,
+      Math.ceil(toFetch.length / this.env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL),
+    );
     for (const [symbol, quote] of await this.fetchAndStore(toFetch)) {
       found.set(symbol, { quote, fromCache: false });
     }
@@ -297,7 +363,8 @@ export class MarketService implements OnModuleInit {
   /**
    * Busca no provedor (sem ler o cache), valida, grava no cache e devolve por símbolo. Só vai para
    * o cache a cotação utilizável (preço positivo e origem do modo): uma inválida não envenena a
-   * entrada por 60 s; ela ainda volta a quem chamou, e o `priceFor` a recusa.
+   * entrada por 60 s; ela ainda volta a quem chamou, e o `priceFor` a recusa. Símbolo pedido que
+   * não voltou vai para o cache negativo (60 s).
    */
   private async fetchAndStore(symbols: string[]): Promise<Map<string, RawQuote>> {
     const fetched = await this.market.fetchQuotes(symbols);
@@ -314,12 +381,52 @@ export class MarketService implements OnModuleInit {
       if (!wanted.has(q.symbol) || found.has(q.symbol)) continue;
       found.set(q.symbol, q);
     }
-    await Promise.all(
-      [...found.values()]
+    const absent = symbols.filter((s) => !found.has(s));
+    await Promise.all([
+      ...[...found.values()]
         .filter((q) => this.isUsable(q))
         .map((q) => this.writeCache(this.quoteKey(q.symbol), q, fetchedAt, QUOTE_TTL_MS)),
-    );
+      ...absent.map((symbol) =>
+        this.writeCache(this.quoteKey(symbol), { absent: true, symbol }, fetchedAt, QUOTE_TTL_MS),
+      ),
+    ]);
     return found;
+  }
+
+  /**
+   * Consome `units` do orçamento de `payer` na janela atual (ver o cabeçalho do módulo para o
+   * comportamento quando esgota e quando o Redis falha).
+   */
+  private async consumeBudget(payer: Payer, units: number): Promise<void> {
+    const now = this.clock();
+    const window = Math.floor(now / BUDGET_WINDOW_MS);
+    const key =
+      payer === "routes"
+        ? `${this.prefix}budget:${String(window)}`
+        : `${this.prefix}budget:price:${String(window)}`;
+    const limit =
+      payer === "routes"
+        ? this.env.MARKET_PROVIDER_MAX_CALLS_PER_MIN
+        : this.env.MARKET_PRICE_MAX_CALLS_PER_MIN;
+    let used: number;
+    try {
+      const reply = await this.cacheOp(() =>
+        this.redis.eval(BUDGET_LUA, 1, key, String(units), String(2 * BUDGET_WINDOW_MS)),
+      );
+      used = typeof reply === "number" ? reply : Number.NaN;
+      if (!Number.isInteger(used)) throw new Error("Resposta inesperada do Redis no orçamento");
+    } catch (err) {
+      if (payer === "price") {
+        this.logger.warn({ msg: "Orçamento do preço sem Redis; seguindo (falha aberta)", err });
+        return;
+      }
+      this.logger.warn({ msg: "Orçamento das rotas sem Redis; recusando (falha fechada)", err });
+      throw new MarketDataUnavailableError();
+    }
+    if (used > limit) {
+      const retryAfterMs = (window + 1) * BUDGET_WINDOW_MS - now;
+      throw new MarketDataBusyError(Math.max(1, Math.ceil(retryAfterMs / 1000)));
+    }
   }
 
   private singleFlight<T>(key: string, load: () => Promise<T>): Promise<T> {
@@ -341,9 +448,14 @@ export class MarketService implements OnModuleInit {
     const hit = await this.readCache(key, ttlMs, schema);
     if (hit !== undefined) return hit;
     const fetchedAt = this.clock();
-    const value = await load();
-    await this.writeCache(key, value, fetchedAt, ttlMs);
-    return value;
+    // Validado ANTES de gravar: dado fora do contrato não entra no cache nem volta a quem chamou.
+    const parsed = schema.safeParse(await load());
+    if (!parsed.success) {
+      this.logger.warn({ msg: "Dado do provedor fora do contrato; descartado", key });
+      throw new MarketDataUnavailableError();
+    }
+    await this.writeCache(key, parsed.data, fetchedAt, ttlMs);
+    return parsed.data;
   }
 
   /** Valor ainda válido pelo CLOCK, ou `undefined` (ausente, expirado, ilegível ou Redis com erro). */

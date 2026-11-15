@@ -52,6 +52,14 @@ export const EnvSchema = z
     /** Requisições simultâneas à brapi por processo (fila no processo). Padrão 1 (plano gratuito). */
     MARKET_PROVIDER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
     /**
+     * Orçamento global de requisições ao provedor por minuto (janela fixa, contador no Redis) para
+     * as rotas `/api/market/*`. Esgotado → 503 com Retry-After, sem cobrança. Uma consulta de N
+     * símbolos fora do cache consome ceil(N / MARKET_BRAPI_MAX_SYMBOLS_PER_CALL) unidades.
+     */
+    MARKET_PROVIDER_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(30),
+    /** Orçamento separado (por minuto) para o preço de servidor das ordens (`priceFor`). */
+    MARKET_PRICE_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(30),
+    /**
      * Idade máxima de uma cotação com o mercado aberto (ms). Padrão 5 min; no live precisa ser pelo
      * menos o atraso do plano da brapi (ex.: ~35 min no gratuito), senão toda ordem em pregão é
      * recusada como `price_stale`.

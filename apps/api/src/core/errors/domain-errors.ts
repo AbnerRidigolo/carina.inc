@@ -76,3 +76,19 @@ export class MarketDataUnavailableError extends DomainError {
     super("Dados de mercado indisponíveis");
   }
 }
+/**
+ * Orçamento global de chamadas ao provedor de mercado esgotado na janela de 1 minuto (protege a cota
+ * do token único da brapi, dividida por todos os tenants). 503, não 429: o limite é da plataforma,
+ * não do cliente. Sempre com `Retry-After` (segundos até a próxima janela) e mensagem fixa.
+ */
+export class MarketDataBusyError extends DomainError {
+  readonly code = "market_data_busy";
+  readonly status = 503;
+
+  constructor(retryAfterSeconds: number) {
+    super(
+      "Limite de consultas ao provedor de mercado atingido; tente novamente em instantes",
+      retryAfterSeconds,
+    );
+  }
+}

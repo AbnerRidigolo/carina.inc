@@ -23,7 +23,10 @@ import { redisDbOf } from "../setup/redis-dbs.js";
 
 const REDIS_DB = redisDbOf("market/market.e2e.spec.ts");
 
-function setup(overrides: { token: unknown; useValue: unknown }[] = []) {
+function setup(
+  overrides: { token: unknown; useValue: unknown }[] = [],
+  env: Record<string, string> = {},
+) {
   const ctx: {
     t?: TestApp;
     A?: SeededTenant;
@@ -35,7 +38,7 @@ function setup(overrides: { token: unknown; useValue: unknown }[] = []) {
       imports: [MarketModule, BillingModule],
       overrides,
       redisDb: REDIS_DB,
-      env: { MARKET_MODE: "mock" },
+      env: { MARKET_MODE: "mock", ...env },
     });
     ctx.server = ctx.t.app.getHttpServer() as Parameters<typeof request>[0];
     ctx.A = await ctx.t.seedTenant({ name: "Mercado" });
@@ -164,4 +167,30 @@ describe("Market E2E (provedor falhando)", () => {
       expect(await dataQueries()).toBe(0);
     },
   );
+});
+
+describe("Market E2E (orçamento de chamadas ao provedor esgotado)", () => {
+  const { ctx, get, dataQueries } = setup([], { MARKET_PROVIDER_MAX_CALLS_PER_MIN: "1" });
+
+  it("503 problem+json com Retry-After e mensagem fixa, sem cobrança; acerto de cache segue 200", async () => {
+    const key = (ctx.A as SeededTenant).keys.market;
+    await get("/api/market/quotes?symbols=PETR4", key).expect(200);
+    const before = await dataQueries();
+    for (const path of ["/api/market/quotes?symbols=VALE3", "/api/market/history/PETR4"]) {
+      const res = await get(path, key);
+      expect(res.status).toBe(503);
+      expect(res.headers["content-type"]).toContain("application/problem+json");
+      const retryAfter = Number(res.headers["retry-after"]);
+      expect(retryAfter).toBeGreaterThanOrEqual(1);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+      const problem = ProblemSchema.parse(res.body);
+      expect(problem.type).toBe("https://carina.app/problems/market_data_busy");
+      expect(problem.detail).toBe(
+        "Limite de consultas ao provedor de mercado atingido; tente novamente em instantes",
+      );
+    }
+    expect(await dataQueries()).toBe(before);
+    // O que já está no cache não consome orçamento.
+    await get("/api/market/quotes?symbols=PETR4", key).expect(200);
+  });
 });

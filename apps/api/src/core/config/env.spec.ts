@@ -74,6 +74,18 @@ describe("loadEnv", () => {
     }
   });
 
+  it("orçamentos de chamadas ao provedor (rotas e preço): padrão 30/min, de 1 a 10000", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_PROVIDER_MAX_CALLS_PER_MIN).toBe(30);
+    expect(env.MARKET_PRICE_MAX_CALLS_PER_MIN).toBe(30);
+    for (const name of ["MARKET_PROVIDER_MAX_CALLS_PER_MIN", "MARKET_PRICE_MAX_CALLS_PER_MIN"]) {
+      expect((loadEnv({ ...min, [name]: "10000" }) as Record<string, unknown>)[name]).toBe(10000);
+      for (const bad of ["0", "10001", "2.5", "x"]) {
+        expect(() => loadEnv({ ...min, [name]: bad })).toThrow(new RegExp(name));
+      }
+    }
+  });
+
   it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {
     expect(loadEnv(min).LOG_LEVEL).toBe("info");
     expect(loadEnv({ ...min, LOG_LEVEL: "silent" }).LOG_LEVEL).toBe("silent");

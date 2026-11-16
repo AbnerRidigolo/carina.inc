@@ -57,6 +57,8 @@ apps/api/src/modules
                   mascarada e truncada; resposta só como digest)
   chat            POST /chat, ticket do WS, ChatGateway, InboxBroadcast
   data-ingestion  API de ingestão em lote, gerador sintético, SyncWorker
+  market          cotações, histórico e indicadores macro (brapi.dev + BCB SGS ou mock), cache no
+                  Redis, rotas `/api/market/*` e `MarketService.priceFor` (preço de servidor)
   health          /health e /ready (single-flight + cache curto)
 ```
 
@@ -177,9 +179,14 @@ flowchart LR
   nó grava a `approval_request` com id determinístico (hash de thread, **turno**, ação e
   payload): idempotente entre as tentativas do mesmo turno, e a mesma ordem pedida em outro turno
   vira outra aprovação. O `turn` é um contador do estado, incrementado pelo `classify`. A chamada
-  de modelo fica fora do nó que pausa. O `valueBrl` da proposta é afirmado pelo modelo; quando o
-  payload de uma ação que move dinheiro (`place_trade`, `transfer`, `rebalance`) traz um valor
-  explícito ou quantidade × preço unitário, ele tem de bater.
+  de modelo fica fora do nó que pausa. Em `transfer` e `rebalance`, o `valueBrl` da proposta é afirmado pelo
+  modelo; quando o payload traz um valor explícito ou quantidade × preço unitário, ele tem de
+  bater. Em `place_trade` com código de ativo válido o valor é do servidor (ver
+  [Mercado](#9-mercado-market)). Ordem do nó para essa ação: (1) calcula o id da aprovação sobre a
+  proposta do modelo, antes de enriquecer; (2) `InboxService.lookup(id)`: se a aprovação já existe
+  (reexecução do nó no mesmo turno), usa o payload e o valor gravados e não cota de novo; (3)
+  senão `MarketService.priceFor`; (4) `priceTrade` enriquece o payload e calcula o valor; (5)
+  `InboxService.request` grava a aprovação. Falha na cotação: nenhuma aprovação.
 - **`approval`** chama `interrupt({ approvalId })`. Na retomada, o valor do `resume` é só um
   sinal: o nó relê a aprovação no banco e só chama `executeOnce` se ela estiver `approved`.
 - O estado por thread fica no `PostgresSaver`, no schema `langgraph`, criado pela migração 0005.
@@ -229,7 +236,48 @@ flowchart LR
   padrão de 0,5%;
 - cada lote de ingestão é um `data_ingestion` de R$ 0,05.
 
-## 9. Redis Streams
+## 9. Mercado (`market`)
+
+Dois consumidores do mesmo `MarketService`, ambos no processo **api**: as rotas
+`GET /api/market/quotes`, `/history/:symbol` e `/macro` (escopo `market:read`, cobrança
+`data_query` de R$ 0,05 por chamada bem-sucedida, inclusive acerto de cache, sem reserva da cota
+mensal) e o nó `executor` do grafo, que chama `MarketService.priceFor` para o `place_trade`
+durante o turno de chat. O **worker** só retoma o grafo depois da decisão: a retomada reexecuta o
+nó `approval`, que lê o valor já gravado na aprovação e nunca cota. O módulo de núcleo
+([`market-core.module.ts`](../apps/api/src/modules/market/market-core.module.ts), sem rotas) é
+importado pelo `OrchestratorModule` (o grafo depende do serviço na injeção) e por isso também
+existe no `WorkerModule`; só o `MarketModule` da API monta o controller.
+
+- **Provedores.** `MARKET_MODE=live`: brapi.dev (cotações e histórico) e BCB SGS (quatro
+  indicadores macro); `mock` (padrão fora de produção, explícita em produção): provedor
+  determinístico com a tabela `MOCK_PRICES`. As chamadas passam por um fetch seguro (timeout,
+  limite de bytes, só a origem configurada, resposta validada com Zod). Para caber nos planos da
+  brapi, as cotações vão em lotes de `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL` símbolos (padrão 1) e as
+  requisições à brapi passam por uma fila no processo (`MARKET_PROVIDER_CONCURRENCY`, padrão 1);
+  um lote que falha derruba a busca inteira (sem resultado parcial). Com `BRAPI_TOKEN`, a URL base
+  tem de ser `https`.
+- **Cache no Redis**, com o modo no prefixo (`market:<modo>:quote|history|macro`): cotação 60 s,
+  histórico 600 s, macro 3600 s; o envelope é validado e a expiração é medida pelo `CLOCK`.
+  Cotação com `source` de outro modo é ignorada, e o `priceFor` a recusa. Símbolo que o provedor
+  não devolve fica 60 s como ausente (cache negativo). Redis fora do ar não impede o preço: ele
+  vem do provedor.
+- **Orçamento de chamadas ao provedor** (janela fixa de 1 minuto no Redis, por modo): as rotas
+  consomem `MARKET_PROVIDER_MAX_CALLS_PER_MIN` (esgotado → 503 `market_data_busy` com
+  `Retry-After`, sem cobrança; Redis fora → 502) e o `priceFor` tem um orçamento separado,
+  `MARKET_PRICE_MAX_CALLS_PER_MIN` (esgotado → `price_unavailable`; Redis fora → segue sem
+  orçamento). Acerto de cache e `macro` não consomem.
+- **Frescor de `priceFor`.** Mercado aberto (pregão de B3 de segunda a sexta, 10h–18h em
+  America/Sao_Paulo, sem calendário de feriados): cotação de até `MARKET_QUOTE_MAX_AGE_MS`
+  (5 min; no live, ajuste para pelo menos o atraso do plano da brapi). Fechado: até
+  `MARKET_CLOSED_MAX_AGE_DAYS` (5 dias). No mock o estado é sempre `open`.
+  Cotação em cache velha provoca uma única nova busca; ainda velha → `price_stale`.
+  Falha fechada em todo o resto: `price_unavailable`, `unknown_asset`, preço zero recusado e o
+  símbolo da cotação tem de ser igual ao do ativo da ordem. Um `place_trade` fora do formato
+  cotável também falha como `price_unavailable` no próprio nó, sem aprovação.
+- **Taxa.** A taxa de execução é calculada sobre o `valueBrl` gravado (o que o aprovador viu);
+  não há nova cotação na execução.
+
+## 10. Redis Streams
 
 | Stream | Produtores | Consumidores |
 | --- | --- | --- |
@@ -246,7 +294,7 @@ flowchart LR
 - O tail resolve o id inicial uma vez (`XREVRANGE`) e avança o cursor. Assim não perde evento
   entre dois `BLOCK`s.
 
-## 10. WebSocket do chat
+## 11. WebSocket do chat
 
 1. `POST /api/ws/ticket` (escopo `chat`, corpo `{ clientId }`) devolve um ticket de 30 s, preso
    ao tenant, à chave e ao cliente.
@@ -265,18 +313,22 @@ flowchart LR
 6. Se o cliente desconectar no meio de um turno, o turno termina em segundo plano, para a
    aprovação não ficar órfã, e o lock é liberado.
 
-## 11. Configuração
+## 12. Configuração
 
 Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e validadas por
 [`env.ts`](../apps/api/src/core/config/env.ts). As principais:
 
 - `DATABASE_URL` (`carina_app`), `MIGRATION_DATABASE_URL` (só migrações e seed) e `REDIS_URL`;
 - `LLM_MODE` e as chaves dos provedores;
+- `MARKET_MODE` (obrigatória em produção), `BRAPI_TOKEN`, `BRAPI_BASE_URL`, `BCB_SGS_BASE_URL`,
+  `MARKET_FETCH_TIMEOUT_MS`, `MARKET_MAX_RESPONSE_BYTES`, `MARKET_QUOTE_MAX_AGE_MS`,
+  `MARKET_CLOSED_MAX_AGE_DAYS`, `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`, `MARKET_PROVIDER_CONCURRENCY`,
+  `MARKET_PROVIDER_MAX_CALLS_PER_MIN` e `MARKET_PRICE_MAX_CALLS_PER_MIN`;
 - `WORKERS_ENABLED`, `WEB_ORIGIN`, `EXECUTION_FEE_PCT` e `APPROVAL_TTL_HOURS` (o rpm vem do
   tenant);
 - `WS_MAX_CONNECTION_MS` e `API_KEY_REVALIDATE_TTL_MS`.
 
-## 12. Testes
+## 13. Testes
 
 | Projeto | Onde | Infra |
 | --- | --- | --- |

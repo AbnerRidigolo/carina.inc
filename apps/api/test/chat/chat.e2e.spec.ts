@@ -1,7 +1,8 @@
 /**
  * Chat REST (`POST /api/chat`) e emissão de ticket (`POST /api/ws/ticket`), com Postgres, Redis e
  * o grafo reais em LLM_MODE=mock: cobrança e auditoria atômicas, cota devolvida em toda falha,
- * isolamento de threads, serialização de turnos por thread e cancelamento pelo cliente.
+ * isolamento de threads, serialização de turnos por thread e cancelamento pelo cliente. Mercado em
+ * MARKET_MODE=mock, com um provedor trocável para simular a cotação fora do ar (spec 5.5, R-M8).
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
@@ -15,12 +16,36 @@ import { threadLockKey } from "../../src/modules/chat/chat.service.js";
 import { WsTicketService } from "../../src/modules/chat/ws-ticket.service.js";
 import { monthKey } from "../../src/modules/limits/month.js";
 import { MockResponderRegistry } from "../../src/modules/llm/mock-models.js";
+import { MARKET_DATA_PROVIDER } from "../../src/modules/market/market.service.js";
+import { MockMarketProvider } from "../../src/modules/market/providers/mock.provider.js";
+import type { MarketDataProvider } from "../../src/modules/market/providers/types.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
 import { FailingMockRegistry, eventually, gateOrchestrator } from "./helpers.js";
 import { redisDbOf } from "../setup/redis-dbs.js";
 
 const REDIS_DB = redisDbOf("chat/chat.e2e.spec.ts");
+
+/** Provedor de mercado mock com um interruptor: ligado, toda busca de cotação falha. */
+class SwitchableMarketProvider implements MarketDataProvider {
+  failing = false;
+  private readonly real = new MockMarketProvider(() => Date.now());
+
+  fetchQuotes(symbols: string[]) {
+    if (this.failing) return Promise.reject(new Error("provedor fora do ar"));
+    return this.real.fetchQuotes(symbols);
+  }
+
+  fetchHistory(...args: Parameters<MarketDataProvider["fetchHistory"]>) {
+    return this.real.fetchHistory(...args);
+  }
+}
+
+/** Frases fixas da falha de preço (ruling R-M8). */
+const UNKNOWN_ASSET_TEXT =
+  "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.";
+const PRICE_UNAVAILABLE_TEXT =
+  "Não foi possível propor a ordem: a cotação do ativo está indisponível no momento. Tente novamente em instantes.";
 const QUOTA = 1000;
 
 describe("Chat REST", () => {
@@ -30,6 +55,7 @@ describe("Chat REST", () => {
   let A: SeededTenant;
   let B: SeededTenant;
   const mocks = new FailingMockRegistry();
+  const market = new SwitchableMarketProvider();
 
   const post = (key: string | undefined, body: unknown) => {
     const r = request(server).post("/api/chat");
@@ -63,7 +89,10 @@ describe("Chat REST", () => {
     t = await createTestApp({
       imports: [ChatModule],
       redisDb: REDIS_DB,
-      overrides: [{ token: MockResponderRegistry, useValue: mocks }],
+      overrides: [
+        { token: MockResponderRegistry, useValue: mocks },
+        { token: MARKET_DATA_PROVIDER, useValue: market },
+      ],
     });
     server = t.app.getHttpServer() as Parameters<typeof request>[0];
     redis = new Redis(redisDbUrl(REDIS_DB));
@@ -78,6 +107,7 @@ describe("Chat REST", () => {
 
   beforeEach(async () => {
     mocks.failing = false;
+    market.failing = false;
     await redis.flushdb();
   });
 
@@ -163,6 +193,54 @@ describe("Chat REST", () => {
     expect(ChatResponseSchema.parse(healed.body)).toMatchObject({
       status: "completed",
       threadId: body.threadId,
+    });
+  });
+
+  describe("ordem sem preço de servidor (spec 5.5 item 4, R-M8): a resposta explica e nada é proposto", () => {
+    const approvalsOf = (tenantId: string, threadId: string) =>
+      migratorSql<{ id: string }>(
+        `SELECT id FROM approval_request WHERE thread_id = $1`,
+        [threadId],
+        {
+          tenantId,
+        },
+      );
+
+    it("ativo fora da base de cotações (ABEV3 no mock): frase de unknown_asset, sem aprovação", async () => {
+      const res = await post(A.keys.chat, {
+        clientId: "cli-1",
+        message: "compre 4 ações de ABEV3",
+      });
+      expect(res.status).toBe(200);
+      const body = ChatResponseSchema.parse(res.body);
+      expect(body.status).toBe("completed");
+      expect(body.approval).toBeUndefined();
+      expect(body.answer.endsWith(`\n\n${UNKNOWN_ASSET_TEXT}`)).toBe(true);
+      // Nada do que o usuário digitou nem do modelo vai na frase (o resto é a resposta do Navigator).
+      expect(body.answer).not.toContain("ABEV3");
+      expect(body.results["executor"]).toEqual({
+        failed: true,
+        reason: "unknown_asset",
+        message: UNKNOWN_ASSET_TEXT,
+      });
+      expect(await approvalsOf(A.tenantId, body.threadId)).toEqual([]);
+    });
+
+    it("provedor de cotação fora do ar: frase de price_unavailable, sem aprovação", async () => {
+      market.failing = true;
+      const res = await post(A.keys.chat, {
+        clientId: "cli-1",
+        message: "compre 100 ações de PETR4",
+      });
+      expect(res.status).toBe(200);
+      const body = ChatResponseSchema.parse(res.body);
+      expect(body.status).toBe("completed");
+      expect(body.approval).toBeUndefined();
+      expect(body.answer.endsWith(`\n\n${PRICE_UNAVAILABLE_TEXT}`)).toBe(true);
+      expect(body.answer).not.toContain("PETR4");
+      expect(body.answer).not.toContain("provedor fora do ar");
+      expect(body.results["executor"]).toMatchObject({ failed: true, reason: "price_unavailable" });
+      expect(await approvalsOf(A.tenantId, body.threadId)).toEqual([]);
     });
   });
 

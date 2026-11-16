@@ -39,7 +39,8 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/modules/**/*.ts"],
-      exclude: ["src/**/*.spec.ts"],
+      // smoke.ts: fumaça manual dos provedores live (rede real), fora do CI.
+      exclude: ["src/**/*.spec.ts", "src/modules/market/smoke.ts"],
       reporter: ["text-summary", "text", "json-summary"],
       reportsDirectory: "coverage",
       thresholds: { lines: 80 },

@@ -628,6 +628,84 @@ describe("Inbox (int)", () => {
     });
   });
 
+  describe("idPayload e lookup", () => {
+    it("idPayload define o id e payload é o gravado; o id é o de um request sem idPayload com esse payload", async () => {
+      const threadId = `${A.tenantId}:${A.clientId}:${randomUUID()}`;
+      const idPayload = { symbol: "PETR4", qty: 100 };
+      const enriched = { symbol: "PETR4", qty: 100, price: "38.10" };
+      const withId = await request(A, { threadId, idPayload, payload: enriched });
+      const plain = await request(A, { threadId, payload: idPayload });
+      expect(withId.created).toBe(true);
+      expect(plain.approvalId).toBe(withId.approvalId);
+      expect(plain.created).toBe(false);
+      expect((await row(A, withId.approvalId))?.["payload"]).toEqual(enriched);
+    });
+
+    it("mesmo idPayload com payloads diferentes: mesmo id, created:false, a linha mantém o primeiro payload e valor, um só approval.created", async () => {
+      const threadId = `${A.tenantId}:${A.clientId}:${randomUUID()}`;
+      const idPayload = { symbol: "VALE3", qty: 5 };
+      const first = await request(A, {
+        threadId,
+        idPayload,
+        payload: { ...idPayload, price: "1.00" },
+        valueBrl: "5.00",
+      });
+      const second = await request(A, {
+        threadId,
+        idPayload,
+        payload: { ...idPayload, price: "2.00" },
+        valueBrl: "10.00",
+      });
+      expect(first.created).toBe(true);
+      expect(second.created).toBe(false);
+      expect(second.approvalId).toBe(first.approvalId);
+      const r = await row(A, first.approvalId);
+      expect(r?.["payload"]).toEqual({ ...idPayload, price: "1.00" });
+      expect(String(r?.["value_brl"])).toBe("5.00");
+      const created = (await events("inbox.events")).filter((e) => e.type === "approval.created");
+      expect(created).toHaveLength(1);
+    });
+
+    it.each([
+      ["array", [1, 2]],
+      ["null", null],
+      ["string", "x"],
+      ["não serializável (BigInt)", { n: 1n }],
+      ["grande demais", { blob: "x".repeat(70 * 1024) }],
+      ["caractere NUL", { s: "a\u0000b" }],
+    ])("idPayload %s: ValidationError e nenhuma linha", async (_name, idPayload) => {
+      const input = reqInput(A, { idPayload });
+      await expect(
+        asParty(A, () => inbox.request(input as Parameters<InboxService["request"]>[0])),
+      ).rejects.toBeInstanceOf(ValidationError);
+      const rows = await migratorSql(
+        `SELECT id FROM approval_request WHERE thread_id = $1`,
+        [input.threadId],
+        { tenantId: A.tenantId },
+      );
+      expect(rows).toEqual([]);
+      expect(await events("inbox.events")).toEqual([]);
+    });
+
+    it("lookup devolve a aprovação criada, e null para inexistente, malformado e de outro tenant", async () => {
+      const a = await request(A);
+      const b = await request(B);
+      await expect(asTenantOnly(A, () => inbox.lookup(a.approvalId))).resolves.toMatchObject({
+        id: a.approvalId,
+        clientId: "cli-1",
+        status: "pending",
+        valueBrl: "10000.00",
+      });
+      await expect(asTenantOnly(A, () => inbox.lookup(b.approvalId))).resolves.toBeNull();
+      await expect(asTenantOnly(B, () => inbox.lookup(a.approvalId))).resolves.toBeNull();
+      await expect(asTenantOnly(B, () => inbox.lookup(b.approvalId))).resolves.toMatchObject({
+        id: b.approvalId,
+      });
+      await expect(asTenantOnly(A, () => inbox.lookup("0".repeat(64)))).resolves.toBeNull();
+      await expect(asTenantOnly(A, () => inbox.lookup("lixo"))).resolves.toBeNull();
+    });
+  });
+
   describe("isolamento entre tenants", () => {
     it("executeOnce/decide de um tenant nunca tocam o outro; dados nos dois lados", async () => {
       const spyA = vi.fn(async () => ({ lado: "A" }));

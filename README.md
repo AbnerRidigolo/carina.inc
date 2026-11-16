@@ -41,10 +41,10 @@ com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
 O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a base de conhecimento
 (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
 
-| Variável            | Valor padrão                               | Escopos                 |
-| ------------------- | ------------------------------------------ | ----------------------- |
-| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`    |
-| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`  |
+| Variável            | Valor padrão                               | Escopos                              |
+| ------------------- | ------------------------------------------ | ------------------------------------ |
+| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`  |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`               |
 
 > **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
 > `NODE_ENV=production` o seed recusa as chaves fixas, a menos que `SEED_ALLOW_DEMO_KEYS=true`.
@@ -55,8 +55,8 @@ O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a 
 
 1. Conecte com a `DEMO_APPROVER_KEY` e pergunte "Como está minha carteira?". O Insight roda e o
    Navigator responde em streaming, com o custo do turno.
-2. Peça "compre 100 ações de PETR4". O executor propõe a ordem (R$ 3.000,00 no preço fixo do mock),
-   o grafo pausa e a aprovação aparece no painel.
+2. Peça "compre 100 ações de PETR4". O executor cota PETR4 no servidor (R$ 30,00 na tabela do mock),
+   propõe a ordem de R$ 3.000,00, o grafo pausa e a aprovação aparece no painel.
 3. Aprove e confirme. O `worker` retoma o grafo e executa a ordem simulada uma vez. O painel recebe
    `approval_executed` pelo WebSocket e o uso mostra a execução: R$ 90,00 (R$ 75,00 de preço base
    + 0,5% de R$ 3.000,00).
@@ -77,9 +77,27 @@ Com a chave app, a decisão devolve **403**: ela não tem `inbox:decide`. Esse r
 (job `compose-smoke`) e no teste
 [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
+Dados de mercado (escopo `market:read`, que a chave app da demo tem):
+
+```bash
+curl -s "localhost:3000/api/market/quotes?symbols=PETR4,VALE3" -H "$APP"
+# → {"quotes":[{"symbol":"PETR4","price":"30.00",...,"source":"mock"}, ...],"usage":{"workType":"data_query","priceBrl":"0.05"}}
+curl -s localhost:3000/api/market/macro -H "$APP"
+```
+
+`GET /api/market/history/:symbol?range=` completa as três rotas. No CI, o `compose-smoke` só
+consulta a cotação de PETR4; as três rotas são cobertas por
+[`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts). Cada
+chamada bem-sucedida custa R$ 0,05 (`data_query`), inclusive quando a resposta vem do cache;
+provedor fora (502) ou orçamento de chamadas ao provedor esgotado (503) não é cobrado. Por padrão (`MARKET_MODE=mock`) os preços vêm de uma tabela fixa: PETR4, VALE3, ITUB4,
+BBDC4, BBAS3, MGLU3, WEGE3, PRIO3, HGLG11, KNRI11, MXRF11, XPML11, IVVB11 e BOVA11. Qualquer outro
+ticker é `unknown_asset` na demo. Com `MARKET_MODE=live` as cotações vêm da brapi.dev
+(`BRAPI_TOKEN` opcional) e os indicadores do BCB SGS; para conferir os provedores reais uma vez,
+com rede, rode `pnpm build` e `pnpm --filter @carina/api market:smoke` (manual, fora do CI).
+
 Com `LLM_MODE=live` e `OPENROUTER_API_KEY` os agentes usam os modelos de
-[`apps/api/config/models.yaml`](apps/api/config/models.yaml). O modo live **não é exercitado pelo
-CI**; leia [Limitações e segurança](#limitações-e-segurança) antes de ligá-lo.
+[`apps/api/config/models.yaml`](apps/api/config/models.yaml). Os modos live de LLM e de mercado
+**não são exercitados pelo CI**; leia [Limitações e segurança](#limitações-e-segurança) antes de ligá-lo.
 
 ## Arquitetura
 
@@ -144,6 +162,16 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   [`limits.int.spec.ts`](apps/api/test/limits/limits.int.spec.ts).
 - **Watchtower sem ReDoS**, com paridade com o Python:
   [`inspect-text.perf.spec.ts`](apps/api/src/modules/watchtower/inspect-text.perf.spec.ts).
+- **O valor de um `place_trade` vem do servidor, não do modelo**: o executor cota o ativo
+  (`MarketService.priceFor`), e um `valueBrl` incoerente do modelo não chega à aprovação nem à
+  taxa (R$ 90,00 cobrados sobre R$ 3.000,00); sem cotação válida, nenhuma aprovação é criada:
+  [`orchestrator.int.spec.ts`](apps/api/test/orchestrator/orchestrator.int.spec.ts) ("R-M7…"),
+  [`trade-pricing.spec.ts`](apps/api/src/modules/agents/trade-pricing.spec.ts),
+  [`market.service.spec.ts`](apps/api/src/modules/market/market.service.spec.ts).
+- **Rotas de mercado** com escopo `market:read`, cobrança só após o sucesso e orçamento de
+  chamadas ao provedor (cache negativo, 503 sem cobrança):
+  [`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts),
+  [`market.service.spec.ts`](apps/api/src/modules/market/market.service.spec.ts).
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -176,10 +204,22 @@ harness sobe os dois via Testcontainers. Com serviços próprios (é o que o CI 
 Esta é uma demo de portfólio, não um serviço pronto para produção. O que **não** está feito ou tem
 limite conhecido:
 
-- **Executores simulados.** Não há integração com corretora; o preço do `place_trade` no mock é
-  fixo.
-- **O valor que define a taxa de execução é afirmado pelo modelo.** Ele é validado e conferido
-  contra o payload quando possível, mas não há fonte de preço no servidor.
+- **Executores simulados.** Não há integração com corretora; a ordem é executada de mentira, ao
+  preço de servidor.
+- **O valor que define a taxa de execução ainda é afirmado pelo modelo em `transfer` e
+  `rebalance`.** Ele é validado e conferido contra o payload quando possível, mas não há fonte de
+  preço para eles. Em `place_trade` o preço vem do servidor (falha fechada: sem cotação fresca,
+  não há aprovação), mas a taxa usa o valor que o aprovador viu, sem nova cotação na execução
+  (vale até `APPROVAL_TTL_HOURS`), e não há calendário de feriados: um feriado parece pregão
+  aberto e a cotação velha é recusada como `price_stale`.
+- **Modo live de mercado sem teste no CI.** As fixtures de brapi.dev e BCB SGS foram reconstruídas
+  da documentação (o sandbox de desenvolvimento não alcançava os provedores); rode
+  `market:smoke` uma vez com rede para registrar respostas reais.
+- **Live de mercado depende do plano da brapi.** Os padrões (1 ativo por requisição, 1 por vez)
+  cabem no plano gratuito, mas `MARKET_QUOTE_MAX_AGE_MS` (5 min) precisa ser pelo menos o atraso
+  do plano (~30 min no gratuito), senão toda ordem em pregão é recusada como `price_stale`; e um
+  orçamento de 30 chamadas por minuto (rotas e preço, separados) protege, mas não confere, a cota
+  mensal do token. Ver [Limitações conhecidas](docs/DECISOES-E-GARANTIAS.md#limitações-conhecidas-e-próximos-passos).
 - **PII vai ao provedor de LLM no modo live**, e as conversas ficam nos checkpoints do LangGraph
   sem RLS, sem TTL e sem caminho de eliminação (LGPD). A auditoria guarda a pergunta mascarada
   por padrões e a resposta só como digest.
@@ -195,7 +235,7 @@ A lista completa, com os próximos passos de engenharia em ordem de prioridade, 
 ## Roadmap
 
 **Fase 2 — produtos B2B:** importação de arquivos (OFX, CSV, planilhas da Área do Investidor B3,
-notas de corretagem), AOPs, `market`, `evaluation`, `builder` e os seis agentes restantes
+notas de corretagem), AOPs, `evaluation`, `builder` e os seis agentes restantes
 (strategist, researcher, assessor_liaison, monitor, categorizer e tax).
 
 **Fase 3 — integrações e remoção do Python:** notificações (WhatsApp e SMTP), monitor de carteiras

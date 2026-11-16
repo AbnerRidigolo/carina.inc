@@ -26,6 +26,7 @@ import { ExecutorRegistry } from "../inbox/executors.js";
 import { InboxService } from "../inbox/inbox.service.js";
 import { KnowledgeService } from "../knowledge/knowledge.service.js";
 import { ModelFactory } from "../llm/model-factory.js";
+import { MarketService } from "../market/market.service.js";
 import {
   InterruptValueSchema,
   type OrchestratorGraph,
@@ -74,17 +75,18 @@ export class OrchestratorService {
     @Inject(InboxService)
     private readonly inbox: Pick<
       InboxService,
-      "request" | "executeOnce" | "get" | "executionOf" | "expireIfDue" | "closeOrphan"
+      "request" | "executeOnce" | "get" | "lookup" | "executionOf" | "expireIfDue" | "closeOrphan"
     >,
     @Inject(ExecutorRegistry) executors: Pick<ExecutorRegistry, "get">,
     @Inject(StreamsService) streams: Pick<StreamsService, "publish">,
+    @Inject(MarketService) market: Pick<MarketService, "priceFor">,
     @Inject(ORCHESTRATOR_CHECKPOINTER) checkpointer: BaseCheckpointSaver,
     @Optional()
     @Inject(ORCHESTRATOR_LOGGER)
     private readonly logger: OrchestratorLogger = new Logger(OrchestratorService.name),
   ) {
     this.graph = buildGraph(
-      { models, agents, knowledge, inbox, executors, streams, logger: this.logger },
+      { models, agents, knowledge, inbox, executors, streams, market, logger: this.logger },
       checkpointer,
     );
   }

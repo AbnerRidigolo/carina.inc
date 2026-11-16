@@ -6,6 +6,7 @@ import { AgentsModule } from "../agents/agents.module.js";
 import { InboxCoreModule } from "../inbox/inbox-core.module.js";
 import { KnowledgeModule } from "../knowledge/knowledge.module.js";
 import { LlmModule } from "../llm/llm.module.js";
+import { MarketCoreModule } from "../market/market-core.module.js";
 import { MockResponderRegistry } from "../llm/mock-models.js";
 import { createCheckpointer } from "./checkpointer.js";
 import { classifierMockResponder } from "./heuristic.js";
@@ -34,7 +35,8 @@ const checkpointerProvider = {
 
 /**
  * Orquestrador (grafo LangGraph). Módulo de serviço, sem rotas nem guards globais (importa o
- * InboxCoreModule, não o InboxModule HTTP, para caber no WorkerModule): o ChatService
+ * InboxCoreModule, não o InboxModule HTTP, para caber no WorkerModule; e o MarketCoreModule, só o
+ * MarketService, para o preço de servidor do `place_trade`): o ChatService
  * (Task 20) usa `stream`, e o ResumeWorker (consumidor de `resume` em `jobs`, grupo `resumers`)
  * usa `resume`; ele liga só com WORKERS_ENABLED !== "false" e para no onModuleDestroy dos
  * providers, que o Nest chama ANTES do onModuleDestroy deste módulo (que fecha o checkpointer).
@@ -42,7 +44,7 @@ const checkpointerProvider = {
  * testes de unidade injetam MemorySaver.
  */
 @Module({
-  imports: [LlmModule, AgentsModule, KnowledgeModule, InboxCoreModule],
+  imports: [LlmModule, AgentsModule, KnowledgeModule, InboxCoreModule, MarketCoreModule],
   providers: [checkpointerProvider, OrchestratorService, ResumeWorker, resumeLoggerProvider],
   exports: [OrchestratorService, ResumeWorker],
 })

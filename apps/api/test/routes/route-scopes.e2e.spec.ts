@@ -99,6 +99,9 @@ describe("Escopos das rotas registradas", () => {
         "GET /clients/:clientId/positions",
         "GET /clients/:clientId/transactions",
         "GET /health",
+        "GET /market/history/:symbol",
+        "GET /market/macro",
+        "GET /market/quotes",
         "GET /ready",
         "GET /usage",
         "POST /chat",
@@ -138,6 +141,7 @@ describe("Escopos das rotas registradas", () => {
       if (r.route === "POST /inbox/:id/decision") return { all: ["inbox:decide"], any: [] };
       if (r.route === "POST /chat" || r.route === "POST /ws/ticket")
         return { all: ["chat"], any: [] };
+      if (r.route.startsWith("GET /market/")) return { all: ["market:read"], any: [] };
       return { all: [r.route.startsWith("POST ") ? "data:write" : "chat"], any: [] };
     };
     for (const r of routes.filter((x) => !x.isPublic)) {

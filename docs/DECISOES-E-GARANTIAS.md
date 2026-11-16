@@ -86,6 +86,15 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Execução no máximo uma vez**: dois `executeOnce` em paralelo, o mesmo `resume` entregue duas vezes ou por dois workers, retomadas concorrentes do grafo | [`inbox.int.spec.ts`](../apps/api/test/inbox/inbox.int.spec.ts) ("dois em paralelo: o executor roda uma vez…"), [`resume.int.spec.ts`](../apps/api/test/orchestrator/resume.int.spec.ts) ("mesmo resume entregue duas vezes e por dois consumidores"), [`orchestrator.int.spec.ts`](../apps/api/test/orchestrator/orchestrator.int.spec.ts) ("retomadas concorrentes (duas instâncias)") |
 | `started` preso vira `needs_review` e **nunca é reexecutado**; cobrança, auditoria e status revertem juntos | [`inbox.int.spec.ts`](../apps/api/test/inbox/inbox.int.spec.ts) (ReconciliationJob, "falha na cobrança…") |
 | Decisões concorrentes: só uma vale; a segunda → 409 | [`inbox.int.spec.ts`](../apps/api/test/inbox/inbox.int.spec.ts), [`decision.e2e.spec.ts`](../apps/api/test/inbox/decision.e2e.spec.ts), [`full-flow.e2e.spec.ts`](../apps/api/test/flow/full-flow.e2e.spec.ts) |
+| **Preço de servidor no `place_trade`**: um `valueBrl` incoerente do modelo não chega à aprovação nem à taxa (aprovação de R$ 3.000,00, execução cobra R$ 90,00); o payload da aprovação só tem as 8 chaves do servidor; ativo fora da tabela (`unknown_asset`) não cria aprovação; reexecução do nó no mesmo turno reutiliza a primeira cotação; `transfer` não cota | [`orchestrator.int.spec.ts`](../apps/api/test/orchestrator/orchestrator.int.spec.ts) ("R-M7: modelo com valueBrl incoerente…", "ordem padrão de PETR4…", "ativo desconhecido do provedor…", "reexecução do nó executor no mesmo turno…", "transfer não cota…"), [`trade-pricing.spec.ts`](../apps/api/src/modules/agents/trade-pricing.spec.ts) ("descarta toda chave do modelo fora do formato da ordem", "cotação de outro ativo → price_unavailable", "preço zero, negativo ou fora do formato nunca vira ordem", "exatamente na metade arredonda para cima: 3 × 10.005 = 30.015 → 30.02; 1.5 × 10.01 = 15.015 → 15.02") |
+| **`place_trade` fora do formato nunca usa o valor do modelo**: com um executor que pula o `refineProposal` (payload malformado, vazio ou nome com espaços), o nó devolve `price_unavailable`, sem lookup, cotação nem aprovação | [`graph.spec.ts`](../apps/api/src/modules/orchestrator/graph.spec.ts) ("place_trade fora do formato vindo de um executor que pula o refineProposal…") |
+| **Taxa e notional com 64 dígitos**: R$ 9.899.468.931.549.282,82 a 0,1234% dá fee de R$ 12.215.944.661.531,81 (com 20 dígitos daria ,82) | [`pricing.spec.ts`](../apps/api/src/modules/billing/pricing.spec.ts) ("precisão de 64 dígitos…", "quantidade × preço exato (64 dígitos)…") |
+| **Cotação fresca ou nada** (falha fechada): mercado aberto aceita até 5 min e fechado até 5 dias, nos limites exatos; hora futura, preço zero e ativo ausente são recusados; cotação velha em cache provoca uma única nova busca; 20 `priceFor` concorrentes → 1 busca | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("MarketService.priceFor…", "preço zero (falha fechada)", "cotação velha do cache é buscada de novo uma vez"), [`market-service.int.spec.ts`](../apps/api/test/market/market-service.int.spec.ts) (cache de 60 s no Redis real) |
+| **Mock e live não se misturam**: o modo entra na chave do cache; cotação com `source` de outro modo é ignorada no cache e recusada pelo `priceFor`; `MARKET_MODE=mock` em produção sobe com `warn` | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("mock e live não se misturam…"), [`market-core.int.spec.ts`](../apps/api/test/market/market-core.int.spec.ts) ("MARKET_LOGGER é provido pelo módulo…") |
+| **Planos da brapi**: N símbolos com lote de K viram ceil(N/K) requisições com o mesmo cabeçalho; requisições em série (concorrência 1 por padrão); um lote falho não devolve resultado parcial; hora da cotação limitada a `now` | [`brapi.provider.spec.ts`](../apps/api/src/modules/market/providers/brapi.provider.spec.ts) ("lotes e chamadas em série…", "hora exatamente em now + 2 min passa…"), [`market-core.int.spec.ts`](../apps/api/test/market/market-core.int.spec.ts) ("live: lotes de MARKET_BRAPI_MAX_SYMBOLS_PER_CALL…") |
+| **Cota do token protegida**: 20 chamadas com 20 símbolos desconhecidos → 1 busca por símbolo em 60 s (cache negativo); orçamento das rotas esgotado → 503 com `Retry-After` sem cobrança, enquanto o `priceFor` segue com orçamento próprio; zera no minuto seguinte; Redis fora → rotas 502, preço segue | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("cache negativo e orçamento…"), [`market-service.int.spec.ts`](../apps/api/test/market/market-service.int.spec.ts) ("orçamento das rotas no Redis real…"), [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) ("orçamento de chamadas ao provedor esgotado") |
+| **Rotas `/api/market/*`**: sem `market:read` → 403; cada chamada bem-sucedida (inclusive acerto de cache) cobra `data_query` de R$ 0,05; entrada inválida → 422, provedor fora → 502 e orçamento esgotado → 503 com `Retry-After`, todos problem+json, sem cobrança e sem texto interno | [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) |
+| **`MARKET_MODE` explícita no compose** (a API recusa subir em produção sem ela): `api`, `worker` e `seed` a definem, com padrão `mock` | [`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts) ("docker-compose.yml: MARKET_MODE") |
 | **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](../apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](../apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](../apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
 | **Append-only**: em `usage_record` e `audit_event`, o INSERT do `carina_app` passa e UPDATE, DELETE e TRUNCATE falham com 42501 (permission denied) | [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts); pelo cliente Prisma do serviço (UPDATE e DELETE recusados): [`watchtower.int.spec.ts`](../apps/api/test/watchtower/watchtower.int.spec.ts) |
@@ -164,11 +173,26 @@ Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos 
   em profundidade.
 - **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401;
   sockets abertos fecham no próximo turno ou heartbeat), mas hoje só se altera direto no banco.
-- **O valor que define a taxa de execução é afirmado pelo modelo.** O `valueBrl` da proposta vem
-  da saída do LLM. Ele é validado (formato, sinal, limite de `numeric(18,2)`) e, nas ações que
-  movem dinheiro (`place_trade`, `transfer`, `rebalance`), quando o payload traz como conferir
-  (valor explícito, ou quantidade × preço unitário), tem de bater, senão a proposta é recusada. O aprovador vê o valor junto com o payload antes de decidir. Não há fonte
-  de preço no servidor: na fase 2 o valor deve vir de uma cotação do servidor, não do modelo.
+- **O valor que define a taxa de execução é afirmado pelo modelo só em `transfer` e `rebalance`.**
+  Para elas o `valueBrl` vem da saída do LLM: é validado (formato, sinal, limite de
+  `numeric(18,2)`) e, quando o payload traz como conferir (valor explícito, ou quantidade × preço
+  unitário), tem de bater, senão a proposta é recusada. O aprovador vê o valor junto com o payload
+  antes de decidir, mas não há fonte de preço para essas ações.
+- **`place_trade`: o servidor vence.** Com um código de ativo válido, o nó `executor` cota o ativo
+  (`MarketService.priceFor`), monta o payload com a allow-list de 8 chaves (`side`, `assetCode`,
+  `quantity`, `unitPriceBrl`, `notionalBrl`, `priceSource`, `priceAsOf`, `marketState`) e calcula
+  `valueBrl = quantidade × preço` (exato, meio para cima, 2 casas). Qualquer chave de valor ou de
+  preço do modelo é descartada. Falha fechada: sem cotação (`price_unavailable`), velha
+  (`price_stale`) ou de ativo desconhecido (`unknown_asset`), nenhuma aprovação é criada e a
+  resposta do turno traz uma frase fixa por código. Limites conhecidos: a taxa na execução é
+  calculada sobre o `valueBrl` gravado, o que o aprovador viu, sem nova cotação (o preço pode
+  ter mudado em até `APPROVAL_TTL_HOURS`); não há calendário de feriados (um feriado parece
+  pregão aberto, e a cotação velha é recusada como `price_stale`); a frase de falha entra no
+  `answer`, não nas mensagens do checkpoint.
+- **Implantação do preço de servidor: aprovações pendentes antigas.** Uma aprovação de
+  `place_trade` criada antes do deploy desta versão carrega o `valueBrl` afirmado pelo modelo e,
+  se aprovada, será cobrada sobre ele (a execução usa o valor gravado). Antes do deploy, decida as
+  pendentes de `place_trade` ou espere `APPROVAL_TTL_HOURS` (padrão 24 h) para elas expirarem.
 - **CSP do web**: `connect-src 'self'`. Pela CSP Level 3, `'self'` cobre o `ws:`/`wss:` da mesma
   origem; verificamos isso no Chromium. Um navegador antigo que não siga a CSP3 bloquearia o
   WebSocket.
@@ -180,7 +204,24 @@ Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos 
 O que **não** está feito ou tem limite conhecido na fase 1:
 
 - **Executores simulados.** `place_trade`, `transfer` e afins devolvem ids simulados; não há
-  integração com corretora. O preço do `place_trade` no mock é fixo (R$ 30,00 por ação).
+  integração com corretora. No mock, o preço do `place_trade` vem de uma tabela fixa (PETR4 a R$ 30,00).
+- **Modo live de mercado sem teste no CI.** `BrapiProvider` e `BcbProvider` são testados com
+  fixtures reconstruídas da documentação (o sandbox de desenvolvimento não alcançava brapi.dev nem
+  o BCB), nunca contra a rede. O script manual `pnpm --filter @carina/api market:smoke` (depois do
+  `pnpm build`) busca PETR4 e os quatro indicadores do BCB; rodá-lo uma vez com rede e registrar
+  as respostas reais é um acompanhamento pendente. No mock, só os tickers da tabela
+  (`MOCK_PRICES`) têm preço; qualquer outro vira `unknown_asset` na demo.
+- **Planos da brapi.dev e configuração do live.** Segundo a documentação da brapi (conferida em
+  2026-11-14): Gratuito, 1 ativo por requisição, 1 requisição simultânea, dados com ~30 min de
+  atraso e histórico de até 3 meses; Startup, 10 ativos, 4 simultâneas, ~15 min, 1 ano; Pro, 20
+  ativos, 16 simultâneas, ~5 min; sem token só PETR4, MGLU3, VALE3 e ITUB4 respondem, a 20
+  requisições por minuto por IP. Os padrões (`MARKET_BRAPI_MAX_SYMBOLS_PER_CALL=1`,
+  `MARKET_PROVIDER_CONCURRENCY=1`) cabem em todos os planos. `MARKET_QUOTE_MAX_AGE_MS` continua
+  com 5 min, mas precisa ser pelo menos o atraso do plano (ex.: ~35 min no Gratuito): abaixo
+  disso o live recusa toda ordem em pregão como `price_stale` (falha fechada). Histórico além do
+  que o plano permite volta como erro do provedor (502). O orçamento por minuto
+  (`MARKET_PROVIDER_MAX_CALLS_PER_MIN` e `MARKET_PRICE_MAX_CALLS_PER_MIN`, 30 cada) limita a
+  queima da cota mensal, mas não a confere: dimensione-o pela cota do plano.
 - **Modo live sem teste automatizado.** A cadeia de fallback é testada com modelos falsos; os ids
   `:free` do OpenRouter em `models.yaml` têm `TODO confirmar` e podem mudar.
 - **Agentes da fase 1:** navigator, insight, predictor, risk e executor. Os outros seis do Python

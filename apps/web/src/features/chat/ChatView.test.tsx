@@ -118,6 +118,39 @@ describe("ChatView", () => {
     expect(within(risk).getByText("PETR4~VALE3")).toBeInTheDocument();
   });
 
+  it("executor que não pôde propor a ordem mostra a frase do servidor no card", async () => {
+    const { socket } = await mount();
+    await ask(socket, "compre 4 ações de ABEV3");
+    const message =
+      "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.";
+    emit(
+      socket,
+      { type: "agent_started", agent: "executor" },
+      {
+        type: "agent_result",
+        agent: "executor",
+        result: { failed: true, reason: "unknown_asset", message },
+      },
+      doneEvent(),
+    );
+    const card = screen.getByRole("region", { name: /executor/i });
+    expect(within(card).getByText(message)).toBeInTheDocument();
+    expect(within(card).queryByText(/não conseguiu concluir/)).not.toBeInTheDocument();
+  });
+
+  it("falha sem frase mantém o aviso genérico", async () => {
+    const { socket } = await mount();
+    await ask(socket, "projeta");
+    emit(
+      socket,
+      { type: "agent_started", agent: "risk" },
+      { type: "agent_result", agent: "risk", result: { failed: true } },
+      doneEvent(),
+    );
+    const card = screen.getByRole("region", { name: /risk/i });
+    expect(within(card).getByText(/não conseguiu concluir a análise/)).toBeInTheDocument();
+  });
+
   it("resultado fora do schema do agente vira aviso, nunca é renderizado", async () => {
     const { socket } = await mount();
     await ask(socket, "x");

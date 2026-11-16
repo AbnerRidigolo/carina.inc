@@ -4,6 +4,7 @@
  */
 import type { WorkType } from "@carina/shared";
 import { Prisma } from "../../generated/prisma/client.js";
+import { ExactDecimal } from "./exact-decimal.js";
 
 const Decimal = Prisma.Decimal;
 type Decimal = Prisma.Decimal;
@@ -81,12 +82,22 @@ export function payloadNotionalBrl(payload: Record<string, unknown>): Decimal | 
   const price = toDecimal(payload[key]);
   const quantity = toDecimal(payload["quantity"]);
   if (!price || !quantity) return null;
-  return price.mul(quantity).abs().toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  // Produto exato (64 dígitos) antes das 2 casas; de volta ao `Prisma.Decimal`.
+  const exact = new ExactDecimal(price.toFixed()).mul(new ExactDecimal(quantity.toFixed()));
+  return new Decimal(exact.abs().toDecimalPlaces(2, ExactDecimal.ROUND_HALF_UP).toFixed(2));
 }
 
 /**
+ * Todas as chaves de valor e de preço unitário que um modelo pode pôr no payload (as que
+ * `extractValueBrl` e `payloadNotionalBrl` leem). Para testes de que o payload precificado pelo
+ * servidor não as carrega.
+ */
+export const MODEL_VALUE_KEYS: readonly string[] = [...VALUE_KEYS, ...UNIT_PRICE_KEYS];
+
+/**
  * Preço de uma execução: `fee = round_half_up(value × feePct / 100, 2)` e `price = 75.00 + fee`.
- * Sem valor movimentado positivo não há fee.
+ * Sem valor movimentado positivo não há fee. A conta é feita com 64 dígitos (`ExactDecimal`):
+ * com os 20 do `Prisma.Decimal`, valor ~1e14+ com taxa de várias casas erraria um centavo.
  */
 export function computeExecutionPrice(
   valueBrl: Decimal,
@@ -96,7 +107,13 @@ export function computeExecutionPrice(
     throw new RangeError(`feePct inválido: ${String(feePct)}`);
   }
   const feeBrl = valueBrl.gt(0)
-    ? valueBrl.mul(feePct).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    ? new Decimal(
+        new ExactDecimal(valueBrl.toFixed())
+          .mul(new ExactDecimal(String(feePct)))
+          .div(100)
+          .toDecimalPlaces(2, ExactDecimal.ROUND_HALF_UP)
+          .toFixed(2),
+      )
     : new Decimal(0);
   return { priceBrl: new Decimal(PRICE_BRL.execution).plus(feeBrl), feeBrl };
 }

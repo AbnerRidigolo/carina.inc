@@ -164,6 +164,9 @@ jobs:
           done
           jq -e '.byWorkType.execution == {"count": 1, "totalBrl": "90.00"}' <<<"$usage"
           curl -fsS "$W/api/clients/cliente-moderado/inbox" -H "$APP" | jq -e 'length == 0'
+          # Rota de mercado pela chave app (market:read), no mock da demo.
+          curl -fsS "$W/api/market/quotes?symbols=PETR4" -H "$APP" \
+            | jq -e '.quotes[0].price == "30.00" and .quotes[0].source == "mock"'
 
       - name: Logs dos serviços (se falhar)
         if: failure()

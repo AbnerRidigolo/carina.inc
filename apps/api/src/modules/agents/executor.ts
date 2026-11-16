@@ -1,22 +1,27 @@
 /**
- * Executor: converte o pedido do cliente numa `ActionProposal`. NUNCA executa nada: `request` só
- * registra a solicitação na inbox (`InboxService.request`), que classifica o risco (ação
- * desconhecida é IRREVERSÍVEL) e pausa até a aprovação humana; a execução acontece depois, em
- * `InboxService.executeOnce`.
+ * Executor: converte o pedido do cliente numa `ActionProposal`. NUNCA executa nem registra nada:
+ * quem leva a proposta à inbox é o nó `executor` do grafo (orchestrator/graph.ts), que aplica o
+ * preço de servidor do `place_trade` antes do `InboxService.request` (spec 5.5); a execução
+ * acontece depois, em `InboxService.executeOnce`. Não há outro caminho da proposta até a inbox,
+ * para que o valor afirmado pelo modelo nunca vire a base da taxa de um ativo cotável.
  *
  * A saída do modelo é não confiável: além do schema (`ActionProposalSchema`, com `MoneySchema` em
  * `valueBrl`), checamos nome da ação (1 a 128), valor não negativo e, para `place_trade`, o
  * formato do payload. Falhou: `AllProvidersFailedError` (mensagem fixa, sem eco da saída do
  * modelo), o mesmo contrato das demais saídas ruins do modelo.
+ *
+ * Valor de `place_trade`: o servidor vence. Com o payload no formato (ativo cotável), o valor e o
+ * preço vêm da cotação (`priceTrade`, em `trade-pricing.ts`) e o que o modelo afirmou é descartado,
+ * então a conferência de coerência do `valueBrl` com o payload não se aplica a ele. Ela continua
+ * para `transfer` e `rebalance`, que não têm preço de servidor.
  */
 import { type ActionProposal, ActionProposalSchema, QuantitySchema } from "@carina/shared";
 import { z } from "zod";
 import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
 import { Prisma } from "../../generated/prisma/client.js";
 import { extractValueBrl, payloadNotionalBrl } from "../billing/pricing.js";
-import type { InboxService } from "../inbox/inbox.service.js";
 import type { ModelFactory } from "../llm/model-factory.js";
-import { type AgentInput, type AgentLogger, LlmAgent } from "./agent.js";
+import { type AgentLogger, LlmAgent } from "./agent.js";
 import { checkMoney } from "./output-limits.js";
 import { PROMPTS } from "./prompts.js";
 
@@ -24,7 +29,11 @@ export const MAX_ACTION_CHARS = 128;
 export const MAX_RATIONALE_CHARS = 2000;
 export const MAX_TRADE_QUANTITY = 1_000_000_000;
 
-const PlaceTradePayloadSchema = z
+/**
+ * Formato do payload de `place_trade` (lado, código do ativo da B3, quantidade positiva até
+ * `MAX_TRADE_QUANTITY`). Também validado por `priceTrade` antes de precificar.
+ */
+export const PlaceTradePayloadSchema = z
   .object({
     side: z.enum(["buy", "sell"]),
     assetCode: z.string().regex(/^[A-Z]{4}\d{1,2}$/),
@@ -41,6 +50,8 @@ const invalid = (): AllProvidersFailedError => new AllProvidersFailedError();
  * Ações que movem dinheiro (as execuções com executor registrado: ordem, transferência e
  * rebalanceamento). Só nelas o `valueBrl` é a base da taxa e vale conferir o payload; em outras
  * ações chaves como `price`/`value` têm outro sentido (ex.: o limite de um `create_alert`).
+ * Fixado contra o `ExecutorRegistry` em executor-value.spec.ts: toda ação registrada que pede
+ * aprovação (irreversível) tem de estar aqui, e vice-versa.
  */
 export const MONEY_MOVING_ACTIONS: ReadonlySet<string> = new Set([
   "place_trade",
@@ -49,9 +60,9 @@ export const MONEY_MOVING_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * O `valueBrl` é afirmado pelo modelo e é a base da taxa de execução. Não há fonte de preço no
- * servidor para derivá-lo (fase 2), então ele não é recalculado; mas, quando o próprio payload
- * permite conferir, a proposta incoerente é recusada:
+ * Em `transfer` e `rebalance`, o `valueBrl` é afirmado pelo modelo e é a base da taxa de execução.
+ * Não há fonte de preço no servidor para derivá-lo, então ele não é recalculado; mas, quando o
+ * próprio payload permite conferir, a proposta incoerente é recusada:
  * - valor explícito no payload (`value_brl`, `valueBrl`, `amount`, `value`, `valor`): tem de ser
  *   igual ao `valueBrl` (em módulo);
  * - quantidade × preço unitário (`unitPriceBrl`, `unit_price_brl`, `priceBrl`, `price`): tem de dar o
@@ -70,19 +81,17 @@ export function refineProposal(p: ActionProposal): ActionProposal {
   const action = p.action.trim();
   if (action.length === 0 || action.length > MAX_ACTION_CHARS) throw invalid();
   checkMoney(p.valueBrl, { nonNegative: true });
-  assertValueMatchesPayload(p);
-  if (action === "place_trade" && !PlaceTradePayloadSchema.safeParse(p.payload).success) {
-    throw invalid();
+  if (action === "place_trade") {
+    // O servidor vence: o valor vem da cotação (`priceTrade`), sem conferir o do modelo.
+    if (!PlaceTradePayloadSchema.safeParse(p.payload).success) throw invalid();
+  } else {
+    assertValueMatchesPayload(p);
   }
   return { ...p, action, rationale: p.rationale.slice(0, MAX_RATIONALE_CHARS) };
 }
 
 export class ExecutorAgent extends LlmAgent<ActionProposal> {
-  constructor(
-    models: ModelFactory,
-    logger: AgentLogger,
-    private readonly inbox: Pick<InboxService, "request">,
-  ) {
+  constructor(models: ModelFactory, logger: AgentLogger) {
     super(models, logger, {
       name: "executor",
       role: "reasoning",
@@ -90,23 +99,5 @@ export class ExecutorAgent extends LlmAgent<ActionProposal> {
       schema: ActionProposalSchema,
       refine: refineProposal,
     });
-  }
-
-  /** Propõe e envia à inbox (aprovação humana para o que não for leitura/reversível). */
-  async request(
-    input: AgentInput,
-    threadId: string,
-    turn = 1,
-  ): Promise<{ proposal: ActionProposal; approvalId: string; created: boolean }> {
-    const proposal = (await this.run(input)) as ActionProposal;
-    const { approvalId, created } = await this.inbox.request({
-      threadId,
-      turn,
-      agent: "executor",
-      action: proposal.action,
-      payload: proposal.payload,
-      valueBrl: proposal.valueBrl,
-    });
-    return { proposal, approvalId, created };
   }
 }

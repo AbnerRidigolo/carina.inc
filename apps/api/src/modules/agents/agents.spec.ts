@@ -40,10 +40,9 @@ function setup() {
   const mocks = new MockResponderRegistry();
   registerAgentMockResponders(mocks);
   const models = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, mocks);
-  const inbox = { request: vi.fn() };
   const logger = { warn: vi.fn(), error: vi.fn() };
-  const registry = new AgentRegistry(models, inbox as never, logger);
-  return { mocks, models, inbox, logger, registry };
+  const registry = new AgentRegistry(models, logger);
+  return { mocks, models, logger, registry };
 }
 
 const chunk = (title: string, content = "conteúdo") => ({
@@ -270,7 +269,7 @@ describe("montagem das mensagens (robustez e injeção)", () => {
       return "ok";
     });
     const factory = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
-    return { seen, registry: new AgentRegistry(factory, s.inbox as never, s.logger) };
+    return { seen, registry: new AgentRegistry(factory, s.logger) };
   }
 
   it("ordem: system, histórico, contexto, pergunta; contexto fica entre delimitadores", async () => {
@@ -341,7 +340,7 @@ describe("montagem das mensagens (robustez e injeção)", () => {
       return "ok";
     });
     const factory = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
-    const registry = new AgentRegistry(factory, s.inbox as never, s.logger);
+    const registry = new AgentRegistry(factory, s.logger);
     await registry.get("navigator").run(
       input("q", {
         results: {
@@ -367,7 +366,7 @@ describe("saída do modelo é não confiável", () => {
     const reg = new MockResponderRegistry();
     reg.register(key, () => reply);
     const factory = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
-    return { s, registry: new AgentRegistry(factory, s.inbox as never, s.logger) };
+    return { s, registry: new AgentRegistry(factory, s.logger) };
   }
 
   it("texto muito longo é cortado", async () => {
@@ -430,25 +429,23 @@ describe("saída do modelo é não confiável", () => {
     }
   });
 
-  it("executor.request envia à inbox como agente executor e nunca executa", async () => {
-    const { registry, s } = withResponder("executor", {
+  it("executor só PROPÕE: não tem caminho próprio até a inbox (quem registra é o nó do grafo)", async () => {
+    const { registry } = withResponder("executor", {
       action: "transfer",
       payload: { to: "x" },
       valueBrl: "10.00",
       rationale: "r",
     });
-    s.inbox.request.mockResolvedValue({ approvalId: "a".repeat(64), created: true });
-    const res = await registry.executor().request(input("q"), "t:c:1");
-    expect(s.inbox.request).toHaveBeenCalledWith({
-      threadId: "t:c:1",
-      turn: 1,
-      agent: "executor",
+    // Sem `request`: o valor do modelo nunca vira aprovação (nem taxa) por fora do grafo, onde o
+    // `place_trade` tem preço de servidor (spec 5.5).
+    expect("request" in registry.executor()).toBe(false);
+    const out = await registry.executor().run(input("q"));
+    expect(out).toEqual({
       action: "transfer",
       payload: { to: "x" },
       valueBrl: "10.00",
+      rationale: "r",
     });
-    expect(res.approvalId).toBe("a".repeat(64));
-    expect(res.proposal.action).toBe("transfer");
   });
 });
 
@@ -480,7 +477,7 @@ describe("limites das saídas de Predictor e Risk", () => {
     const reg = new MockResponderRegistry();
     reg.register(key, () => reply);
     const factory = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
-    return new AgentRegistry(factory, s.inbox as never, s.logger).get(key).run(input("q"));
+    return new AgentRegistry(factory, s.logger).get(key).run(input("q"));
   }
 
   const str = (n: number) => "x".repeat(n);
@@ -576,7 +573,7 @@ describe("limites das saídas de Predictor e Risk", () => {
       }));
       const s = setup();
       const f = new ModelFactory(ENV, CONFIG, { eval: vi.fn() }, () => 0, reg);
-      return new AgentRegistry(f, s.inbox as never, s.logger).get("executor").run(input("q"));
+      return new AgentRegistry(f, s.logger).get("executor").run(input("q"));
     };
     await expect(mk("9999999999999999.99")).resolves.toBeTypeOf("object");
     await expect(mk("99999999999999999.00")).rejects.toThrow();

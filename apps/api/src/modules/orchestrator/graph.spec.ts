@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import type { BaseMessage } from "@langchain/core/messages";
 import { MemorySaver } from "@langchain/langgraph";
-import { type ApprovalView, type ChatEvent, ChatEventSchema } from "@carina/shared";
+import { type ApprovalView, type ChatEvent, ChatEventSchema, type Quote } from "@carina/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelsConfig } from "../../core/config/models-config.js";
 import { TenantContext } from "../../core/context/tenant-context.js";
@@ -17,9 +17,13 @@ import {
 import { agentFailure, type AgentInput } from "../agents/agent.js";
 import { AgentRegistry } from "../agents/agent-registry.js";
 import { registerAgentMockResponders } from "../agents/mock-responders.js";
+import { approvalId } from "../inbox/approval-id.js";
+import type { RequestInput } from "../inbox/inbox.service.js";
 import type { SearchResult } from "../knowledge/knowledge.service.js";
 import { type MockResponder, MockResponderRegistry } from "../llm/mock-models.js";
 import { ModelFactory, type LlmEnv } from "../llm/model-factory.js";
+import { MarketPriceError, type MarketPriceErrorCode } from "../market/market-price-error.js";
+import type { OrchestratorGraph } from "./graph.js";
 import { heuristicPlan } from "./heuristic.js";
 import { registerOrchestratorMockResponders } from "./orchestrator.module.js";
 import { OrchestratorService } from "./orchestrator.service.js";
@@ -74,6 +78,32 @@ const approvalView = (id: string): ApprovalView => ({
   createdAt: "2026-11-12T00:00:00.000Z",
 });
 
+const QUOTE_AT = "2026-11-14T12:00:00.000Z";
+const quoteOf = (symbol: string, price = "30.00"): Quote => ({
+  symbol,
+  name: symbol,
+  assetClass: "stock",
+  price,
+  changePct: null,
+  previousClose: null,
+  volume: null,
+  currency: "BRL",
+  updatedAt: QUOTE_AT,
+  marketState: "open",
+  source: "mock",
+});
+/** Payload gravado de "compre 100 ações de PETR4" com o preço de servidor do mock (R$ 30,00). */
+const PETR4_PRICED = {
+  side: "buy",
+  assetCode: "PETR4",
+  quantity: 100,
+  unitPriceBrl: "30.00",
+  notionalBrl: "3000.00",
+  priceSource: "mock",
+  priceAsOf: QUOTE_AT,
+  marketState: "open",
+};
+
 function setup(responders: Record<string, MockResponder> = {}) {
   const mocks = new MockResponderRegistry();
   // Os de teste entram antes: os registros padrão pulam chaves já registradas.
@@ -88,7 +118,9 @@ function setup(responders: Record<string, MockResponder> = {}) {
   } = { status: "pending", executed: null };
   const wins = { n: 0 };
   const inbox = {
-    request: vi.fn(async () => ({ approvalId: APPROVAL, created: true })),
+    request: vi.fn<(input: RequestInput) => Promise<{ approvalId: string; created: boolean }>>(
+      async () => ({ approvalId: APPROVAL, created: true }),
+    ),
     executeOnce: vi.fn(async (): Promise<{ status: "succeeded" | "skipped"; result?: unknown }> => {
       if (db.status !== "approved" || db.executed) return { status: "skipped" };
       wins.n++;
@@ -98,9 +130,11 @@ function setup(responders: Record<string, MockResponder> = {}) {
     executionOf: vi.fn(async () => db.executed),
     expireIfDue: vi.fn(async () => false),
     get: vi.fn(async (id: string) => ({ ...approvalView(id), status: db.status })),
+    lookup: vi.fn<(id: string) => Promise<ApprovalView | null>>(async () => null),
   };
+  const market = { priceFor: vi.fn(async (symbol: string) => quoteOf(symbol)) };
   const agentLogger = { warn: vi.fn(), error: vi.fn() };
-  const agents = new AgentRegistry(models, inbox as never, agentLogger);
+  const agents = new AgentRegistry(models, agentLogger);
   const knowledge = { search: vi.fn(async (): Promise<SearchResult> => KNOWLEDGE) };
   const executed = vi.fn(async (payload: Record<string, unknown>) => ({ ok: true, payload }));
   const executors = { get: vi.fn((action: string) => (action ? executed : undefined)) };
@@ -115,6 +149,7 @@ function setup(responders: Record<string, MockResponder> = {}) {
       inbox as never,
       executors as never,
       streams as never,
+      market as never,
       checkpointer,
       logger,
     );
@@ -126,6 +161,7 @@ function setup(responders: Record<string, MockResponder> = {}) {
     mocks,
     models,
     inbox,
+    market,
     agents,
     knowledge,
     executed,
@@ -146,6 +182,58 @@ const turn = (svc: OrchestratorService, threadId: string, question: string) =>
   asClient(() => collect(svc.stream({ threadId, question })));
 
 const types = (events: ChatEvent[]) => events.map((e) => e.type);
+
+/** Frases fixas da falha de preço (ruling R-M8), sem eco do modelo nem do provedor. */
+const PRICE_FAILURE_TEXT: Record<MarketPriceErrorCode, string> = {
+  unknown_asset: "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.",
+  price_unavailable:
+    "Não foi possível propor a ordem: a cotação do ativo está indisponível no momento. Tente novamente em instantes.",
+  price_stale:
+    "Não foi possível propor a ordem: a cotação disponível está desatualizada. Tente novamente em instantes.",
+};
+
+function must<V>(v: V | undefined): V {
+  if (v === undefined) throw new Error("valor esperado");
+  return v;
+}
+
+/**
+ * Reexecuta o nó `executor` do MESMO turno (como depois de uma queda entre gravar a aprovação e
+ * gravar o checkpoint): volta ao checkpoint cujo próximo nó é o executor e continua dali.
+ */
+async function rerunExecutor(svc: OrchestratorService, threadId: string) {
+  const graph = (svc as unknown as { graph: OrchestratorGraph }).graph;
+  return asClient(async () => {
+    let target: Parameters<OrchestratorGraph["stream"]>[1] | undefined;
+    for await (const snap of graph.getStateHistory({ configurable: { thread_id: threadId } })) {
+      if (snap.next.includes("executor")) {
+        target = snap.config;
+        break;
+      }
+    }
+    if (!target) throw new Error("checkpoint antes do executor não encontrado");
+    for await (const chunk of await graph.stream(null, target)) void chunk;
+    return graph.getState({ configurable: { thread_id: threadId } });
+  });
+}
+
+/** Proposta de `place_trade` com valor e preço do modelo incoerentes e chaves injetadas. */
+const INCOHERENT_PAYLOAD = {
+  side: "buy",
+  assetCode: "PETR4",
+  quantity: 100,
+  unitPriceBrl: "0.01",
+  Price: "0.01",
+  AMOUNT: "1.00",
+  valueBrl: "1.00",
+  foo: "bar",
+};
+const incoherentTrade: MockResponder = () => ({
+  action: "place_trade",
+  payload: { ...INCOHERENT_PAYLOAD },
+  valueBrl: "1.00",
+  rationale: "modelo com preço próprio",
+});
 
 describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
   let s: ReturnType<typeof setup>;
@@ -349,9 +437,12 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
         turn: 1,
         agent: "executor",
         action: "place_trade",
-        payload: { side: "buy", assetCode: "PETR4", quantity: 100 },
+        payload: PETR4_PRICED,
+        idPayload: { side: "buy", assetCode: "PETR4", quantity: 100 },
         valueBrl: "3000.00",
       });
+      expect(s.market.priceFor).toHaveBeenCalledTimes(1);
+      expect(s.market.priceFor).toHaveBeenCalledWith("PETR4");
       expect(s.inbox.executeOnce).not.toHaveBeenCalled();
       expect(s.executed).not.toHaveBeenCalled();
       const state = await asClient(() => svc.finalState(threadId));
@@ -591,6 +682,8 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(events.at(-1)?.type).toBe("approval_required");
       expect(s.inbox.request).toHaveBeenCalledTimes(2);
       expect(s.inbox.request.mock.calls[0]).toEqual(s.inbox.request.mock.calls[1]);
+      // A nova tentativa reaproveita a mesma cotação (uma só consulta de preço).
+      expect(s.market.priceFor).toHaveBeenCalledTimes(1);
     });
 
     it("inbox.request com ValidationError não repete", async () => {
@@ -612,6 +705,301 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
       expect(state.pending).toBeNull();
       expect(state.errors["executor"]).toBe("approval_request_failed");
       expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+    });
+
+    describe("preço de servidor no place_trade (spec 5.5)", () => {
+      it("o valor e o payload gravados são os do servidor, mesmo com o modelo afirmando outro valor e outro preço", async () => {
+        s = setup({ executor: incoherentTrade });
+        svc = s.make();
+        const threadId = newThread();
+        const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(events.at(-1)?.type).toBe("approval_required");
+        expect(s.inbox.request).toHaveBeenCalledTimes(1);
+        expect(s.inbox.request).toHaveBeenCalledWith({
+          threadId,
+          turn: 1,
+          agent: "executor",
+          action: "place_trade",
+          payload: PETR4_PRICED,
+          idPayload: INCOHERENT_PAYLOAD,
+          valueBrl: "3000.00",
+        });
+        const sent = must(s.inbox.request.mock.calls[0])[0];
+        for (const k of ["Price", "AMOUNT", "foo", "valueBrl"])
+          expect(sent.payload).not.toHaveProperty(k);
+
+        // Ordem (a)→(d): id sobre a proposta do modelo, lookup, cotação, request.
+        const id = approvalId(threadId, 1, "place_trade", INCOHERENT_PAYLOAD);
+        expect(s.inbox.lookup).toHaveBeenCalledWith(id);
+        const lookupAt = s.inbox.lookup.mock.invocationCallOrder[0] ?? Infinity;
+        const quoteAt = s.market.priceFor.mock.invocationCallOrder[0] ?? -1;
+        const requestAt = s.inbox.request.mock.invocationCallOrder[0] ?? -1;
+        expect(lookupAt).toBeLessThan(quoteAt);
+        expect(quoteAt).toBeLessThan(requestAt);
+
+        // O resumo do executor (o que o cliente e o aprovador veem) usa o payload e o valor do servidor.
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.results["executor"]).toMatchObject({
+          action: "place_trade",
+          risk: "irreversible",
+          payload: PETR4_PRICED,
+          valueBrl: "3000.00",
+          status: "pending_approval",
+          approvalId: APPROVAL,
+        });
+        expect(state.pending).toEqual({ approvalId: APPROVAL });
+      });
+
+      it.each<[string, () => Error, MarketPriceErrorCode]>([
+        ["price_unavailable", () => new MarketPriceError("price_unavailable"), "price_unavailable"],
+        ["price_stale", () => new MarketPriceError("price_stale"), "price_stale"],
+        ["unknown_asset", () => new MarketPriceError("unknown_asset"), "unknown_asset"],
+        ["erro qualquer", () => new Error("redis fora"), "price_unavailable"],
+      ])(
+        "priceFor falhando (%s): sem aprovação, sem pending e o código em errors.executor",
+        async (_n, err, code) => {
+          s.market.priceFor.mockRejectedValueOnce(err());
+          const threadId = newThread();
+          const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+          expect(types(events)).not.toContain("approval_required");
+          expect(s.inbox.request).not.toHaveBeenCalled();
+          const state = await asClient(() => svc.finalState(threadId));
+          expect(state.pending).toBeNull();
+          expect(state.results["executor"]).toEqual({
+            ...agentFailure(),
+            reason: code,
+            message: PRICE_FAILURE_TEXT[code],
+          });
+          expect(state.errors["executor"]).toBe(code);
+          // R-M8: a frase fixa do código fecha o `answer` final; o texto já streamado não muda.
+          const streamed = events.flatMap((e) => (e.type === "token" ? [e.text] : [])).join("");
+          expect(streamed.length).toBeGreaterThan(0);
+          expect(state.answer).toBe(`${streamed}\n\n${PRICE_FAILURE_TEXT[code]}`);
+          expect(PRICE_FAILURE_TEXT[code]).not.toContain("PETR4");
+          // O evento do executor leva o código e a frase para o painel de agentes.
+          expect(events).toContainEqual({
+            type: "agent_result",
+            agent: "executor",
+            result: { failed: true, reason: code, message: PRICE_FAILURE_TEXT[code] },
+          });
+          expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+          // Log só com ids e o erro, nunca o payload.
+          const logged = [...s.logger.warn.mock.calls, ...s.logger.error.mock.calls].map(
+            (c) => c[0] as Record<string, unknown>,
+          );
+          const entry = logged.find((f) => f["threadId"] === threadId && "err" in f);
+          expect(entry && Object.keys(entry).sort()).toEqual(["err", "msg", "threadId"]);
+          expect(JSON.stringify(logged)).not.toContain("PETR4");
+        },
+      );
+
+      it("cotação de outro ativo (priceTrade recusa): price_unavailable, sem aprovação", async () => {
+        s.market.priceFor.mockResolvedValueOnce(quoteOf("VALE3", "62.40"));
+        const threadId = newThread();
+        await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(s.inbox.request).not.toHaveBeenCalled();
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.pending).toBeNull();
+        expect(state.errors["executor"]).toBe("price_unavailable");
+        expect(state.results["executor"]).toMatchObject({
+          failed: true,
+          reason: "price_unavailable",
+        });
+        expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.price_unavailable)).toBe(true);
+        expect(state.answer).not.toContain("VALE3");
+      });
+
+      it("navigator sem resposta (contingência): a frase da falha de preço ainda fecha o answer", async () => {
+        s = setup({ navigator: () => "" });
+        svc = s.make();
+        s.market.priceFor.mockRejectedValueOnce(new MarketPriceError("unknown_asset"));
+        const threadId = newThread();
+        await turn(svc, threadId, "compre 100 ações de ZZZZ3");
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.answer).toMatch(/^Não consegui/);
+        expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.unknown_asset)).toBe(true);
+        expect(state.answer).not.toContain("ZZZZ3");
+      });
+
+      it("aprovação já existente para o id (mesmo turno): usa o payload e o valor gravados e não cota", async () => {
+        const threadId = newThread();
+        const id = approvalId(threadId, 1, "place_trade", {
+          side: "buy",
+          assetCode: "PETR4",
+          quantity: 100,
+        });
+        const stored = { ...PETR4_PRICED, unitPriceBrl: "29.99", notionalBrl: "2999.00" };
+        s.inbox.lookup.mockImplementation(async (lookedUp: string) =>
+          lookedUp === id ? { ...approvalView(id), payload: stored, valueBrl: "2999.00" } : null,
+        );
+        s.market.priceFor.mockRejectedValue(new MarketPriceError("price_unavailable"));
+        const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(events.at(-1)?.type).toBe("approval_required");
+        expect(s.market.priceFor).not.toHaveBeenCalled();
+        expect(s.inbox.request).not.toHaveBeenCalled();
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.pending).toEqual({ approvalId: id });
+        expect(state.errors["executor"]).toBeUndefined();
+        expect(state.results["executor"]).toMatchObject({
+          payload: stored,
+          valueBrl: "2999.00",
+          status: "pending_approval",
+          approvalId: id,
+        });
+      });
+
+      it("reexecução do nó executor no mesmo turno com o provedor caído: a mesma aprovação, sem nova cotação", async () => {
+        // Banco simulado: o request grava pelo id derivado da proposta; o lookup lê o gravado.
+        const rows = new Map<string, ApprovalView>();
+        s.inbox.request.mockImplementation(async (i: RequestInput) => {
+          const id = approvalId(i.threadId, i.turn, i.action, i.idPayload ?? i.payload);
+          const created = !rows.has(id);
+          if (created)
+            rows.set(id, { ...approvalView(id), payload: i.payload, valueBrl: i.valueBrl });
+          return { approvalId: id, created };
+        });
+        s.inbox.lookup.mockImplementation(async (id: string) => rows.get(id) ?? null);
+
+        const threadId = newThread();
+        const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(events.at(-1)?.type).toBe("approval_required");
+        const first = await asClient(() => svc.finalState(threadId));
+        const firstId = first.pending?.approvalId;
+        expect(firstId).toBe(
+          approvalId(threadId, 1, "place_trade", {
+            side: "buy",
+            assetCode: "PETR4",
+            quantity: 100,
+          }),
+        );
+        expect(s.market.priceFor).toHaveBeenCalledTimes(1);
+
+        s.market.priceFor.mockRejectedValue(new MarketPriceError("price_unavailable"));
+        const again = await rerunExecutor(svc, threadId);
+        expect(s.market.priceFor).toHaveBeenCalledTimes(1);
+        expect(s.inbox.request).toHaveBeenCalledTimes(1);
+        expect(rows.size).toBe(1);
+        expect(again.values.pending).toEqual({ approvalId: firstId });
+        expect(again.values.errors["executor"]).toBeUndefined();
+        expect(again.values.results["executor"]).toMatchObject({
+          payload: PETR4_PRICED,
+          valueBrl: "3000.00",
+          approvalId: firstId,
+        });
+        // Segue para o interrupt da aprovação com o mesmo id.
+        expect(again.next).toEqual(["approval"]);
+        expect(again.tasks.flatMap((t) => t.interrupts.map((i) => i.value))).toEqual([
+          { approvalId: firstId },
+        ]);
+      });
+
+      it("request devolvendo created:false (linha gravada entre o lookup e o request): o resumo mostra o gravado", async () => {
+        const stored = { ...PETR4_PRICED, unitPriceBrl: "29.50", notionalBrl: "2950.00" };
+        s.inbox.lookup.mockResolvedValueOnce(null).mockResolvedValueOnce({
+          ...approvalView(APPROVAL),
+          payload: stored,
+          valueBrl: "2950.00",
+        });
+        s.inbox.request.mockResolvedValueOnce({ approvalId: APPROVAL, created: false });
+        const threadId = newThread();
+        await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(s.inbox.lookup).toHaveBeenLastCalledWith(APPROVAL);
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.pending).toEqual({ approvalId: APPROVAL });
+        expect(state.results["executor"]).toMatchObject({ payload: stored, valueBrl: "2950.00" });
+      });
+
+      it("lookup falhando duas vezes: sem cotação, sem aprovação, approval_request_failed", async () => {
+        s.inbox.lookup.mockRejectedValueOnce(new Error("db fora"));
+        s.inbox.lookup.mockRejectedValueOnce(new Error("db fora"));
+        const threadId = newThread();
+        const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+        expect(types(events)).not.toContain("approval_required");
+        expect(s.market.priceFor).not.toHaveBeenCalled();
+        expect(s.inbox.request).not.toHaveBeenCalled();
+        const state = await asClient(() => svc.finalState(threadId));
+        expect(state.pending).toBeNull();
+        expect(state.errors["executor"]).toBe("approval_request_failed");
+        expect(state.results["executor"]).toEqual(agentFailure());
+      });
+
+      it.each<[string, Record<string, unknown>]>([
+        [
+          "payload malformado",
+          { action: "place_trade", payload: { side: "buy", assetCode: "petr4", quantity: 100 } },
+        ],
+        ["payload vazio", { action: "place_trade", payload: {} }],
+        [
+          "ação com espaços",
+          { action: " place_trade ", payload: { side: "buy", assetCode: "PETR4", quantity: 100 } },
+        ],
+      ])(
+        "place_trade fora do formato vindo de um executor que pula o refineProposal (%s): price_unavailable, valor do modelo nunca vai para a inbox",
+        async (_n, partial) => {
+          // Agente executor stub: não passa por `refineProposal` (a guarda do grafo não pode depender dela).
+          vi.spyOn(s.agents, "executor").mockReturnValue({
+            run: async () => ({ valueBrl: "999999.00", rationale: "modelo", ...partial }),
+          } as never);
+          const threadId = newThread();
+          const events = await turn(svc, threadId, "compre 100 ações de PETR4");
+          expect(types(events)).not.toContain("approval_required");
+          expect(s.inbox.request).not.toHaveBeenCalled();
+          expect(s.inbox.lookup).not.toHaveBeenCalled();
+          expect(s.market.priceFor).not.toHaveBeenCalled();
+          const state = await asClient(() => svc.finalState(threadId));
+          expect(state.pending).toBeNull();
+          expect(state.errors["executor"]).toBe("price_unavailable");
+          expect(state.results["executor"]).toEqual({
+            ...agentFailure(),
+            reason: "price_unavailable",
+            message: PRICE_FAILURE_TEXT.price_unavailable,
+          });
+          expect(state.answer?.endsWith(PRICE_FAILURE_TEXT.price_unavailable)).toBe(true);
+          expect(s.inbox.executeOnce).not.toHaveBeenCalled();
+        },
+      );
+
+      it("transfer segue o caminho de hoje: valor do modelo, sem cotação nem idPayload", async () => {
+        s = setup({
+          executor: () => ({
+            action: "transfer",
+            payload: { amount: "500.00", to: "conta-1" },
+            valueBrl: "500.00",
+            rationale: "transferência",
+          }),
+        });
+        svc = s.make();
+        const threadId = newThread();
+        await turn(svc, threadId, "transfira 500 reais");
+        expect(s.market.priceFor).not.toHaveBeenCalled();
+        expect(s.inbox.request).toHaveBeenCalledWith({
+          threadId,
+          turn: 1,
+          agent: "executor",
+          action: "transfer",
+          payload: { amount: "500.00", to: "conta-1" },
+          valueBrl: "500.00",
+        });
+      });
+
+      it("ação reversível e leitura nunca cotam", async () => {
+        await turn(svc, newThread(), "aplicar um alerta para o dólar");
+        expect(s.executed).toHaveBeenCalledTimes(1);
+        expect(s.market.priceFor).not.toHaveBeenCalled();
+        expect(s.inbox.lookup).not.toHaveBeenCalled();
+        s = setup({
+          executor: () => ({
+            action: "get_positions",
+            payload: {},
+            valueBrl: "0.00",
+            rationale: "leitura",
+          }),
+        });
+        svc = s.make();
+        await turn(svc, newThread(), "transfira o relatório de posições");
+        expect(s.executed).toHaveBeenCalledTimes(1);
+        expect(s.market.priceFor).not.toHaveBeenCalled();
+      });
     });
 
     it("pedido sem verbo de execução nunca chega ao executor", async () => {

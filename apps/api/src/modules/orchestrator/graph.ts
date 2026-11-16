@@ -19,6 +19,17 @@
  * - `executor`: o agente PROPÕE (`ExecutorAgent.run`), `classifyRisk` decide:
  *     read → `ExecutorRegistry` direto; reversible → executa e publica `notification`;
  *     irreversible → `InboxService.request` (upsert idempotente) e grava `pending`.
+ *   `place_trade` com payload no formato (ativo cotável) tem preço de servidor (spec 5.5), nesta
+ *   ordem: (a) id sobre a proposta do MODELO, antes de enriquecer; (b) `InboxService.lookup(id)`;
+ *   (c) se já existe (reexecução do nó no mesmo turno), usa o payload e o valor gravados e NÃO cota
+ *   de novo (a primeira cotação do turno vale); (d) senão `MarketService.priceFor` + `priceTrade`
+ *   e `request` com o payload enriquecido (`idPayload` = proposta do modelo) e o valor do servidor.
+ *   Falha da cotação (qualquer erro) → nenhuma aprovação, o código (`price_unavailable`,
+ *   `price_stale`, `unknown_asset`) em `errors.executor`, `agentFailure()` com `reason`/`message`
+ *   e a frase fixa do código (`PRICE_FAILURE_MESSAGES`) no fim do `answer` final. O valor do modelo
+ *   nunca chega à aprovação (nem à taxa) de um ativo cotável. `place_trade` FORA do formato (payload
+ *   malformado ou nome com espaços) falha do mesmo jeito (`price_unavailable`), sem lookup, cotação
+ *   nem aprovação: a guarda é local, não depende do `refineProposal`.
  * - `approval`: `interrupt({ approvalId })`. É um nó SEPARADO de propósito: na retomada o LangGraph
  *   reexecuta o nó interrompido desde o começo; se a proposta (LLM, não determinístico) estivesse
  *   no mesmo nó, rodaria de novo e poderia gerar outra proposta/aprovação. Aqui nada vem antes do
@@ -60,6 +71,9 @@ import {
 } from "../../core/errors/domain-errors.js";
 import { type AgentInput, QUESTION_MESSAGE_ID, agentFailure } from "../agents/agent.js";
 import type { AgentRegistry } from "../agents/agent-registry.js";
+import { PlaceTradePayloadSchema } from "../agents/executor.js";
+import { priceTrade } from "../agents/trade-pricing.js";
+import { approvalId as approvalIdOf } from "../inbox/approval-id.js";
 import type { InboxService } from "../inbox/inbox.service.js";
 import type { ExecutorRegistry } from "../inbox/executors.js";
 import { classifyRisk } from "../inbox/risk.js";
@@ -69,6 +83,8 @@ import {
   type SearchResult,
 } from "../knowledge/knowledge.service.js";
 import type { ModelFactory } from "../llm/model-factory.js";
+import type { MarketService } from "../market/market.service.js";
+import { MarketPriceError, type MarketPriceErrorCode } from "../market/market-price-error.js";
 import type { StreamsService } from "../../core/redis/streams.service.js";
 import { CLASSIFIER_PROMPT, heuristicPlan, normalizePlan } from "./heuristic.js";
 import {
@@ -98,9 +114,11 @@ export interface GraphDeps {
   models: Pick<ModelFactory, "chat">;
   agents: Pick<AgentRegistry, "get" | "navigator" | "executor">;
   knowledge: Pick<KnowledgeService, "search">;
-  inbox: Pick<InboxService, "request" | "executeOnce" | "get" | "executionOf">;
+  inbox: Pick<InboxService, "request" | "lookup" | "executeOnce" | "get" | "executionOf">;
   executors: Pick<ExecutorRegistry, "get">;
   streams: Pick<StreamsService, "publish">;
+  /** Preço de servidor do `place_trade` (spec 5.5); nunca cobrado. */
+  market: Pick<MarketService, "priceFor">;
   logger: OrchestratorLogger;
 }
 
@@ -109,6 +127,23 @@ const EMPTY_KNOWLEDGE: SearchResult = { chunks: [], entities: [], neighbors: [] 
 /** Código curto e fixo para `errors[...]` (nunca a mensagem do erro, que pode ecoar dados). */
 const errorCode = (err: unknown): string =>
   err instanceof AllProvidersFailedError ? "all_providers_failed" : "failed";
+
+/**
+ * Frase FIXA por código de falha do preço de servidor (ruling R-M8, spec 5.5 item 4): fecha o
+ * `answer` do turno e vai no resultado do executor. Nunca ecoa nada do modelo, do provedor nem do
+ * que o cliente digitou (nem o símbolo).
+ */
+export const PRICE_FAILURE_MESSAGES: Readonly<Record<MarketPriceErrorCode, string>> = {
+  unknown_asset: "Não foi possível propor a ordem: o ativo não foi encontrado na base de cotações.",
+  price_unavailable:
+    "Não foi possível propor a ordem: a cotação do ativo está indisponível no momento. Tente novamente em instantes.",
+  price_stale:
+    "Não foi possível propor a ordem: a cotação disponível está desatualizada. Tente novamente em instantes.",
+};
+
+/** Código da falha do preço de servidor; erro inesperado (não `MarketPriceError`) → indisponível. */
+const priceErrorCode = (err: unknown): MarketPriceErrorCode =>
+  err instanceof MarketPriceError ? err.code : "price_unavailable";
 
 const threadOf = (config: LangGraphRunnableConfig): unknown => config.configurable?.["thread_id"];
 
@@ -121,7 +156,7 @@ const history = (state: Pick<GraphStateValue, "messages">) =>
   state.messages.slice(-MAX_HISTORY_MESSAGES);
 
 export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
-  const { models, agents, knowledge, inbox, executors, streams, logger } = deps;
+  const { models, agents, knowledge, inbox, executors, streams, market, logger } = deps;
 
   const classify = (state: GraphStateValue, config: LangGraphRunnableConfig) =>
     runInThread(threadOf(config), async (): Promise<GraphStateUpdate> => {
@@ -249,37 +284,121 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
       }
 
       const risk = classifyRisk(proposal.action);
-      const summary = {
+      // O que o cliente e o aprovador veem: para `place_trade` cotável, o payload e o valor do
+      // servidor (gravados na aprovação), nunca os do modelo.
+      let payload = proposal.payload;
+      let valueBrl = proposal.valueBrl;
+      const summary = () => ({
         action: proposal.action,
         risk,
-        payload: proposal.payload,
-        valueBrl: proposal.valueBrl,
+        payload,
+        valueBrl,
         rationale: proposal.rationale,
+      });
+
+      /**
+       * Falha do preço de servidor. A síntese já rodou (vem antes do executor): a explicação é
+       * acrescentada ao fim do `answer` final do turno (o texto já streamado não muda), e o
+       * resultado do executor leva o código e a mesma frase para o painel de agentes. Nenhuma
+       * aprovação.
+       */
+      const priceFailure = (reason: MarketPriceErrorCode): GraphStateUpdate => {
+        const message = PRICE_FAILURE_MESSAGES[reason];
+        return {
+          results: { executor: { ...agentFailure(), reason, message } },
+          errors: { executor: reason },
+          answer: state.answer ? `${state.answer}\n\n${message}` : message,
+        };
       };
 
       if (risk === "irreversible") {
-        // Upsert idempotente (id = hash(thread, turno, ação, payload)), sob o contexto do thread.
-        // Upsert idempotente: se a 1ª chamada gravou a linha e só a resposta se perdeu (timeout),
-        // repetir devolve o MESMO id e o grafo segue para o interrupt, sem deixar uma aprovação
-        // órfã. ValidationError não muda numa nova tentativa e não repete.
-        const request = () =>
-          inbox.request({
-            threadId,
-            turn: state.turn,
-            agent: "executor",
-            action: proposal.action,
-            payload: proposal.payload,
-            valueBrl: proposal.valueBrl,
-          });
-        let approvalId: string;
-        try {
+        /** Uma nova tentativa em falha que não seja ValidationError (que não muda ao repetir). */
+        const once = async <R>(what: string, fn: () => Promise<R>): Promise<R> => {
           try {
-            ({ approvalId } = await request());
+            return await fn();
           } catch (err) {
             if (err instanceof ValidationError) throw err;
-            logger.warn({ msg: "Falha ao registrar a aprovação; nova tentativa", err, threadId });
-            ({ approvalId } = await request());
+            logger.warn({ msg: `Falha ao ${what}; nova tentativa`, err, threadId });
+            return fn();
           }
+        };
+
+        // Preço de servidor (spec 5.5), só para `place_trade` com o payload no formato. A ordem
+        // (a)→(d) é obrigatória: o id vem da proposta do modelo ANTES de enriquecer, e a aprovação
+        // que já existe para ele vence qualquer nova cotação.
+        let idPayload: Record<string, unknown> | undefined;
+        const trade =
+          proposal.action === "place_trade"
+            ? PlaceTradePayloadSchema.safeParse(proposal.payload)
+            : undefined;
+        // Guarda local (não depende do `refineProposal` de outro módulo): um `place_trade` que não
+        // tem o formato cotável (payload malformado, ou o nome com espaços, que o registro de
+        // executores não distingue do resto) nunca segue com o valor do modelo. Mesma falha fechada
+        // e mesma frase da cotação indisponível; nenhuma aprovação, nenhuma consulta.
+        if (proposal.action.trim() === "place_trade" && trade?.success !== true) {
+          logger.warn({ msg: "place_trade fora do formato; ordem não proposta", threadId });
+          return priceFailure("price_unavailable");
+        }
+        if (trade?.success) {
+          // (a) id sobre a proposta do modelo.
+          const id = approvalIdOf(threadId, state.turn, proposal.action, proposal.payload);
+          // (b) a aprovação deste id já existe?
+          let existing: Awaited<ReturnType<typeof inbox.lookup>>;
+          try {
+            existing = await once("ler a aprovação", () => inbox.lookup(id));
+          } catch (err) {
+            logger.error({ msg: "Falha ao ler a aprovação", err, threadId });
+            return {
+              results: { executor: agentFailure() },
+              errors: { executor: "approval_request_failed" },
+            };
+          }
+          if (existing) {
+            // (c) reexecução do nó no mesmo turno: vale o que foi gravado (a primeira cotação);
+            // nenhuma nova cotação, então uma queda do provedor agora não deixa a aprovação órfã.
+            payload = existing.payload;
+            valueBrl = existing.valueBrl;
+            return {
+              pending: { approvalId: existing.id },
+              results: {
+                executor: { ...summary(), status: "pending_approval", approvalId: existing.id },
+              },
+            };
+          }
+          // (d) cota e enriquece. Falha (de qualquer tipo) → falha fechada, sem aprovação.
+          try {
+            const quote = await market.priceFor(trade.data.assetCode);
+            ({ payload, valueBrl } = priceTrade(proposal.payload, quote));
+          } catch (err) {
+            logger.warn({
+              msg: "Preço de servidor indisponível; ordem não proposta",
+              err,
+              threadId,
+            });
+            return priceFailure(priceErrorCode(err));
+          }
+          idPayload = proposal.payload;
+        }
+
+        // Upsert idempotente (id = hash(thread, turno, ação, idPayload ?? payload)), sob o contexto
+        // do thread: se a 1ª chamada gravou a linha e só a resposta se perdeu (timeout), repetir
+        // devolve o MESMO id e o grafo segue para o interrupt, sem deixar uma aprovação órfã.
+        // ValidationError não muda numa nova tentativa e não repete.
+        const input = {
+          threadId,
+          turn: state.turn,
+          agent: "executor",
+          action: proposal.action,
+          payload,
+          ...(idPayload !== undefined ? { idPayload } : {}),
+          valueBrl,
+        };
+        let approvalId: string;
+        let created: boolean;
+        try {
+          ({ approvalId, created } = await once("registrar a aprovação", () =>
+            inbox.request(input),
+          ));
         } catch (err) {
           // Sem o id não há o que aprovar nem executar. Se a linha chegou a ser gravada, ela fica
           // `pending` sem thread esperando e a expiração (ReconciliationJob) a encerra; se alguém
@@ -287,13 +406,24 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
           // pendente") e DEVE tratar NotFound como terminal (ack, sem retentar).
           logger.error({ msg: "Falha ao registrar a aprovação", err, threadId });
           return {
-            results: { executor: { ...summary, status: "failed" } },
+            results: { executor: { ...summary(), status: "failed" } },
             errors: { executor: "approval_request_failed" },
           };
         }
+        if (!created && idPayload !== undefined) {
+          // A linha já existia (gravada entre o lookup e o request, ou pela 1ª tentativa cuja
+          // resposta se perdeu): o gravado vence (ON CONFLICT DO NOTHING), e o resumo mostra o
+          // gravado. Sem a leitura, o resumo fica com a cotação desta execução; o id é o mesmo.
+          try {
+            const stored = await inbox.lookup(approvalId);
+            if (stored) ({ payload, valueBrl } = stored);
+          } catch (err) {
+            logger.warn({ msg: "Falha ao reler a aprovação já existente", err, threadId });
+          }
+        }
         return {
           pending: { approvalId },
-          results: { executor: { ...summary, status: "pending_approval", approvalId } },
+          results: { executor: { ...summary(), status: "pending_approval", approvalId } },
         };
       }
 
@@ -313,7 +443,7 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
           threadId,
         });
         return {
-          results: { executor: { ...summary, status: "failed" } },
+          results: { executor: { ...summary(), status: "failed" } },
           errors: { executor: "execution_failed" },
         };
       }
@@ -335,7 +465,7 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
           });
         }
       }
-      return { results: { executor: { ...summary, status: "succeeded", result } } };
+      return { results: { executor: { ...summary(), status: "succeeded", result } } };
     });
 
   const afterExecutor = (state: GraphStateValue) => (state.pending ? "approval" : END);

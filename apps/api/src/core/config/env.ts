@@ -3,6 +3,19 @@ import { z } from "zod";
 const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
 const optionalSecret = z.preprocess(emptyToUndefined, z.string().min(1).optional());
 
+/**
+ * Com token da brapi, a URL base precisa ser `https:` (o token vai no cabeçalho `Authorization` e
+ * iria em claro). Sem token, `http:` continua aceito. Também usada pela fumaça manual (smoke.ts).
+ */
+export function brapiUrlAllowsToken(baseUrl: string, token: string | undefined): boolean {
+  if (token === undefined) return true;
+  try {
+    return new URL(baseUrl).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export const EnvSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -27,6 +40,46 @@ export const EnvSchema = z
     OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
     GROQ_BASE_URL: z.string().url().default("https://api.groq.com/openai/v1"),
     NVIDIA_BASE_URL: z.string().url().default("https://integrate.api.nvidia.com/v1"),
+    /**
+     * `mock` (padrão fora de produção) ou `live` (brapi.dev + BCB SGS). Com NODE_ENV=production é
+     * OBRIGATÓRIA, como o LLM_MODE.
+     */
+    MARKET_MODE: z.preprocess(emptyToUndefined, z.enum(["live", "mock"]).optional()),
+    /**
+     * Token da brapi.dev (opcional: sem ele só PETR4, MGLU3, VALE3 e ITUB4 respondem; ver a
+     * documentação da brapi). Com token, `BRAPI_BASE_URL` precisa ser `https:`.
+     */
+    BRAPI_TOKEN: optionalSecret,
+    BRAPI_BASE_URL: z.string().url().default("https://brapi.dev/api"),
+    BCB_SGS_BASE_URL: z.string().url().default("https://api.bcb.gov.br/dados/serie"),
+    /** Timeout de cada chamada ao provedor de mercado (ms). */
+    MARKET_FETCH_TIMEOUT_MS: z.coerce.number().int().min(1).max(60_000).default(8000),
+    /** Tamanho máximo aceito da resposta do provedor (bytes). */
+    MARKET_MAX_RESPONSE_BYTES: z.coerce.number().int().min(1).default(1_048_576),
+    /**
+     * Símbolos por requisição de cotação à brapi. Padrão 1: o plano gratuito aceita 1 ativo por
+     * requisição (os pagos aceitam mais; ver a documentação de planos da brapi). Até 20, o teto
+     * de símbolos de uma consulta.
+     */
+    MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: z.coerce.number().int().min(1).max(20).default(1),
+    /** Requisições simultâneas à brapi por processo (fila no processo). Padrão 1 (plano gratuito). */
+    MARKET_PROVIDER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
+    /**
+     * Orçamento global de requisições ao provedor por minuto (janela fixa, contador no Redis) para
+     * as rotas `/api/market/*`. Esgotado → 503 com Retry-After, sem cobrança. Uma consulta de N
+     * símbolos fora do cache consome ceil(N / MARKET_BRAPI_MAX_SYMBOLS_PER_CALL) unidades.
+     */
+    MARKET_PROVIDER_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(30),
+    /** Orçamento separado (por minuto) para o preço de servidor das ordens (`priceFor`). */
+    MARKET_PRICE_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(30),
+    /**
+     * Idade máxima de uma cotação com o mercado aberto (ms). Padrão 5 min; no live precisa ser pelo
+     * menos o atraso do plano da brapi (ex.: ~35 min no gratuito), senão toda ordem em pregão é
+     * recusada como `price_stale`.
+     */
+    MARKET_QUOTE_MAX_AGE_MS: z.coerce.number().int().min(1).default(300_000),
+    /** Idade máxima (dias) de uma cotação com o mercado fechado (fins de semana e feriados). */
+    MARKET_CLOSED_MAX_AGE_DAYS: z.coerce.number().int().min(1).default(5),
     EXECUTION_FEE_PCT: z.coerce.number().nonnegative().default(0.5),
     APPROVAL_TTL_HOURS: z.coerce.number().positive().default(24),
     /** Única origem aceita pelo CORS da API (o frontend). Sem curinga. */
@@ -56,7 +109,19 @@ export const EnvSchema = z
     path: ["LLM_MODE"],
     message: "LLM_MODE (live|mock) é obrigatória com NODE_ENV=production",
   })
-  .transform((e) => ({ ...e, LLM_MODE: e.LLM_MODE ?? ("mock" as const) }));
+  .refine((e) => brapiUrlAllowsToken(e.BRAPI_BASE_URL, e.BRAPI_TOKEN), {
+    path: ["BRAPI_BASE_URL"],
+    message: "BRAPI_BASE_URL precisa ser https quando BRAPI_TOKEN está definido",
+  })
+  .refine((e) => e.NODE_ENV !== "production" || e.MARKET_MODE !== undefined, {
+    path: ["MARKET_MODE"],
+    message: "MARKET_MODE (live|mock) é obrigatória com NODE_ENV=production",
+  })
+  .transform((e) => ({
+    ...e,
+    LLM_MODE: e.LLM_MODE ?? ("mock" as const),
+    MARKET_MODE: e.MARKET_MODE ?? ("mock" as const),
+  }));
 
 export type Env = z.infer<typeof EnvSchema>;
 

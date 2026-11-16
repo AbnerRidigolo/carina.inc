@@ -90,6 +90,12 @@ export interface RequestInput {
   agent: string;
   action: string;
   payload: Record<string, unknown>;
+  /**
+   * Base do id (padrão = `payload`). Só entra no hash, nunca é gravada: permite gravar um payload
+   * enriquecido (ex.: com preço do servidor) mantendo o id derivado da proposta original, de modo
+   * que a nova tentativa no mesmo turno é idempotente e o primeiro payload gravado vence.
+   */
+  idPayload?: Record<string, unknown>;
   valueBrl: string;
 }
 
@@ -167,6 +173,23 @@ function toView(row: ApprovalRequest, clientExternalId: string): ApprovalView {
   });
 }
 
+/** Valida um payload (objeto simples, JSON, tamanho, sem NUL) e devolve o JSON serializado. */
+function serializePayload(value: unknown, name: string): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ValidationError(`${name} precisa ser um objeto`);
+  }
+  let json: string;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    throw new ValidationError(`${name} não é JSON válido`);
+  }
+  if (json.length > MAX_PAYLOAD_BYTES || json.includes("\\u0000")) {
+    throw new ValidationError(`${name} grande demais ou com caractere inválido`);
+  }
+  return json;
+}
+
 const errMessage = (err: unknown): string =>
   (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_CHARS);
 
@@ -213,13 +236,8 @@ export class InboxService {
     ) {
       throw new ValidationError("action precisa ter de 1 a 128 caracteres");
     }
-    if (
-      typeof input.payload !== "object" ||
-      input.payload === null ||
-      Array.isArray(input.payload)
-    ) {
-      throw new ValidationError("payload precisa ser um objeto");
-    }
+    const payloadJson = serializePayload(input.payload, "payload");
+    if (input.idPayload !== undefined) serializePayload(input.idPayload, "idPayload");
     // O thread carrega tenant e cliente: impede que outro tenant forje o mesmo id (o hash inclui o
     // thread) e que o separador `|` da fórmula do id seja forjado por um thread malformado.
     const parts = typeof input.threadId === "string" ? input.threadId.split(":") : [];
@@ -248,17 +266,12 @@ export class InboxService {
         "valueBrl precisa ser uma string decimal não negativa, com até 2 casas e no máximo 9999999999999999.99",
       );
     }
-    let payloadJson: string;
-    try {
-      payloadJson = JSON.stringify(input.payload);
-    } catch {
-      throw new ValidationError("payload não é JSON válido");
-    }
-    if (payloadJson.length > MAX_PAYLOAD_BYTES || payloadJson.includes("\\u0000")) {
-      throw new ValidationError("payload grande demais ou com caractere inválido");
-    }
-
-    const id = approvalId(input.threadId, input.turn, input.action, input.payload);
+    const id = approvalId(
+      input.threadId,
+      input.turn,
+      input.action,
+      input.idPayload ?? input.payload,
+    );
     const risk = classifyRisk(input.action);
     const expiresAt = new Date(this.clock() + this.env.APPROVAL_TTL_HOURS * HOUR_MS).toISOString();
 
@@ -366,13 +379,19 @@ export class InboxService {
 
   /** A solicitação do tenant atual; de outro tenant, inexistente ou id malformado → NotFoundError. */
   async get(id: string): Promise<ApprovalView> {
-    if (!APPROVAL_ID_RE.test(id)) throw new NotFoundError(NOT_FOUND_MESSAGE);
+    const view = await this.lookup(id);
+    if (!view) throw new NotFoundError(NOT_FOUND_MESSAGE);
+    return view;
+  }
+
+  /** Como `get`, mas devolve `null` (nunca lança) para id malformado, inexistente ou de outro tenant. */
+  async lookup(id: string): Promise<ApprovalView | null> {
+    if (!APPROVAL_ID_RE.test(id)) return null;
     const row = await this.db.client.approvalRequest.findUnique({
       where: { id },
       include: { client: { select: { externalId: true } } },
     });
-    if (!row) throw new NotFoundError(NOT_FOUND_MESSAGE);
-    return toView(row, row.client.externalId);
+    return row ? toView(row, row.client.externalId) : null;
   }
 
   /**

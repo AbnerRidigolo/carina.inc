@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import type { AgentName } from "@carina/shared";
 import { ValidationError } from "../../core/errors/domain-errors.js";
-import { InboxService } from "../inbox/inbox.service.js";
 import { ModelFactory } from "../llm/model-factory.js";
 import type { AgentDef, AgentLogger } from "./agent.js";
 import { ExecutorAgent } from "./executor.js";
@@ -20,11 +19,10 @@ export class AgentRegistry {
 
   constructor(
     @Inject(ModelFactory) models: ModelFactory,
-    @Inject(InboxService) inbox: InboxService,
     @Optional() @Inject(AGENTS_LOGGER) logger: AgentLogger = new Logger("Agents"),
   ) {
     this.navigatorAgent = new NavigatorAgent(models, logger);
-    this.executorAgent = new ExecutorAgent(models, logger, inbox);
+    this.executorAgent = new ExecutorAgent(models, logger);
     this.agents = {
       navigator: this.navigatorAgent,
       insight: createInsight(models, logger),

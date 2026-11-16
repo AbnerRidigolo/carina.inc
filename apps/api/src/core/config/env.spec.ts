@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadEnv } from "./env.js";
+import { brapiUrlAllowsToken, loadEnv } from "./env.js";
 
 const min = {
   NODE_ENV: "test",
@@ -20,6 +20,89 @@ describe("loadEnv", () => {
     expect(env.WORKERS_ENABLED).toBe("true");
     expect(env.WS_MAX_CONNECTION_MS).toBe(1_800_000);
     expect(env.API_KEY_REVALIDATE_TTL_MS).toBe(60_000);
+  });
+
+  it("MARKET_MODE: mock por padrão fora de produção e defaults de mercado", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_MODE).toBe("mock");
+    expect(env.BRAPI_TOKEN).toBeUndefined();
+    expect(env.BRAPI_BASE_URL).toBe("https://brapi.dev/api");
+    expect(env.BCB_SGS_BASE_URL).toBe("https://api.bcb.gov.br/dados/serie");
+    expect(env.MARKET_FETCH_TIMEOUT_MS).toBe(8000);
+    expect(env.MARKET_MAX_RESPONSE_BYTES).toBe(1_048_576);
+    expect(env.MARKET_QUOTE_MAX_AGE_MS).toBe(300_000);
+    expect(env.MARKET_CLOSED_MAX_AGE_DAYS).toBe(5);
+  });
+
+  it("MARKET_MODE é obrigatória com NODE_ENV=production", () => {
+    expect(() => loadEnv({ ...min, NODE_ENV: "production", LLM_MODE: "mock" })).toThrow(
+      /MARKET_MODE/,
+    );
+    expect(
+      loadEnv({ ...min, NODE_ENV: "production", LLM_MODE: "mock", MARKET_MODE: "live" })
+        .MARKET_MODE,
+    ).toBe("live");
+  });
+
+  it("MARKET_MODE só aceita live|mock; MARKET_FETCH_TIMEOUT_MS=0 falha", () => {
+    expect(() => loadEnv({ ...min, MARKET_MODE: "fake" })).toThrow(/MARKET_MODE/);
+    expect(() => loadEnv({ ...min, MARKET_FETCH_TIMEOUT_MS: "0" })).toThrow(
+      /MARKET_FETCH_TIMEOUT_MS/,
+    );
+  });
+
+  it("lotes e concorrência da brapi: padrão 1 e 1; limites 1..20 e 1..10", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL).toBe(1);
+    expect(env.MARKET_PROVIDER_CONCURRENCY).toBe(1);
+    const ok = loadEnv({
+      ...min,
+      MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: "20",
+      MARKET_PROVIDER_CONCURRENCY: "10",
+    });
+    expect(ok.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL).toBe(20);
+    expect(ok.MARKET_PROVIDER_CONCURRENCY).toBe(10);
+    for (const bad of ["0", "21", "1.5", "x"]) {
+      expect(() => loadEnv({ ...min, MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: bad })).toThrow(
+        /MARKET_BRAPI_MAX_SYMBOLS_PER_CALL/,
+      );
+    }
+    for (const bad of ["0", "11"]) {
+      expect(() => loadEnv({ ...min, MARKET_PROVIDER_CONCURRENCY: bad })).toThrow(
+        /MARKET_PROVIDER_CONCURRENCY/,
+      );
+    }
+  });
+
+  it("orçamentos de chamadas ao provedor (rotas e preço): padrão 30/min, de 1 a 10000", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_PROVIDER_MAX_CALLS_PER_MIN).toBe(30);
+    expect(env.MARKET_PRICE_MAX_CALLS_PER_MIN).toBe(30);
+    for (const name of ["MARKET_PROVIDER_MAX_CALLS_PER_MIN", "MARKET_PRICE_MAX_CALLS_PER_MIN"]) {
+      expect((loadEnv({ ...min, [name]: "10000" }) as Record<string, unknown>)[name]).toBe(10000);
+      for (const bad of ["0", "10001", "2.5", "x"]) {
+        expect(() => loadEnv({ ...min, [name]: bad })).toThrow(new RegExp(name));
+      }
+    }
+  });
+
+  it("BRAPI_TOKEN definido exige BRAPI_BASE_URL https (o token não vai em claro)", () => {
+    for (const url of ["http://brapi.dev/api", "http://localhost:8080/api"]) {
+      expect(() => loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: url })).toThrow(
+        /BRAPI_BASE_URL: .*https/,
+      );
+      // Sem token, http segue aceito (ex.: um provedor falso local em teste).
+      expect(loadEnv({ ...min, BRAPI_BASE_URL: url }).BRAPI_BASE_URL).toBe(url);
+    }
+    expect(
+      loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: "https://brapi.dev/api" }).BRAPI_TOKEN,
+    ).toBe("tok");
+    expect(brapiUrlAllowsToken("não é url", "tok")).toBe(false);
+    expect(brapiUrlAllowsToken("não é url", undefined)).toBe(true);
+    // Token vazio conta como ausente.
+    expect(
+      loadEnv({ ...min, BRAPI_TOKEN: "", BRAPI_BASE_URL: "http://x.test/api" }).BRAPI_TOKEN,
+    ).toBeUndefined();
   });
 
   it("LOG_LEVEL: info por padrão; só níveis do pino (silent desliga)", () => {
@@ -69,7 +152,7 @@ describe("loadEnv", () => {
   });
 
   it("produção exige LLM_MODE explícito (sem default silencioso para mock)", () => {
-    const prod = { ...min, NODE_ENV: "production" };
+    const prod = { ...min, NODE_ENV: "production", MARKET_MODE: "mock" };
     expect(() => loadEnv(prod)).toThrow(/LLM_MODE/);
     expect(() => loadEnv({ ...prod, LLM_MODE: "" })).toThrow(/LLM_MODE/);
     expect(loadEnv({ ...prod, LLM_MODE: "mock" }).LLM_MODE).toBe("mock");

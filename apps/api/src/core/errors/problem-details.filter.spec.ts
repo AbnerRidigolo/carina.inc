@@ -2,7 +2,12 @@ import { HttpException, InternalServerErrorException, type ArgumentsHost } from 
 import { describe, expect, it } from "vitest";
 import { ZodValidationException } from "nestjs-zod";
 import { z } from "zod";
-import { AllProvidersFailedError, NotFoundError, QuotaExceededError } from "./domain-errors.js";
+import {
+  AllProvidersFailedError,
+  MarketDataUnavailableError,
+  NotFoundError,
+  QuotaExceededError,
+} from "./domain-errors.js";
 import { ProblemDetailsFilter } from "./problem-details.filter.js";
 
 function run(err: unknown) {
@@ -45,6 +50,22 @@ describe("ProblemDetailsFilter", () => {
     const { res, headers } = run(new AllProvidersFailedError());
     expect(res.statusCode).toBe(503);
     expect(headers["retry-after"]).toBe("30");
+  });
+
+  it("MarketDataUnavailableError vira 502 problem+json com mensagem fixa e sem texto interno", () => {
+    const err = new MarketDataUnavailableError();
+    expect(err.message).toBe("Dados de mercado indisponíveis");
+    const { res, headers, body } = run(err);
+    expect(res.statusCode).toBe(502);
+    expect(headers["content-type"]).toBe("application/problem+json");
+    expect(headers["retry-after"]).toBeUndefined();
+    expect(body).toEqual({
+      type: "https://carina.app/problems/market_data_unavailable",
+      title: "MarketDataUnavailableError",
+      status: 502,
+      detail: "Dados de mercado indisponíveis",
+      traceId: "req-1",
+    });
   });
 
   it("erro desconhecido vira 500 sem vazar detalhes", () => {

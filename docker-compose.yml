@@ -26,6 +26,8 @@ x-runtime-env: &runtime-env
   REDIS_URL: redis://redis:6379
   # Explícita: com NODE_ENV=production a API recusa subir sem LLM_MODE (nunca cai em mock sem querer).
   LLM_MODE: ${LLM_MODE:-mock}
+  # Idem: MARKET_MODE é obrigatória em produção (mock por padrão na demo).
+  MARKET_MODE: ${MARKET_MODE:-mock}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   GROQ_API_KEY: ${GROQ_API_KEY:-}
   NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}

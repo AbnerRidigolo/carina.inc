@@ -251,25 +251,50 @@ model Transaction {
 
 /// Criada na fase 1; usada pela importação de arquivos na fase 2.
 model ImportJob {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId   String   @map("tenant_id") @db.Uuid
-  clientId   String   @map("client_id") @db.Uuid
-  format     String
-  fileName   String   @map("file_name")
-  fileSha256 String   @map("file_sha256")
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  clientId    String   @map("client_id") @db.Uuid
+  format      String
+  fileName    String   @map("file_name")
+  fileSha256  String   @map("file_sha256")
   /// queued, parsing, done, failed
-  status     String   @default("queued")
-  stats      Json     @default("{}") @db.JsonB
-  errors     Json     @default("[]") @db.JsonB
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  status      String   @default("queued")
+  stats       Json     @default("{}") @db.JsonB
+  errors      Json     @default("[]") @db.JsonB
+  /// opções do envio (mapeamento do CSV etc.)
+  options     Json     @default("{}") @db.JsonB
+  /// código fixo do motivo da falha (nunca conteúdo do arquivo)
+  failureCode String?  @map("failure_code")
+  /// último avanço do parse (limpeza de jobs travados)
+  progressAt  DateTime @default(now()) @map("progress_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  client Client       @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+  /// no banco há no máximo um (import_job_id é a PK de import_file)
+  files  ImportFile[]
 
   /// o mesmo arquivo não é processado duas vezes
   @@unique([tenantId, clientId, fileSha256])
+  /// alvo da FK composta de import_file
+  @@unique([tenantId, clientId, id])
   @@index([tenantId, clientId])
   @@map("import_job")
+}
+
+/// Bytes do arquivo enviado, só até o parse fechar o job (RLS como import_job).
+/// No banco: CHECK octet_length(bytes) <= 10485760.
+model ImportFile {
+  importJobId String   @id @map("import_job_id") @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  clientId    String   @map("client_id") @db.Uuid
+  bytes       Bytes
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  job ImportJob @relation(fields: [tenantId, clientId, importJobId], references: [tenantId, clientId, id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@map("import_file")
 }
 
 // ─── Conhecimento (grafo + busca híbrida) ───────────────────────────────────

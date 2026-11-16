@@ -6,7 +6,7 @@ import { PrismaService } from "../../src/core/database/prisma.service.js";
 import { TenantPrismaService } from "../../src/core/database/tenant-prisma.service.js";
 import { UnauthenticatedError, ValidationError } from "../../src/core/errors/domain-errors.js";
 import { PrismaClient } from "../../src/generated/prisma/client.js";
-import { appUrl, migratorSql } from "../setup/db.js";
+import { appUrl, inRlsTransaction, migratorSql, withPgClient } from "../setup/db.js";
 
 describe("TenantPrismaService: isolamento por RLS (conectado como carina_app)", () => {
   const tenantA = randomUUID();
@@ -276,5 +276,94 @@ describe("TenantPrismaService: isolamento por RLS (conectado como carina_app)", 
       expect(TenantContext.current().tenantId).toBe(tenantA);
     });
     expect(() => TenantContext.current()).toThrow(UnauthenticatedError);
+  });
+});
+
+describe("import_file: isolamento por RLS (conectado como carina_app)", () => {
+  const tenantA = randomUUID();
+  const tenantB = randomUUID();
+  const clientA1 = randomUUID();
+  const clientA2 = randomUUID();
+  const clientB1 = randomUUID();
+  const jobA1 = randomUUID();
+  const jobA2 = randomUUID();
+  const jobB1 = randomUUID();
+
+  const seedJob = (id: string, tenantId: string, clientId: string) =>
+    migratorSql(
+      `WITH j AS (
+         INSERT INTO import_job (id, tenant_id, client_id, format, file_name, file_sha256)
+         VALUES ($1, $2, $3, 'ofx', 'f', $4) RETURNING id)
+       INSERT INTO import_file (import_job_id, tenant_id, client_id, bytes)
+       SELECT id, $2, $3, decode('00', 'hex') FROM j`,
+      [id, tenantId, clientId, id],
+      { tenantId },
+    );
+
+  const files = (ctx: { tenantId: string; clientId?: string }, sql: string) =>
+    withPgClient(appUrl(), (c) => inRlsTransaction(c, ctx, () => c.query(sql)));
+
+  beforeAll(async () => {
+    await migratorSql(
+      `INSERT INTO tenant (id, name, plan) VALUES ($1, 'Tenant A', 'pro'), ($2, 'Tenant B', 'pro')`,
+      [tenantA, tenantB],
+    );
+    await migratorSql(
+      `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $3, 'a1'), ($2, $3, 'a2')`,
+      [clientA1, clientA2, tenantA],
+      { tenantId: tenantA },
+    );
+    await migratorSql(
+      `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $2, 'b1')`,
+      [clientB1, tenantB],
+      { tenantId: tenantB },
+    );
+    await seedJob(jobA1, tenantA, clientA1);
+    await seedJob(jobA2, tenantA, clientA2);
+    await seedJob(jobB1, tenantB, clientB1);
+  });
+
+  it("sem contexto de tenant nada é visível (falha fechada)", async () => {
+    const res = await withPgClient(appUrl(), (c) => c.query("SELECT 1 FROM import_file"));
+    expect(res.rowCount).toBe(0);
+  });
+
+  it("tenant B não enxerga import_file de A em SELECT nem apaga em DELETE", async () => {
+    const sel = await files({ tenantId: tenantB }, "SELECT import_job_id FROM import_file");
+    expect(sel.rows.map((r) => r.import_job_id)).toEqual([jobB1]);
+    const del = await files(
+      { tenantId: tenantB },
+      `DELETE FROM import_file WHERE import_job_id = '${jobA1}'`,
+    );
+    expect(del.rowCount).toBe(0);
+    const still = await files({ tenantId: tenantA }, "SELECT import_job_id FROM import_file");
+    expect(still.rowCount).toBe(2);
+  });
+
+  it("com cliente fixado, o import_file de outro cliente do mesmo tenant é invisível", async () => {
+    const sel = await files(
+      { tenantId: tenantA, clientId: clientA1 },
+      "SELECT import_job_id FROM import_file",
+    );
+    expect(sel.rows.map((r) => r.import_job_id)).toEqual([jobA1]);
+    const del = await files(
+      { tenantId: tenantA, clientId: clientA1 },
+      `DELETE FROM import_file WHERE import_job_id = '${jobA2}'`,
+    );
+    expect(del.rowCount).toBe(0);
+  });
+
+  it("INSERT em import_file com tenant_id alheio viola a RLS", async () => {
+    await withPgClient(appUrl(), async (c) => {
+      await expect(
+        inRlsTransaction(c, { tenantId: tenantA }, () =>
+          c.query(
+            `INSERT INTO import_file (import_job_id, tenant_id, client_id, bytes)
+             VALUES ($1, $2, $3, decode('00', 'hex'))`,
+            [jobB1, tenantB, clientB1],
+          ),
+        ),
+      ).rejects.toThrow(/row-level security/);
+    });
   });
 });

@@ -232,6 +232,7 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
       "audit_event",
       "client",
       "executed_action",
+      "import_file",
       "import_job",
       "kg_chunk",
       "kg_document",
@@ -270,5 +271,118 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
       // Controle: com a entidade do próprio cliente, a inserção passa.
       await expect(insert(entityA1)).resolves.toBeDefined();
     });
+  });
+});
+
+describe("migração 0007_imports: import_job (opções, falha, progresso) e import_file", () => {
+  const tenantId = randomUUID();
+  const clientId = randomUUID();
+  const ctx = { tenantId, clientId };
+
+  const insertJob = (c: pg.Client, over: { status?: string; format?: string } = {}) =>
+    c.query<{ id: string }>(
+      `INSERT INTO import_job (tenant_id, client_id, format, file_name, file_sha256, status)
+       VALUES ($1, $2, $3, 'extrato', $4, $5) RETURNING id`,
+      [tenantId, clientId, over.format ?? "ofx", sha256(randomUUID()), over.status ?? "queued"],
+    );
+
+  beforeAll(async () => {
+    await migratorSql(`INSERT INTO tenant (id, name, plan) VALUES ($1, 'Tenant I', 'pro')`, [
+      tenantId,
+    ]);
+    await migratorSql(
+      `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $2, 'i1')`,
+      [clientId, tenantId],
+      { tenantId },
+    );
+  });
+
+  it("colunas novas existem com os defaults (options '{}', failure_code NULL, progress_at now())", async () => {
+    await asApp(async (c) => {
+      const { rows } = await inRlsTransaction(c, ctx, async () => {
+        const job = await insertJob(c);
+        return c.query<{ options: unknown; failure_code: string | null; fresh: boolean }>(
+          `SELECT options, failure_code, progress_at > now() - interval '1 minute' AS fresh
+           FROM import_job WHERE id = $1`,
+          [must(job.rows[0]).id],
+        );
+      });
+      expect(rows[0]).toEqual({ options: {}, failure_code: null, fresh: true });
+    });
+  });
+
+  it("status fora do conjunto e format desconhecido são recusados (23514)", async () => {
+    await asApp(async (c) => {
+      await expect(
+        inRlsTransaction(c, ctx, () => insertJob(c, { status: "x" })),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        inRlsTransaction(c, ctx, () => insertJob(c, { format: "pdf" })),
+      ).rejects.toMatchObject({ code: "23514" });
+      for (const status of ["queued", "parsing", "done", "failed"]) {
+        await expect(
+          inRlsTransaction(c, ctx, () => insertJob(c, { status })),
+        ).resolves.toBeDefined();
+      }
+      for (const format of ["ofx", "csv", "b3_xlsx"]) {
+        await expect(
+          inRlsTransaction(c, ctx, () => insertJob(c, { format })),
+        ).resolves.toBeDefined();
+      }
+    });
+  });
+
+  it("import_file: bytes acima de 10 MB são recusados (23514); 10 MB exatos passam", async () => {
+    await asApp(async (c) => {
+      const insertFile = (size: number) =>
+        inRlsTransaction(c, ctx, async () => {
+          const job = await insertJob(c);
+          return c.query(
+            `INSERT INTO import_file (import_job_id, tenant_id, client_id, bytes)
+             VALUES ($1, $2, $3, $4)`,
+            [must(job.rows[0]).id, tenantId, clientId, Buffer.alloc(size)],
+          );
+        });
+      await expect(insertFile(10 * 1024 * 1024 + 1)).rejects.toMatchObject({ code: "23514" });
+      await expect(insertFile(10 * 1024 * 1024)).resolves.toBeDefined();
+    });
+  });
+
+  it("apagar o import_job apaga o import_file (ON DELETE CASCADE)", async () => {
+    await asApp(async (c) => {
+      const jobId = await inRlsTransaction(c, ctx, async () => {
+        const job = await insertJob(c);
+        const id = must(job.rows[0]).id;
+        await c.query(
+          `INSERT INTO import_file (import_job_id, tenant_id, client_id, bytes)
+           VALUES ($1, $2, $3, $4)`,
+          [id, tenantId, clientId, Buffer.from("abc")],
+        );
+        return id;
+      });
+      const count = () =>
+        inRlsTransaction(c, ctx, async () =>
+          Number(
+            (
+              await c.query<{ n: string }>(
+                "SELECT count(*) AS n FROM import_file WHERE import_job_id = $1",
+                [jobId],
+              )
+            ).rows[0]?.n,
+          ),
+        );
+      expect(await count()).toBe(1);
+      await inRlsTransaction(c, ctx, () =>
+        c.query("DELETE FROM import_job WHERE id = $1", [jobId]),
+      );
+      expect(await count()).toBe(0);
+    });
+  });
+
+  it("import_file tem índice em created_at (varredura de expiração)", async () => {
+    const rows = await migratorSql<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'import_file'`,
+    );
+    expect(rows.some((r) => /\(created_at\)/.test(r.indexdef))).toBe(true);
   });
 });

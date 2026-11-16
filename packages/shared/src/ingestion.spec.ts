@@ -101,6 +101,21 @@ describe("StreamEvent", () => {
     expect(ev({ type: "resume", approvalId: "a", threadId: "t", approved: true })).toBe(true);
     expect(ev({ type: "data.ingested", source: "api" })).toBe(true);
     expect(ev({ type: "notification", kind: "info", text: "x" })).toBe(true);
+    expect(ev({ type: "import.requested", importJobId: "j" })).toBe(true);
+    expect(
+      ev({ type: "import.progress", importJobId: "j", stage: "parsing", processed: 1, total: 2 }),
+    ).toBe(true);
+    expect(
+      ev({ type: "import.progress", importJobId: "j", stage: "writing", processed: 2, total: 2 }),
+    ).toBe(true);
+    expect(ev({ type: "import.finished", importJobId: "j", status: "done" })).toBe(true);
+    expect(ev({ type: "import.finished", importJobId: "j", status: "failed" })).toBe(true);
+  });
+  it("rejeita stage e status de importação inválidos", () => {
+    expect(
+      ev({ type: "import.progress", importJobId: "j", stage: "x", processed: 1, total: 2 }),
+    ).toBe(false);
+    expect(ev({ type: "import.finished", importJobId: "j", status: "queued" })).toBe(false);
   });
   it("rejeita eventId não-uuid, status inválido e tipo desconhecido", () => {
     expect(ev({ eventId: "x", type: "data.ingested", source: "api" })).toBe(false);

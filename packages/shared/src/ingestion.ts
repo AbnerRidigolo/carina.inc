@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ImportFinishedStatusSchema, ImportProgressStageSchema } from "./imports.js";
 import { MoneySchema, QuantitySchema } from "./money.js";
 
 /**
@@ -80,6 +81,21 @@ export const StreamEventSchema = z.discriminatedUnion("type", [
     type: z.literal("notification"),
     kind: z.string(),
     text: z.string(),
+  }),
+  z.object({ ...streamBase, type: z.literal("import.requested"), importJobId: z.string() }),
+  z.object({
+    ...streamBase,
+    type: z.literal("import.progress"),
+    importJobId: z.string(),
+    stage: ImportProgressStageSchema,
+    processed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  z.object({
+    ...streamBase,
+    type: z.literal("import.finished"),
+    importJobId: z.string(),
+    status: ImportFinishedStatusSchema,
   }),
 ]);
 export type StreamEvent = z.infer<typeof StreamEventSchema>;

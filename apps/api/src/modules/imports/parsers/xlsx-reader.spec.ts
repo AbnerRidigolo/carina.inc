@@ -49,10 +49,10 @@ describe("readWorkbook", () => {
     expect(wb.sheets[0]?.rows).toEqual([[2, 3, { formulaWithoutValue: true }]]);
   });
 
-  it("zip bomb (entrada que declara 60 MB) é recusado como limite", () => {
-    const bomb = zipSync(
-      { "xl/worksheets/sheet1.xml": new Uint8Array(60 * 1024 * 1024) },
-      { level: 9 },
+  it("zip bomb (entrada que declara 60 MB) é recusado como limite, sem inflar", () => {
+    const bomb = zip();
+    patchCd(bomb, "xl/worksheets/sheet1.xml", (v, p) =>
+      v.setUint32(p + 24, 60 * 1024 * 1024, true),
     );
     expect(() => readWorkbook(bomb)).toThrow(ImportLimitError);
   });

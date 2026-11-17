@@ -8,8 +8,10 @@ import {
   type NormalizedPosition,
   type NormalizedTransaction,
 } from "@carina/shared";
+import type { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
+import { REDIS } from "../../src/core/redis/redis.tokens.js";
 import { UnauthenticatedError, ValidationError } from "../../src/core/errors/domain-errors.js";
 import { DataIngestionModule } from "../../src/modules/data-ingestion/data-ingestion.module.js";
 import { IngestionRepository } from "../../src/modules/data-ingestion/ingestion.repository.js";
@@ -335,6 +337,249 @@ describe("IngestionService: iteradores por id interno (Sync)", () => {
         expect((page.positions satisfies NormalizedPosition[]).length).toBe(5);
         expect(page.nextCursor).toEqual(expect.any(String));
       });
+    });
+  });
+});
+
+describe("IngestionService: gravação com cliente resolvido e substituição de posições", () => {
+  let t: TestApp;
+  let svc: IngestionService;
+  let redis: Redis;
+  let A: SeededTenant;
+  let B: SeededTenant;
+  let aRef: { id: string; externalId: string };
+  let bRef: { id: string; externalId: string };
+
+  const asTenant = <R>(tenantId: string, fn: () => Promise<R>) =>
+    TenantContext.run({ tenantId }, fn);
+
+  const newClient = async (tenantId: string, externalId: string) => {
+    const [row] = await migratorSql<{ id: string }>(
+      `INSERT INTO client (tenant_id, external_id) VALUES ($1, $2) RETURNING id`,
+      [tenantId, externalId],
+      { tenantId },
+    );
+    if (!row) throw new Error("INSERT INTO client não devolveu id");
+    return { id: row.id, externalId };
+  };
+
+  const pos = (externalId: string, institution: string, asOf: string): NormalizedPosition => ({
+    externalId,
+    institution,
+    kind: "investment",
+    assetClass: "acao",
+    name: `Ativo ${externalId}`,
+    valueBrl: "10.00",
+    asOf,
+  });
+
+  const seedRow = (
+    tenantId: string,
+    clientId: string,
+    source: string,
+    externalId: string,
+    institution: string,
+    asOf: string,
+  ) =>
+    migratorSql(
+      `INSERT INTO position (tenant_id, client_id, source, external_id, institution, kind,
+         asset_class, name, value_brl, as_of)
+       VALUES ($1, $2, $3, $4, $5, 'investment', 'acao', 'semente', 1, $6::date)`,
+      [tenantId, clientId, source, externalId, institution, asOf],
+      { tenantId },
+    );
+
+  const rowsOf = (tenantId: string, clientId: string) =>
+    migratorSql<{ source: string; external_id: string; institution: string; as_of: string }>(
+      `SELECT source, external_id, institution, as_of::text AS as_of FROM position
+       WHERE tenant_id = $1 AND client_id = $2 ORDER BY source, external_id`,
+      [tenantId, clientId],
+      { tenantId },
+    );
+
+  const usageCount = async (tenantId: string, clientId: string) => {
+    const [r] = await migratorSql<{ n: string }>(
+      `SELECT count(*)::text AS n FROM usage_record
+       WHERE tenant_id = $1 AND client_id = $2 AND work_type = 'data_ingestion'`,
+      [tenantId, clientId],
+      { tenantId },
+    );
+    return Number(r?.n ?? 0);
+  };
+
+  const events = async () => (await redis.xrange("jobs", "-", "+")).length;
+
+  const reset = async (tenantId: string, clientId: string) => {
+    for (const table of ["position", '"transaction"', "usage_record"]) {
+      await migratorSql(
+        `DELETE FROM ${table} WHERE tenant_id = $1 AND client_id = $2`,
+        [tenantId, clientId],
+        { tenantId },
+      );
+    }
+    await redis.flushdb();
+  };
+
+  beforeAll(async () => {
+    t = await createTestApp({
+      imports: [DataIngestionModule],
+      redisDb: redisDbOf("data-ingestion/ingestion.int.spec.ts"),
+    });
+    svc = t.app.get(IngestionService);
+    redis = t.app.get<Redis>(REDIS);
+    A = await t.seedTenant({ name: "A2" });
+    B = await t.seedTenant({ name: "B2" });
+    aRef = await newClient(A.tenantId, "w1");
+    bRef = await newClient(B.tenantId, "w1");
+  }, 60_000);
+
+  afterAll(async () => {
+    await t?.close();
+  });
+
+  describe("replaceImportedPositions", () => {
+    const input = (items: NormalizedPosition[], asOf = "2026-11-10") => ({
+      institutions: ["XP"],
+      asOf,
+      items,
+    });
+
+    it("remove o ativo vendido da mesma instituição; preserva outra instituição e source api/synthetic", async () => {
+      await reset(A.tenantId, aRef.id);
+      await seedRow(A.tenantId, aRef.id, "import", "vendido", "XP", "2026-10-01");
+      await seedRow(A.tenantId, aRef.id, "import", "fica", "XP", "2026-10-01");
+      await seedRow(A.tenantId, aRef.id, "import", "outra", "NuInvest", "2026-10-01");
+      await seedRow(A.tenantId, aRef.id, "api", "vendido", "XP", "2026-10-01");
+      await seedRow(A.tenantId, aRef.id, "synthetic", "sint", "XP", "2026-10-01");
+      const res = await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(
+          aRef,
+          input([pos("fica", "XP", "2026-11-10"), pos("novo", "XP", "2026-11-10")]),
+        ),
+      );
+      expect(res).toEqual({
+        upserted: 2,
+        removed: 1,
+        stale: false,
+        usage: { workType: "data_ingestion", priceBrl: "0.05" },
+      });
+      expect(
+        (await rowsOf(A.tenantId, aRef.id)).map((r) => `${r.source}/${r.external_id}/${r.as_of}`),
+      ).toEqual([
+        "api/vendido/2026-10-01",
+        "import/fica/2026-11-10",
+        "import/novo/2026-11-10",
+        "import/outra/2026-10-01",
+        "synthetic/sint/2026-10-01",
+      ]);
+      expect(await usageCount(A.tenantId, aRef.id)).toBe(1);
+      expect(await events()).toBe(1);
+    });
+
+    it("fotografia mais antiga: stale, nada muda, nenhuma cobrança, nenhum evento", async () => {
+      await reset(A.tenantId, aRef.id);
+      await seedRow(A.tenantId, aRef.id, "import", "a", "XP", "2026-11-10");
+      await seedRow(A.tenantId, aRef.id, "import", "b", "XP", "2026-11-05");
+      const res = await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(aRef, input([pos("novo", "XP", "2026-11-09")], "2026-11-09")),
+      );
+      expect(res).toMatchObject({ stale: true, upserted: 0, removed: 0 });
+      expect((await rowsOf(A.tenantId, aRef.id)).map((r) => r.external_id)).toEqual(["a", "b"]);
+      expect(await usageCount(A.tenantId, aRef.id)).toBe(0);
+      expect(await events()).toBe(0);
+    });
+
+    it("mesma data: substitui", async () => {
+      await reset(A.tenantId, aRef.id);
+      await seedRow(A.tenantId, aRef.id, "import", "velho", "XP", "2026-11-10");
+      const res = await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(aRef, input([pos("novo", "XP", "2026-11-10")])),
+      );
+      expect(res).toMatchObject({ stale: false, upserted: 1, removed: 1 });
+      expect((await rowsOf(A.tenantId, aRef.id)).map((r) => r.external_id)).toEqual(["novo"]);
+    });
+
+    it("sem posições importadas antes: só grava", async () => {
+      await reset(A.tenantId, aRef.id);
+      const res = await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(aRef, input([pos("x", "XP", "2026-11-10")])),
+      );
+      expect(res).toMatchObject({ stale: false, upserted: 1, removed: 0 });
+    });
+
+    it("RLS: o cliente de outro tenant não é tocado", async () => {
+      await reset(A.tenantId, aRef.id);
+      await reset(B.tenantId, bRef.id);
+      await seedRow(B.tenantId, bRef.id, "import", "b1", "XP", "2026-10-01");
+      await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(aRef, input([pos("a1", "XP", "2026-11-10")])),
+      );
+      expect((await rowsOf(B.tenantId, bRef.id)).map((r) => r.external_id)).toEqual(["b1"]);
+      expect(await usageCount(B.tenantId, bRef.id)).toBe(0);
+    });
+
+    it("lote fora de 1..1000 → ValidationError, sem escrita", async () => {
+      await reset(A.tenantId, aRef.id);
+      await expect(
+        asTenant(A.tenantId, () => svc.replaceImportedPositions(aRef, input([]))),
+      ).rejects.toBeInstanceOf(ValidationError);
+      const many = Array.from({ length: 1001 }, (_, i) => pos(`p${i}`, "XP", "2026-11-10"));
+      await expect(
+        asTenant(A.tenantId, () => svc.replaceImportedPositions(aRef, input(many))),
+      ).rejects.toBeInstanceOf(ValidationError);
+      expect(await usageCount(A.tenantId, aRef.id)).toBe(0);
+    });
+  });
+
+  describe("upsertTransactionsFor", () => {
+    it("grava e cobra como o POST, sem resolver cliente, e publica data.ingested", async () => {
+      await reset(A.tenantId, aRef.id);
+      const res = await asTenant(A.tenantId, () =>
+        svc.upsertTransactionsFor(aRef, "import", [
+          {
+            externalId: "t1",
+            institution: "Itaú",
+            account: "cc",
+            date: "2026-11-01",
+            description: "x",
+            amountBrl: "-1.00",
+            kind: "debit",
+          },
+        ]),
+      );
+      expect(res).toEqual({
+        upserted: 1,
+        usage: { workType: "data_ingestion", priceBrl: "0.05" },
+      });
+      const [n] = await migratorSql<{ n: string }>(
+        `SELECT count(*)::text AS n FROM "transaction"
+         WHERE tenant_id = $1 AND client_id = $2 AND source = 'import'`,
+        [A.tenantId, aRef.id],
+        { tenantId: A.tenantId },
+      );
+      expect(n?.n).toBe("1");
+      expect(await usageCount(A.tenantId, aRef.id)).toBe(1);
+      expect(await events()).toBe(1);
+    });
+
+    it("cliente de outro tenant: a escrita cai no RLS (nada gravado nem cobrado)", async () => {
+      await reset(B.tenantId, bRef.id);
+      await expect(
+        asTenant(A.tenantId, () =>
+          svc.upsertTransactionsFor(bRef, "import", [
+            {
+              externalId: "t1",
+              institution: "Itaú",
+              account: "cc",
+              date: "2026-11-01",
+              description: "x",
+              amountBrl: "-1.00",
+              kind: "debit",
+            },
+          ]),
+        ),
+      ).rejects.toBeDefined();
+      expect(await usageCount(B.tenantId, bRef.id)).toBe(0);
     });
   });
 });

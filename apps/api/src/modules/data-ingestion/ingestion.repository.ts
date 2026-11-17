@@ -166,6 +166,33 @@ export class IngestionRepository {
   }
 
   /**
+   * Maior `as_of` (`YYYY-MM-DD`) das posições `source = 'import'` dessas instituições do cliente
+   * fixado; `null` se não há nenhuma.
+   */
+  async latestImportedAsOf(tx: Tx, institutions: string[]): Promise<string | null> {
+    const rows = await tx.$queryRaw<{ latest: string | null }[]>`
+      SELECT max(as_of)::text AS latest FROM position
+      WHERE source = 'import' AND institution = ANY(${institutions}::text[])`;
+    return rows[0]?.latest ?? null;
+  }
+
+  /**
+   * Apaga as posições `source = 'import'` dessas instituições cujo `external_id` não está em
+   * `keepExternalIds`; devolve quantas. Nunca toca `api` nem `synthetic`. O RLS limita ao
+   * tenant e ao cliente fixados.
+   */
+  async deleteImportedPositionsExcept(
+    tx: Tx,
+    input: { institutions: string[]; keepExternalIds: string[] },
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM position
+      WHERE source = 'import'
+        AND institution = ANY(${input.institutions}::text[])
+        AND NOT (external_id = ANY(${input.keepExternalIds}::text[]))`;
+  }
+
+  /**
    * O cliente (id interno) existe no tenant do TenantContext atual? Lido sob RLS: um cliente de
    * outro tenant é invisível (false). O filtro por tenant é defesa em profundidade.
    */

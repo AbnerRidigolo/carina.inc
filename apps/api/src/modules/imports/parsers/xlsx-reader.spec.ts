@@ -142,4 +142,72 @@ describe("readWorkbook", () => {
       /ImportLimit|Xlsx|limite|ilegível/i,
     );
   });
+
+  /** Zip com 3 entradas fixas + sheet1 por último; devolve também onde começa o diretório central. */
+  function zipComSheetGrande() {
+    let seed = 1;
+    const pad = `<!--${Array.from({ length: 1024 * 1024 }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return (seed >> 16).toString(16).slice(-1);
+    }).join("")}-->`;
+    const bytes = zipSync(
+      {
+        "xl/workbook.xml": strToU8(WORKBOOK),
+        "xl/_rels/workbook.xml.rels": strToU8(RELS),
+        "xl/worksheets/sheet1.xml": strToU8(SHEET + pad),
+      },
+      { level: 9 },
+    );
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const eocd = bytes.length - 22;
+    return { bytes, view, eocd, cd: view.getUint32(eocd + 16, true) };
+  }
+
+  it("entradas locais duplicadas escondidas fora do diretório central não são inflaladas", () => {
+    const { bytes, view, eocd, cd } = zipComSheetGrande();
+    // Primeiro registro do diretório central cujo nome é sheet1 (a última entrada local).
+    let off = 0;
+    for (let p = cd; p < eocd;) {
+      const n = view.getUint16(p + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + n));
+      if (name === "xl/worksheets/sheet1.xml") off = view.getUint32(p + 42, true);
+      p += 46 + n + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    }
+    const entry = bytes.subarray(off, cd);
+    const copies = 50;
+    const out = new Uint8Array(bytes.length + entry.length * copies);
+    out.set(bytes.subarray(0, cd), 0);
+    for (let k = 0; k < copies; k++) out.set(entry, cd + k * entry.length);
+    const newCd = cd + copies * entry.length;
+    out.set(bytes.subarray(cd), newCd);
+    new DataView(out.buffer).setUint32(newCd + (eocd - cd) + 16, newCd, true);
+    const started = Date.now();
+    expect(readWorkbook(out).sheets[0]?.rows).toEqual([[1]]);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it("tamanho comprimido falsificado além do buffer → XlsxUnreadableError", () => {
+    const { bytes, view, eocd, cd } = zipComSheetGrande();
+    for (let p = cd; p < eocd;) {
+      const n = view.getUint16(p + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + n));
+      if (name === "xl/worksheets/sheet1.xml") view.setUint32(p + 20, 0x7fffffff, true);
+      p += 46 + n + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    }
+    expect(() => readWorkbook(bytes)).toThrow(XlsxUnreadableError);
+  });
+
+  it("nomes duplicados no diretório central → XlsxUnreadableError", () => {
+    const bytes = zip({ "xl/worksheets/sheet2.xml": SHEET });
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const eocd = bytes.length - 22;
+    for (let p = view.getUint32(eocd + 16, true); p < eocd;) {
+      const n = view.getUint16(p + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + n));
+      if (name === "xl/worksheets/sheet2.xml")
+        bytes.set(strToU8("xl/worksheets/sheet1.xml"), p + 46);
+      p += 46 + n + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    }
+    expect(() => readWorkbook(bytes)).toThrow(XlsxUnreadableError);
+  });
 });

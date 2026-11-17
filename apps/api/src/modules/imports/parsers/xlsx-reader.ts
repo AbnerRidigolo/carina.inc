@@ -1,4 +1,4 @@
-import { strFromU8, Unzip, UnzipInflate, UnzipPassThrough, unzipSync } from "fflate";
+import { Inflate, strFromU8 } from "fflate";
 import { XMLParser } from "fast-xml-parser";
 import { ImportLimitError, PARSE_LIMITS } from "./types.js";
 
@@ -45,10 +45,18 @@ const asArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : v === undefin
 
 interface ZipEntry {
   name: string;
+  method: number;
+  compressedSize: number;
   originalSize: number;
+  localOffset: number;
 }
 
-const CHUNK_BYTES = 16_384;
+const CHUNK_BYTES = 4096;
+const EOCD_SIGNATURE = 0x06054b50;
+const CD_SIGNATURE = 0x02014b50;
+const LOCAL_SIGNATURE = 0x04034b50;
+const EOCD_MIN = 22;
+const MAX_COMMENT = 0xffff;
 
 function isAllowed(name: string): boolean {
   return (
@@ -59,83 +67,129 @@ function isAllowed(name: string): boolean {
   );
 }
 
-/** 1ª passada: só o diretório central (filtro devolve false), aplicando os limites antes de inflar qualquer coisa. */
-function scanDirectory(bytes: Uint8Array): ZipEntry[] {
-  const entries: ZipEntry[] = [];
-  let total = 0;
-  try {
-    unzipSync(bytes, {
-      filter: (file) => {
-        if (entries.length + 1 > PARSE_LIMITS.maxZipEntries) throw new ImportLimitError();
-        total += file.originalSize;
-        if (total > PARSE_LIMITS.maxUnzippedBytes) throw new ImportLimitError();
-        if (file.originalSize > 0 && file.originalSize > file.size * MAX_COMPRESSION_RATIO) {
-          throw new ImportLimitError();
-        }
-        entries.push({ name: file.name, originalSize: file.originalSize });
-        return false;
-      },
-    });
-  } catch (err) {
-    if (err instanceof ImportLimitError) throw err;
+/**
+ * Lê o diretório central (única fonte de verdade sobre o que existe no zip) e aplica os limites
+ * de contagem, soma e razão de compressão antes de inflar qualquer coisa.
+ */
+function readDirectory(bytes: Uint8Array): ZipEntry[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  const lowest = Math.max(0, bytes.length - EOCD_MIN - MAX_COMMENT);
+  for (let i = bytes.length - EOCD_MIN; i >= lowest; i--) {
+    if (view.getUint32(i, true) === EOCD_SIGNATURE) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new XlsxUnreadableError();
+  const total = view.getUint16(eocd + 10, true);
+  const cdSize = view.getUint32(eocd + 12, true);
+  let at = view.getUint32(eocd + 16, true);
+  if (total === 0xffff || cdSize === 0xffffffff || at === 0xffffffff)
     throw new XlsxUnreadableError();
+  if (total > PARSE_LIMITS.maxZipEntries) throw new ImportLimitError();
+  if (at + cdSize > bytes.length) throw new XlsxUnreadableError();
+
+  const entries: ZipEntry[] = [];
+  const seen = new Set<string>();
+  let sum = 0;
+  for (let n = 0; n < total; n++) {
+    if (at + 46 > bytes.length || view.getUint32(at, true) !== CD_SIGNATURE) {
+      throw new XlsxUnreadableError();
+    }
+    const flags = view.getUint16(at + 8, true);
+    const method = view.getUint16(at + 10, true);
+    const compressedSize = view.getUint32(at + 20, true);
+    const originalSize = view.getUint32(at + 24, true);
+    const nameLen = view.getUint16(at + 28, true);
+    const extraLen = view.getUint16(at + 30, true);
+    const commentLen = view.getUint16(at + 32, true);
+    const localOffset = view.getUint32(at + 42, true);
+    if (at + 46 + nameLen > bytes.length) throw new XlsxUnreadableError();
+    const name = strFromU8(bytes.subarray(at + 46, at + 46 + nameLen));
+    at += 46 + nameLen + extraLen + commentLen;
+
+    sum += originalSize;
+    if (sum > PARSE_LIMITS.maxUnzippedBytes) throw new ImportLimitError();
+    if (originalSize > 0 && originalSize > compressedSize * MAX_COMPRESSION_RATIO) {
+      throw new ImportLimitError();
+    }
+    if (seen.has(name)) throw new XlsxUnreadableError();
+    seen.add(name);
+    if ((flags & 1) !== 0) throw new XlsxUnreadableError();
+    entries.push({ name, method, compressedSize, originalSize, localOffset });
   }
   return entries;
 }
 
-/**
- * 2ª passada: infla só as entradas permitidas, em fluxo, e aborta assim que a saída passa do
- * tamanho declarado no diretório central (um `originalSize` mentiroso não vira CPU ilimitada).
- */
-function inflateAllowed(bytes: Uint8Array, entries: ZipEntry[]): Record<string, Uint8Array> {
-  const declared = new Map<string, number>();
-  for (const e of entries) {
-    if (!isAllowed(e.name)) continue;
-    if (declared.has(e.name)) throw new XlsxUnreadableError();
-    declared.set(e.name, e.originalSize);
+function inflateEntry(
+  bytes: Uint8Array,
+  view: DataView,
+  entry: ZipEntry,
+  budget: { left: number },
+): Uint8Array {
+  const { localOffset: off } = entry;
+  if (off + 30 > bytes.length || view.getUint32(off, true) !== LOCAL_SIGNATURE) {
+    throw new XlsxUnreadableError();
   }
-  const files: Record<string, Uint8Array> = {};
-  const unzip = new Unzip((file) => {
-    const limit = declared.get(file.name);
-    if (limit === undefined) return;
-    const parts: Uint8Array[] = [];
-    let written = 0;
-    file.ondata = (err, chunk, final) => {
-      if (err) throw err;
-      written += chunk.length;
-      if (written > limit) {
-        file.terminate();
-        throw new ImportLimitError();
-      }
-      parts.push(chunk);
-      if (final) {
-        const out = new Uint8Array(written);
-        let at = 0;
-        for (const part of parts) {
-          out.set(part, at);
-          at += part.length;
-        }
-        files[file.name] = out;
-      }
-    };
-    file.start();
+  const nameLen = view.getUint16(off + 26, true);
+  const extraLen = view.getUint16(off + 28, true);
+  const nameEnd = off + 30 + nameLen;
+  if (nameEnd > bytes.length || strFromU8(bytes.subarray(off + 30, nameEnd)) !== entry.name) {
+    throw new XlsxUnreadableError();
+  }
+  const start = nameEnd + extraLen;
+  const end = start + entry.compressedSize;
+  if (end > bytes.length) throw new XlsxUnreadableError();
+  const data = bytes.subarray(start, end);
+
+  budget.left -= entry.originalSize;
+  if (budget.left < 0) throw new ImportLimitError();
+
+  if (entry.method === 0) {
+    if (data.length !== entry.originalSize) throw new XlsxUnreadableError();
+    return data.slice();
+  }
+  if (entry.method !== 8) throw new XlsxUnreadableError();
+
+  const parts: Uint8Array[] = [];
+  let written = 0;
+  let done = false;
+  const inflater = new Inflate((chunk, final) => {
+    written += chunk.length;
+    if (written > entry.originalSize) throw new ImportLimitError();
+    parts.push(chunk);
+    if (final) done = true;
   });
-  unzip.register(UnzipInflate);
-  unzip.register(UnzipPassThrough);
   try {
-    for (let at = 0; at < bytes.length; at += CHUNK_BYTES) {
-      const end = Math.min(at + CHUNK_BYTES, bytes.length);
-      unzip.push(bytes.subarray(at, end), end === bytes.length);
+    for (let i = 0; i < data.length; i += CHUNK_BYTES) {
+      const stop = Math.min(i + CHUNK_BYTES, data.length);
+      inflater.push(data.subarray(i, stop), stop === data.length);
     }
   } catch (err) {
     if (err instanceof ImportLimitError) throw err;
     throw new XlsxUnreadableError();
   }
-  return files;
+  if (!done) throw new XlsxUnreadableError();
+  const out = new Uint8Array(written);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
 }
 
+/** Infla só as entradas permitidas, endereçadas pelo diretório central, com orçamento global de bytes. */
 function unzipLimited(bytes: Uint8Array): Record<string, Uint8Array> {
-  return inflateAllowed(bytes, scanDirectory(bytes));
+  const entries = readDirectory(bytes);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const budget = { left: PARSE_LIMITS.maxUnzippedBytes };
+  const files: Record<string, Uint8Array> = {};
+  for (const entry of entries) {
+    if (isAllowed(entry.name)) files[entry.name] = inflateEntry(bytes, view, entry, budget);
+  }
+  return files;
 }
 
 const XML_REFS: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };

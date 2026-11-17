@@ -6,7 +6,8 @@ import {
 } from "@carina/shared";
 import { decodeText } from "./decode.js";
 import { deriveExternalId, OccurrenceCounter } from "./external-id.js";
-import { RowErrors, type RowErrorCode } from "./row-errors.js";
+import { parseAmount } from "./amount.js";
+import { RowErrors } from "./row-errors.js";
 import { ImportLimitError, PARSE_LIMITS, type ParseResult } from "./types.js";
 
 const EMPTY_STATS = { rowsRead: 0, positions: 0, transactions: 0, errorRows: 0, ignored: {} };
@@ -136,30 +137,6 @@ function parseDate(raw: string, format: CsvMapping["dateFormat"]): string | unde
     return undefined;
   }
   return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-}
-
-type Amount = { sign: 1 | -1; abs: string } | { error: RowErrorCode };
-
-/**
- * Valor monetário com o separador decimal do mapeamento. Aceita milhar no outro separador,
- * `R$` e sinal; recusa como ambíguo `X,ddd` no fim (ou `.ddd` em `dot`) e separadores em ordem errada.
- */
-function parseAmount(raw: string, decimal: CsvMapping["decimal"]): Amount {
-  const cleaned = raw.replace(/R\$/gi, "").replace(/\s/g, "");
-  const m = /^([+-])?(.*)$/.exec(cleaned);
-  const body = m?.[2] ?? "";
-  const [dec, thou] = decimal === "comma" ? [",", "."] : [".", ","];
-  const lastDec = body.lastIndexOf(dec);
-  const wrongOrder = lastDec >= 0 && body.slice(lastDec).includes(thou);
-  const threeAtEnd = new RegExp(`\\${dec}\\d{3}$`).test(body);
-  if (/^[\d.,]+$/.test(body) && (wrongOrder || threeAtEnd)) return { error: "ambiguous_amount" };
-  const valid = new RegExp(`^(?:\\d{1,3}(?:\\${thou}\\d{3})+|\\d+)(?:\\${dec}\\d{1,2})?$`);
-  if (!valid.test(body)) return { error: "invalid_amount" };
-  const [int = "", frac = ""] = body.replaceAll(thou, "").split(dec);
-  if (int.length > 16) return { error: "invalid_amount" };
-  const abs = `${int.replace(/^0+(?=\d)/, "")}.${frac.padEnd(2, "0")}`;
-  if (/^0+\.00$/.test(abs)) return { error: "invalid_amount" };
-  return { sign: m?.[1] === "-" ? -1 : 1, abs };
 }
 
 const KINDS: Record<string, "debit" | "credit"> = {

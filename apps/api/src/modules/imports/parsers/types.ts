@@ -1,3 +1,4 @@
+import { MAX_IMPORT_ERRORS } from "@carina/shared";
 import type {
   ImportFailureCode,
   ImportRowError,
@@ -32,6 +33,6 @@ export const PARSE_LIMITS = {
   maxUnzippedBytes: 52_428_800,
   maxZipEntries: 50,
   maxPositions: 1000,
-  maxStoredErrors: 100,
+  maxStoredErrors: MAX_IMPORT_ERRORS,
   parseTimeoutMs: 30_000,
 } as const;

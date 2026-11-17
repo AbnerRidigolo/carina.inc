@@ -27,6 +27,20 @@ describe("detectFormat", () => {
     expect(detectFormat(zip)).toBe("b3_xlsx");
   });
 
+  it("zip with corrupt entry data but a valid central directory still detects b3_xlsx", () => {
+    const zip = zipSync(
+      {
+        "[Content_Types].xml": [strToU8("<x/>".repeat(200)), { level: 9 }],
+        "xl/workbook.xml": [strToU8("<x/>".repeat(200)), { level: 9 }],
+      },
+      { level: 9 },
+    );
+    // Estraga o início dos dados da primeira entrada (cabeçalho local tem 30 bytes + nome).
+    const start = 30 + "[Content_Types].xml".length;
+    for (let i = start; i < start + 8; i++) zip[i] = 0xff;
+    expect(detectFormat(zip)).toBe("b3_xlsx");
+  });
+
   it("rejeita zip sem xl/workbook.xml", () => {
     const zip = zipSync({ "[Content_Types].xml": strToU8("<x/>"), "a.txt": strToU8("oi") });
     expect(detectFormat(zip)).toBeNull();

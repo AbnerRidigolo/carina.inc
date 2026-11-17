@@ -166,6 +166,21 @@ export class IngestionRepository {
   }
 
   /**
+   * Serializa as substituições de posições importadas do cliente fixado (lock até o fim da
+   * transação): sem isso, duas importações concorrentes veriam a fotografia uma da outra só depois
+   * do COMMIT (união das duas, ou a mais antiga sobrescrevendo a mais nova). Um lock por cliente,
+   * não por instituição: uma única chave não tem ordem de bloqueio a respeitar (sem deadlock).
+   */
+  async lockImportedPositions(tx: Tx): Promise<void> {
+    await tx.$queryRaw`
+      SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
+        'import_positions',
+        current_setting('app.tenant_id', true),
+        current_setting('app.client_id', true)
+      )::text, 0)) IS NULL AS locked`;
+  }
+
+  /**
    * Maior `as_of` (`YYYY-MM-DD`) das posições `source = 'import'` dessas instituições do cliente
    * fixado; `null` se não há nenhuma.
    */

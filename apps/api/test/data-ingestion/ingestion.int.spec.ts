@@ -518,6 +518,42 @@ describe("IngestionService: gravação com cliente resolvido e substituição de
       expect(await usageCount(B.tenantId, bRef.id)).toBe(0);
     });
 
+    it("concorrência: a fotografia mais nova vence em qualquer ordem de chegada, sem união", async () => {
+      for (const newerFirst of [true, false, true, false, true, false, true, false]) {
+        await reset(A.tenantId, aRef.id);
+        const older = input([pos("velho1", "XP", "2026-11-05")], "2026-11-05");
+        const newer = input(
+          [pos("novo1", "XP", "2026-11-10"), pos("novo2", "XP", "2026-11-10")],
+          "2026-11-10",
+        );
+        const run = (i: typeof older) =>
+          asTenant(A.tenantId, () => svc.replaceImportedPositions(aRef, i));
+        await Promise.all(newerFirst ? [run(newer), run(older)] : [run(older), run(newer)]);
+        expect((await rowsOf(A.tenantId, aRef.id)).map((r) => r.external_id)).toEqual([
+          "novo1",
+          "novo2",
+        ]);
+      }
+    });
+
+    it("contrato: institutions vazio, item de outra instituição ou asOf diferente → ValidationError, sem escrita", async () => {
+      await reset(A.tenantId, aRef.id);
+      await seedRow(A.tenantId, aRef.id, "import", "a", "XP", "2026-10-01");
+      const bad = [
+        { institutions: [], asOf: "2026-11-10", items: [pos("x", "XP", "2026-11-10")] },
+        input([pos("x", "Outra", "2026-11-10")]),
+        input([pos("x", "XP", "2026-11-09")]),
+        input([pos("x", "XP", "2026-11-10")], "2026-13-40"),
+      ];
+      for (const b of bad) {
+        await expect(
+          asTenant(A.tenantId, () => svc.replaceImportedPositions(aRef, b)),
+        ).rejects.toBeInstanceOf(ValidationError);
+      }
+      expect((await rowsOf(A.tenantId, aRef.id)).map((r) => r.external_id)).toEqual(["a"]);
+      expect(await usageCount(A.tenantId, aRef.id)).toBe(0);
+    });
+
     it("lote fora de 1..1000 → ValidationError, sem escrita", async () => {
       await reset(A.tenantId, aRef.id);
       await expect(

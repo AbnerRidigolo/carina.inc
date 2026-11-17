@@ -233,9 +233,22 @@ export class IngestionService {
   ): Promise<IngestResult & { removed: number; stale: boolean }> {
     assertBatchSize(input.items);
     assertDay("asOf", input.asOf);
+    if (input.institutions.length === 0) {
+      throw new ValidationError("institutions precisa ter ao menos uma instituição");
+    }
+    const known = new Set(input.institutions);
+    for (const item of input.items) {
+      if (!known.has(item.institution)) {
+        throw new ValidationError("Toda posição precisa ser de uma das instituições informadas");
+      }
+      if (item.asOf !== input.asOf) {
+        throw new ValidationError("Toda posição precisa ter o asOf da fotografia");
+      }
+    }
     const rows = dedupeByExternalId(input.items);
     const institutions = [...input.institutions];
     const done = await this.commitBatch(client, "import", async (tx) => {
+      await this.repo.lockImportedPositions(tx);
       const latest = await this.repo.latestImportedAsOf(tx, institutions);
       if (latest !== null && latest > input.asOf) return null;
       const removed = await this.repo.deleteImportedPositionsExcept(tx, {

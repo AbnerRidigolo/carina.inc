@@ -78,6 +78,15 @@ describe("parseOfx", () => {
     expect(parseOfx(fixture("sem-fitid.ofx")).transactions).toEqual(r.transactions);
   });
 
+  it("sem FITID, débito e crédito de mesmo valor e descrição têm ids distintos e estáveis entre extratos sobrepostos", () => {
+    const deb = "<STMTTRN><DTPOSTED>20250105<TRNAMT>-5.00<MEMO>Estorno</STMTTRN>";
+    const cred = "<STMTTRN><DTPOSTED>20250105<TRNAMT>5.00<MEMO>Estorno</STMTTRN>";
+    const a = parseOfx(stmt(deb + cred)).transactions;
+    const b = parseOfx(stmt(cred)).transactions;
+    expect(a[0]?.externalId).not.toBe(a[1]?.externalId);
+    expect(b[0]?.externalId).toBe(a[1]?.externalId);
+  });
+
   it("TRNAMT com ponto e milhar vírgula é ambíguo, na linha certa", () => {
     const r = parseOfx(
       stmt(

@@ -162,13 +162,11 @@ export function parseOfx(bytes: Uint8Array): ParseResult {
     const bankId = trn.bank ?? "";
     const acctId = trn.acct ?? "";
     const fitid = f.get("FITID");
+    const signed = `${amount.sign < 0 ? "-" : ""}${amount.abs}`;
+    const derivedParts = [bankId, acctId, date, signed, description];
     const externalId = fitid
       ? deriveExternalId("ofx", [bankId, acctId, fitid], 0)
-      : deriveExternalId(
-          "ofx",
-          [bankId, acctId, date, amount.abs, description],
-          counter.next([bankId, acctId, date, amount.abs, description].join("\u001f")),
-        );
+      : deriveExternalId("ofx", derivedParts, counter.next(derivedParts.join("\u001f")));
 
     const item = {
       externalId,

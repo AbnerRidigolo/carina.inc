@@ -71,7 +71,7 @@ function isAllowed(name: string): boolean {
  * Lê o diretório central (única fonte de verdade sobre o que existe no zip) e aplica os limites
  * de contagem, soma e razão de compressão antes de inflar qualquer coisa.
  */
-function readDirectory(bytes: Uint8Array): ZipEntry[] {
+function readDirectory(bytes: Uint8Array): { entries: ZipEntry[]; cdOffset: number } {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let eocd = -1;
   const lowest = Math.max(0, bytes.length - EOCD_MIN - MAX_COMMENT);
@@ -90,6 +90,7 @@ function readDirectory(bytes: Uint8Array): ZipEntry[] {
   if (total > PARSE_LIMITS.maxZipEntries) throw new ImportLimitError();
   if (at + cdSize > bytes.length) throw new XlsxUnreadableError();
 
+  const cdOffset = at;
   const entries: ZipEntry[] = [];
   const seen = new Set<string>();
   let sum = 0;
@@ -119,13 +120,14 @@ function readDirectory(bytes: Uint8Array): ZipEntry[] {
     if ((flags & 1) !== 0) throw new XlsxUnreadableError();
     entries.push({ name, method, compressedSize, originalSize, localOffset });
   }
-  return entries;
+  return { entries, cdOffset };
 }
 
 function inflateEntry(
   bytes: Uint8Array,
   view: DataView,
   entry: ZipEntry,
+  limit: number,
   budget: { left: number },
 ): Uint8Array {
   const { localOffset: off } = entry;
@@ -140,7 +142,8 @@ function inflateEntry(
   }
   const start = nameEnd + extraLen;
   const end = start + entry.compressedSize;
-  if (end > bytes.length) throw new XlsxUnreadableError();
+  // Faixas comprimidas não podem se sobrepor nem invadir a próxima entrada ou o diretório central.
+  if (end > limit || end > bytes.length) throw new XlsxUnreadableError();
   const data = bytes.subarray(start, end);
 
   budget.left -= entry.originalSize;
@@ -170,7 +173,7 @@ function inflateEntry(
     if (err instanceof ImportLimitError) throw err;
     throw new XlsxUnreadableError();
   }
-  if (!done) throw new XlsxUnreadableError();
+  if (!done || written !== entry.originalSize) throw new XlsxUnreadableError();
   const out = new Uint8Array(written);
   let at = 0;
   for (const part of parts) {
@@ -182,12 +185,18 @@ function inflateEntry(
 
 /** Infla só as entradas permitidas, endereçadas pelo diretório central, com orçamento global de bytes. */
 function unzipLimited(bytes: Uint8Array): Record<string, Uint8Array> {
-  const entries = readDirectory(bytes);
+  const { entries, cdOffset } = readDirectory(bytes);
+  const offsets = entries.map((e) => e.localOffset).sort((a, b) => a - b);
+  for (let i = 1; i < offsets.length; i++) {
+    if (offsets[i] === offsets[i - 1]) throw new XlsxUnreadableError();
+  }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const budget = { left: PARSE_LIMITS.maxUnzippedBytes };
   const files: Record<string, Uint8Array> = {};
   for (const entry of entries) {
-    if (isAllowed(entry.name)) files[entry.name] = inflateEntry(bytes, view, entry, budget);
+    if (!isAllowed(entry.name)) continue;
+    const next = offsets.find((o) => o > entry.localOffset) ?? cdOffset;
+    files[entry.name] = inflateEntry(bytes, view, entry, Math.min(next, cdOffset), budget);
   }
   return files;
 }

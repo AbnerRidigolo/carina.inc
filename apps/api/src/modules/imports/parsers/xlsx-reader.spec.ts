@@ -210,4 +210,32 @@ describe("readWorkbook", () => {
     }
     expect(() => readWorkbook(bytes)).toThrow(XlsxUnreadableError);
   });
+
+  /** Aplica `mudar` ao registro do diretório central da entrada `alvo`. */
+  function patchCd(bytes: Uint8Array, alvo: string, mudar: (view: DataView, p: number) => void) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const eocd = bytes.length - 22;
+    for (let p = view.getUint32(eocd + 16, true); p < eocd;) {
+      const n = view.getUint16(p + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + n));
+      if (name === alvo) mudar(view, p);
+      p += 46 + n + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+    }
+  }
+
+  it("faixa comprimida que invade a próxima entrada → XlsxUnreadableError", () => {
+    const bytes = zip();
+    patchCd(bytes, "xl/workbook.xml", (v, p) =>
+      v.setUint32(p + 20, v.getUint32(p + 20, true) + 10, true),
+    );
+    expect(() => readWorkbook(bytes)).toThrow(XlsxUnreadableError);
+  });
+
+  it("duas entradas apontando para o mesmo offset local → XlsxUnreadableError", () => {
+    const bytes = zip();
+    let offset = 0;
+    patchCd(bytes, "xl/workbook.xml", (v, p) => (offset = v.getUint32(p + 42, true)));
+    patchCd(bytes, "xl/_rels/workbook.xml.rels", (v, p) => v.setUint32(p + 42, offset, true));
+    expect(() => readWorkbook(bytes)).toThrow(XlsxUnreadableError);
+  });
 });

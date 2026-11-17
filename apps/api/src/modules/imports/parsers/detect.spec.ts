@@ -27,7 +27,7 @@ describe("detectFormat", () => {
     expect(detectFormat(zip)).toBe("b3_xlsx");
   });
 
-  it("zip with corrupt entry data but a valid central directory still detects b3_xlsx", () => {
+  it("zip com dados de entrada corrompidos mas diretório central válido ainda detecta b3_xlsx", () => {
     const zip = zipSync(
       {
         "[Content_Types].xml": [strToU8("<x/>".repeat(200)), { level: 9 }],

@@ -96,4 +96,50 @@ describe("readWorkbook", () => {
     const bytes = zip({ "docProps/lixo.xml": "<<<nem é xml>>>" });
     expect(readWorkbook(bytes).sheets[0]?.rows).toEqual([[1]]);
   });
+
+  it("decodifica entidades predefinidas e numéricas em textos e nomes de planilha", () => {
+    const sst = `<sst ${NS}><si><t>S&amp;P &lt;500&gt; &#233;&#xE9; &quot;x&apos;</t></si></sst>`;
+    const sheet = `<worksheet ${NS}><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`;
+    const wb = readWorkbook(
+      zip({
+        "xl/sharedStrings.xml": sst,
+        "xl/worksheets/sheet1.xml": sheet,
+        "xl/workbook.xml": WORKBOOK.replace('name="P"', 'name="A&amp;B"'),
+      }),
+    );
+    expect(wb.sheets[0]?.name).toBe("A&B");
+    expect(wb.sheets[0]?.rows).toEqual([["S&P <500> éé \"x'"]]);
+  });
+
+  it("originalSize mentiroso (declara menos do que infla) é recusado rápido", () => {
+    const files = {
+      "xl/workbook.xml": strToU8(WORKBOOK),
+      "xl/_rels/workbook.xml.rels": strToU8(RELS),
+      "xl/worksheets/sheet1.xml": new Uint8Array(30 * 1024 * 1024),
+    };
+    const bytes = zipSync(files, { level: 9 });
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let i = 0; i + 46 < bytes.length; i++) {
+      if (view.getUint32(i, true) !== 0x02014b50) continue;
+      const nameLen = view.getUint16(i + 28, true);
+      const name = new TextDecoder().decode(bytes.subarray(i + 46, i + 46 + nameLen));
+      if (name === "xl/worksheets/sheet1.xml") {
+        view.setUint32(i + 24, view.getUint32(i + 20, true) * 100, true);
+      }
+    }
+    const started = Date.now();
+    expect(() => readWorkbook(bytes)).toThrow(ImportLimitError);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("muitos <sheet> apontando para a mesma planilha são recusados", () => {
+    const sheets = Array.from(
+      { length: 1000 },
+      (_, i) => `<sheet name="P${i}" sheetId="${i + 1}" r:id="rId1"/>`,
+    ).join("");
+    const wb = `<workbook ${NS} ${REL}><sheets>${sheets}</sheets></workbook>`;
+    expect(() => readWorkbook(zip({ "xl/workbook.xml": wb }))).toThrow(
+      /ImportLimit|Xlsx|limite|ilegível/i,
+    );
+  });
 });

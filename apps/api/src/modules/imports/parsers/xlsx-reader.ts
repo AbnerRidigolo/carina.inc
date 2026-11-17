@@ -1,4 +1,4 @@
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, Unzip, UnzipInflate, UnzipPassThrough, unzipSync } from "fflate";
 import { XMLParser } from "fast-xml-parser";
 import { ImportLimitError, PARSE_LIMITS } from "./types.js";
 
@@ -43,33 +43,114 @@ type Node = Record<string, unknown>;
 const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null;
 const asArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : v === undefined ? [] : [v]);
 
-function unzipLimited(bytes: Uint8Array): Record<string, Uint8Array> {
-  let entries = 0;
+interface ZipEntry {
+  name: string;
+  originalSize: number;
+}
+
+const CHUNK_BYTES = 16_384;
+
+function isAllowed(name: string): boolean {
+  return (
+    name === WORKBOOK_PATH ||
+    name === RELS_PATH ||
+    name === SHARED_STRINGS_PATH ||
+    SHEET_PATH.test(name)
+  );
+}
+
+/** 1ª passada: só o diretório central (filtro devolve false), aplicando os limites antes de inflar qualquer coisa. */
+function scanDirectory(bytes: Uint8Array): ZipEntry[] {
+  const entries: ZipEntry[] = [];
   let total = 0;
   try {
-    return unzipSync(bytes, {
-      // O filtro roda sobre o diretório central: nada é descompactado antes de passar pelos limites.
+    unzipSync(bytes, {
       filter: (file) => {
-        entries += 1;
+        if (entries.length + 1 > PARSE_LIMITS.maxZipEntries) throw new ImportLimitError();
         total += file.originalSize;
-        if (entries > PARSE_LIMITS.maxZipEntries || total > PARSE_LIMITS.maxUnzippedBytes) {
-          throw new ImportLimitError();
-        }
+        if (total > PARSE_LIMITS.maxUnzippedBytes) throw new ImportLimitError();
         if (file.originalSize > 0 && file.originalSize > file.size * MAX_COMPRESSION_RATIO) {
           throw new ImportLimitError();
         }
-        return (
-          file.name === WORKBOOK_PATH ||
-          file.name === RELS_PATH ||
-          file.name === SHARED_STRINGS_PATH ||
-          SHEET_PATH.test(file.name)
-        );
+        entries.push({ name: file.name, originalSize: file.originalSize });
+        return false;
       },
     });
   } catch (err) {
     if (err instanceof ImportLimitError) throw err;
     throw new XlsxUnreadableError();
   }
+  return entries;
+}
+
+/**
+ * 2ª passada: infla só as entradas permitidas, em fluxo, e aborta assim que a saída passa do
+ * tamanho declarado no diretório central (um `originalSize` mentiroso não vira CPU ilimitada).
+ */
+function inflateAllowed(bytes: Uint8Array, entries: ZipEntry[]): Record<string, Uint8Array> {
+  const declared = new Map<string, number>();
+  for (const e of entries) {
+    if (!isAllowed(e.name)) continue;
+    if (declared.has(e.name)) throw new XlsxUnreadableError();
+    declared.set(e.name, e.originalSize);
+  }
+  const files: Record<string, Uint8Array> = {};
+  const unzip = new Unzip((file) => {
+    const limit = declared.get(file.name);
+    if (limit === undefined) return;
+    const parts: Uint8Array[] = [];
+    let written = 0;
+    file.ondata = (err, chunk, final) => {
+      if (err) throw err;
+      written += chunk.length;
+      if (written > limit) {
+        file.terminate();
+        throw new ImportLimitError();
+      }
+      parts.push(chunk);
+      if (final) {
+        const out = new Uint8Array(written);
+        let at = 0;
+        for (const part of parts) {
+          out.set(part, at);
+          at += part.length;
+        }
+        files[file.name] = out;
+      }
+    };
+    file.start();
+  });
+  unzip.register(UnzipInflate);
+  unzip.register(UnzipPassThrough);
+  try {
+    for (let at = 0; at < bytes.length; at += CHUNK_BYTES) {
+      const end = Math.min(at + CHUNK_BYTES, bytes.length);
+      unzip.push(bytes.subarray(at, end), end === bytes.length);
+    }
+  } catch (err) {
+    if (err instanceof ImportLimitError) throw err;
+    throw new XlsxUnreadableError();
+  }
+  return files;
+}
+
+function unzipLimited(bytes: Uint8Array): Record<string, Uint8Array> {
+  return inflateAllowed(bytes, scanDirectory(bytes));
+}
+
+const XML_REFS: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+/** Decodifica só as referências predefinidas e numéricas; nunca entidades declaradas em DTD. */
+function decodeXml(s: string): string {
+  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (m, ref: string) => {
+    if (ref.startsWith("#")) {
+      const code = ref[1] === "x" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+      return code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        ? String.fromCodePoint(code)
+        : m;
+    }
+    return XML_REFS[ref] ?? m;
+  });
 }
 
 function parseXml(files: Record<string, Uint8Array>, path: string): Node {
@@ -86,8 +167,8 @@ function parseXml(files: Record<string, Uint8Array>, path: string): Node {
 }
 
 function textOf(v: unknown): string {
-  if (typeof v === "string") return v;
-  if (isNode(v) && typeof v["#text"] === "string") return v["#text"];
+  if (typeof v === "string") return decodeXml(v);
+  if (isNode(v) && typeof v["#text"] === "string") return decodeXml(v["#text"]);
   return "";
 }
 
@@ -115,8 +196,9 @@ function sheetTargets(files: Record<string, Uint8Array>): Array<{ name: string; 
   for (const rel of asArray(rels["Relationship"])) {
     if (!isNode(rel)) continue;
     const id = rel["@_Id"];
-    const target = rel["@_Target"];
-    if (typeof id !== "string" || typeof target !== "string") continue;
+    const rawTarget = rel["@_Target"];
+    if (typeof id !== "string" || typeof rawTarget !== "string") continue;
+    const target = decodeXml(rawTarget);
     targets.set(id, target.startsWith("/") ? target.slice(1) : `xl/${target}`);
   }
   const out: Array<{ name: string; path: string }> = [];
@@ -128,7 +210,9 @@ function sheetTargets(files: Record<string, Uint8Array>): Array<{ name: string; 
     if (typeof name !== "string" || path === undefined || !SHEET_PATH.test(path)) {
       throw new XlsxUnreadableError();
     }
-    out.push({ name, path });
+    if (out.length >= PARSE_LIMITS.maxZipEntries) throw new ImportLimitError();
+    if (out.some((o) => o.path === path)) throw new XlsxUnreadableError();
+    out.push({ name: decodeXml(name), path });
   }
   if (out.length === 0) throw new XlsxUnreadableError();
   return out;

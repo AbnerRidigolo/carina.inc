@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { zipSync, strToU8 } from "fflate";
 import { describe, expect, it } from "vitest";
 import { detectFormat } from "./detect.js";
@@ -56,8 +57,22 @@ describe("detectFormat", () => {
     expect(detectFormat(enc("a,b,c\n1,2,3\n"))).toBe("csv");
   });
 
-  it("reconhece CSV com tab", () => {
-    expect(detectFormat(enc("a\tb\n1\t2\n"))).toBe("csv");
+  it("rejeita tab como delimitador (o parser só aceita ; e ,)", () => {
+    expect(detectFormat(enc("a\tb\n1\t2\n"))).toBeNull();
+  });
+
+  it("reconhece CSV com quebra de linha dentro de aspas", () => {
+    const fixture = new URL(
+      "../../../../test/fixtures/imports/csv/aspas-e-quebras.csv",
+      import.meta.url,
+    );
+    expect(detectFormat(readFileSync(fixture))).toBe("csv");
+  });
+
+  it("amostra cortada no meio de um registro entre aspas ainda é CSV", () => {
+    // O 2º registro começa entre aspas e passa do fim da amostra de 64 KB: cortado, teria 1 coluna.
+    const row = '"' + "linha\n".repeat(7_000) + '";1\n';
+    expect(detectFormat(enc("a;b\n" + row + row))).toBe("csv");
   });
 
   it("ignora delimitador dentro de aspas", () => {

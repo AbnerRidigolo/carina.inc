@@ -123,7 +123,8 @@ curl -s -X POST localhost:3000/api/clients/cliente-moderado/imports -H "$APP" \
 curl -s localhost:3000/api/clients/cliente-moderado/imports/<job.id> -H "$APP"   # status, contagens e erros por linha
 ```
 
-`format` é opcional (detectado pelo conteúdo, nunca pela extensão). No CSV, `csvPreset`
+`format` é opcional (detectado pelo conteúdo, nunca pela extensão; `format=csv` vale mesmo quando a
+detecção não reconhece o CSV, que precisa usar `;` ou `,`). No CSV, `csvPreset`
 (`nubank_conta` ou `generico_br`) ou `csvMapping` (JSON) é obrigatório, e `account` também. Limites:
 10 MB por arquivo (413) e 5 importações ativas por cliente (429 com `Retry-After`). O mesmo arquivo
 enviado de novo devolve o job existente (200, sem cobrar); um job `failed` é reenfileirado.

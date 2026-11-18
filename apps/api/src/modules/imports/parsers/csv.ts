@@ -22,7 +22,7 @@ function failed(failure: NonNullable<ParseResult["failure"]>): ParseResult {
   };
 }
 
-interface CsvRecord {
+export interface CsvRecord {
   /** Número do registro físico (cabeçalho = 1); quebra dentro de aspas não conta. */
   line: number;
   fields: string[];
@@ -38,7 +38,7 @@ function utf8Units(code: number): number {
  * Tokenizer RFC 4180 em streaming de caracteres: aspas, aspas dobradas e quebra de linha dentro
  * de aspas. Estoura `ImportLimitError` ao passar de 64 colunas ou 64 KB por registro.
  */
-function* records(text: string, delimiter: string): Generator<CsvRecord> {
+export function* records(text: string, delimiter: string): Generator<CsvRecord> {
   let fields: string[] = [];
   let field = "";
   let quoted = false;

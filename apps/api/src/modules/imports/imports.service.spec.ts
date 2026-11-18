@@ -159,6 +159,25 @@ describe("ImportsService.create: fluxo", () => {
   });
 });
 
+describe("ImportsService.create: format=csv explícito", () => {
+  it("conteúdo que a detecção não reconhece é aceito como CSV", async () => {
+    const { svc, repo, run } = setup();
+    // Uma coluna só: a detecção recusa, mas o usuário disse que é CSV; o parser decide depois.
+    const bytes = Buffer.from("Data\n01/10/2026\n");
+    const fields = {
+      format: "csv" as const,
+      csvPreset: "generico_br",
+      institution: "B",
+      account: "c",
+    };
+    await run(() => svc.create("c1", { bytes }, fields));
+    expect(repo.insertQueued).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ format: "csv" }),
+    );
+  });
+});
+
 describe("ImportsService.get e list", () => {
   it("get: id malformado ou ausente → NotFoundError", async () => {
     const { svc, repo, run } = setup({ get: vi.fn().mockResolvedValue(null) });

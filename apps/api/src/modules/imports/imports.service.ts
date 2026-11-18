@@ -131,7 +131,9 @@ export class ImportsService {
     fields: ImportUploadFields,
   ): Promise<{ job: ImportJobView; created: boolean }> {
     if (file.bytes.length === 0) throw new ValidationError("O arquivo está vazio");
-    const format = detectFormat(file.bytes);
+    // `format=csv` explícito vale quando a detecção não reconhece o conteúdo (ex.: CSV atípico);
+    // o parser decide depois. Nunca sobrepõe um formato detectado.
+    const format = detectFormat(file.bytes) ?? (fields.format === "csv" ? "csv" : null);
     if (format === null) throw new ValidationError("Formato de arquivo não reconhecido");
     if (fields.format !== undefined && fields.format !== format) {
       throw new ValidationError("O formato informado não corresponde ao conteúdo do arquivo");

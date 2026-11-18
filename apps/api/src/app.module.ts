@@ -7,6 +7,7 @@ import { BillingModule } from "./modules/billing/billing.module.js";
 import { ChatModule } from "./modules/chat/chat.module.js";
 import { DataIngestionModule } from "./modules/data-ingestion/data-ingestion.module.js";
 import { HealthModule } from "./modules/health/health.module.js";
+import { ImportsModule } from "./modules/imports/imports.module.js";
 import { InboxModule } from "./modules/inbox/inbox.module.js";
 import { KnowledgeModule } from "./modules/knowledge/knowledge.module.js";
 import { LimitsModule } from "./modules/limits/limits.module.js";
@@ -46,6 +47,7 @@ export class AppModule {
         BillingModule,
         WatchtowerModule,
         DataIngestionModule,
+        ImportsModule,
         MarketModule,
         KnowledgeModule,
         LlmModule,

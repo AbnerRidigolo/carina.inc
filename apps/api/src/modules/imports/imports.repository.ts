@@ -2,7 +2,8 @@
  * SQL/Prisma das importações de arquivo (import_job e import_file), sempre sob o
  * TenantPrismaService (RLS por tenant e cliente). As escritas do upload recebem a `tx` do serviço,
  * com o cliente já fixado; as leituras abrem a própria transação (também com o cliente fixado).
- * Os métodos do worker (claim/finish/limpeza) entram aqui, na Task 10.
+ * O worker usa `claim`/`touchProgress`/`finish` com o cliente fixado; a limpeza usa
+ * `expireFiles`/`failStuck` só com o tenant fixado (todos os clientes dele).
  */
 import {
   ImportStatsSchema,
@@ -17,6 +18,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { TenantContext } from "../../core/context/tenant-context.js";
 import { TenantPrismaService } from "../../core/database/tenant-prisma.service.js";
 import type { Prisma } from "../../generated/prisma/client.js";
+import type { ClientRef } from "../tenancy/clients.service.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -53,6 +55,28 @@ const VIEW_SELECT = {
 } as const;
 
 type ViewRow = Prisma.ImportJobGetPayload<{ select: typeof VIEW_SELECT }>;
+
+/** Job tomado pelo worker: o que o parse e a gravação precisam (opções ainda não validadas). */
+export interface ClaimedJob {
+  job: { id: string; format: ImportFormat; options: unknown; client: ClientRef };
+  bytes: Uint8Array;
+}
+
+export interface JobOutcome {
+  status: "done" | "failed";
+  failureCode: ImportFailureCode | null;
+  stats: ImportStats;
+  errors: ImportRowError[];
+}
+
+/** Job fechado pela limpeza (para o evento `import.finished`). */
+export interface ClosedJob {
+  id: string;
+  clientId: string;
+}
+
+/** Máximo de jobs fechados por passo da limpeza; o resto fica para o próximo tick. */
+export const CLEANUP_BATCH = 500;
 
 /** Linha do banco → contrato público. `stats` de jobs ainda sem parse completa com zeros. */
 export function toView(row: ViewRow): ImportJobView {
@@ -155,15 +179,18 @@ export class ImportsRepository {
     });
   }
 
-  /** Auditoria da criação: só rótulos fixos, nunca o nome nem o conteúdo do arquivo. */
-  async insertAudit(tx: Tx): Promise<void> {
+  /**
+   * Auditoria (`import.created`, `import.finished:<status>`): só rótulos fixos, nunca o nome nem
+   * o conteúdo do arquivo.
+   */
+  async insertAudit(tx: Tx, query = "import.created"): Promise<void> {
     const { tenantId, clientId } = this.pinned();
     await tx.auditEvent.create({
       data: {
         tenantId,
         clientId,
         channel: "import",
-        query: "import.created",
+        query,
         agents: [],
         responseDigest: null,
         flags: [],
@@ -171,6 +198,132 @@ export class ImportsRepository {
       },
       select: { id: true },
     });
+  }
+
+  /**
+   * Toma o job para o worker: `queued` → `parsing` (UPDATE condicional, atômico: duas entregas
+   * do mesmo evento não tomam o job duas vezes) e lê os bytes e o cliente. `null` se o job não
+   * está `queued`, não tem bytes, ou não é do cliente fixado: não há o que fazer.
+   */
+  async claim(jobId: string): Promise<ClaimedJob | null> {
+    return this.db.tx(async (tx) => {
+      const rows = await tx.$queryRaw<{ format: string; options: unknown; client_id: string }[]>`
+        UPDATE import_job SET status = 'parsing', progress_at = now(), updated_at = now()
+        WHERE id = ${jobId}::uuid AND status = 'queued'
+          AND EXISTS (SELECT 1 FROM import_file f WHERE f.import_job_id = import_job.id)
+        RETURNING format, options, client_id`;
+      const row = rows[0];
+      if (row === undefined) return null;
+      const file = await tx.importFile.findUniqueOrThrow({
+        where: { importJobId: jobId },
+        select: { bytes: true },
+      });
+      const client = await tx.client.findUniqueOrThrow({
+        where: { id: row.client_id },
+        select: { id: true, externalId: true },
+      });
+      return {
+        job: { id: jobId, format: row.format as ImportFormat, options: row.options, client },
+        bytes: file.bytes,
+      };
+    });
+  }
+
+  /** Marca avanço do job (`progress_at`); `false` se ele já não está `parsing` (foi tirado). */
+  async touchProgress(jobId: string): Promise<boolean> {
+    const res = await this.db.client.importJob.updateMany({
+      where: { id: jobId, status: "parsing" },
+      data: { progressAt: new Date(), updatedAt: new Date() },
+    });
+    return res.count === 1;
+  }
+
+  /**
+   * Fecha o job (`done`/`failed`) e apaga os bytes NA MESMA transação `tx`. Só fecha um job ainda
+   * `parsing`: se a limpeza o tirou do worker (stuck) e ele foi reenviado, os bytes novos ficam.
+   */
+  async finish(tx: Tx, jobId: string, outcome: JobOutcome): Promise<boolean> {
+    const res = await tx.importJob.updateMany({
+      where: { id: jobId, status: "parsing" },
+      data: {
+        status: outcome.status,
+        failureCode: outcome.failureCode,
+        stats: outcome.stats,
+        errors: outcome.errors as Prisma.InputJsonValue,
+        progressAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+    if (res.count !== 1) return false;
+    await tx.importFile.deleteMany({ where: { importJobId: jobId } });
+    return true;
+  }
+
+  /**
+   * Limpeza, com só o tenant fixado: apaga os `import_file` criados antes de `olderThan` e marca
+   * `failed`/`expired` os jobs deles que ainda estavam `queued`/`parsing` (com auditoria), numa
+   * transação. O `import_job` nunca é apagado (o cursor da lista depende dele).
+   */
+  async expireFiles(olderThan: Date): Promise<ClosedJob[]> {
+    return this.db.tx(async (tx) => {
+      const rows = await tx.$queryRaw<{ id: string; client_id: string }[]>`
+        WITH old AS (
+          SELECT import_job_id FROM import_file
+          WHERE created_at < ${olderThan.toISOString()}::timestamptz
+          ORDER BY created_at LIMIT ${CLEANUP_BATCH} FOR UPDATE SKIP LOCKED
+        ), gone AS (
+          DELETE FROM import_file f USING old WHERE f.import_job_id = old.import_job_id
+          RETURNING f.import_job_id
+        )
+        UPDATE import_job j
+        SET status = 'failed', failure_code = 'expired', updated_at = now()
+        FROM gone WHERE j.id = gone.import_job_id AND j.status IN ('queued', 'parsing')
+        RETURNING j.id, j.client_id`;
+      return this.closed(tx, rows);
+    });
+  }
+
+  /**
+   * Limpeza, com só o tenant fixado: jobs `parsing` sem progresso desde antes de `olderThan` →
+   * `failed`/`stuck`, com os bytes apagados e auditoria, numa transação.
+   */
+  async failStuck(olderThan: Date): Promise<ClosedJob[]> {
+    return this.db.tx(async (tx) => {
+      const rows = await tx.$queryRaw<{ id: string; client_id: string }[]>`
+        WITH stuck AS (
+          SELECT id FROM import_job
+          WHERE status = 'parsing' AND progress_at < ${olderThan.toISOString()}::timestamptz
+          ORDER BY progress_at LIMIT ${CLEANUP_BATCH} FOR UPDATE SKIP LOCKED
+        ), closed AS (
+          UPDATE import_job j
+          SET status = 'failed', failure_code = 'stuck', updated_at = now()
+          FROM stuck WHERE j.id = stuck.id
+          RETURNING j.id, j.client_id
+        ), gone AS (
+          DELETE FROM import_file f USING closed WHERE f.import_job_id = closed.id
+        )
+        SELECT id, client_id FROM closed`;
+      return this.closed(tx, rows);
+    });
+  }
+
+  /** Auditoria dos jobs fechados pela limpeza, na transação dela. */
+  private async closed(tx: Tx, rows: { id: string; client_id: string }[]): Promise<ClosedJob[]> {
+    if (rows.length === 0) return [];
+    const { tenantId } = TenantContext.current();
+    await tx.auditEvent.createMany({
+      data: rows.map((r) => ({
+        tenantId,
+        clientId: r.client_id,
+        channel: "import",
+        query: "import.finished:failed",
+        agents: [],
+        responseDigest: null,
+        flags: [],
+        durationMs: 0,
+      })),
+    });
+    return rows.map((r) => ({ id: r.id, clientId: r.client_id }));
   }
 
   /** Job do cliente fixado (RLS); `null` se não existe nele. */

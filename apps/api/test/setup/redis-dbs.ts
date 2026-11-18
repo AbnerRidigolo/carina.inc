@@ -29,6 +29,7 @@ export const REDIS_DBS = {
     "limits/limits.int.spec.ts": 12,
     "llm/provider-limiter.int.spec.ts": 13,
     "knowledge/knowledge.int.spec.ts": 14,
+    "imports/imports.int.spec.ts": 15,
   },
   e2e: {
     "chat/chat.e2e.spec.ts": 1,

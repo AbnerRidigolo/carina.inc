@@ -7,7 +7,8 @@
 //   tsv, índices HNSW e as FKs compostas com coluna opcional (usage_record.client_id,
 //   audit_event.client_id, kg_relation.chunk_id), que aqui aparecem como relações simples.
 //   RLS, grants e funções ficam em migrations/0002_rls; a FK composta de decided_by_key_id está em
-//   0003_inbox_integrity e a função active_tenant_ids em 0004_reconciliation.
+//   0003_inbox_integrity, a função active_tenant_ids em 0004_reconciliation e
+//   import_cleanup_tenant_ids em 0008_import_cleanup.
 // - FKs compostas (tenant_id, client_id, …) impedem que uma linha aponte para o cliente
 //   ou a entidade de outro tenant/cliente, mesmo que a aplicação erre o id.
 //
@@ -279,6 +280,8 @@ model ImportJob {
   /// alvo da FK composta de import_file
   @@unique([tenantId, clientId, id])
   @@index([tenantId, clientId])
+  /// limpeza de jobs parados em parsing
+  @@index([status, progressAt])
   @@map("import_job")
 }
 

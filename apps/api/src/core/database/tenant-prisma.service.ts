@@ -109,6 +109,19 @@ export class TenantPrismaService {
   }
 
   /**
+   * Ids dos tenants com importação a limpar (`import_cleanup_tenant_ids()`, SECURITY DEFINER,
+   * migrations/0008): import_file criado antes de `filesBefore` ou import_job em `parsing` sem
+   * progresso desde antes de `stuckBefore`. Mesmo desenho de `activeTenantIds`: só ids, e cada
+   * tenant é tratado depois sob `TenantContext.run`.
+   */
+  async importCleanupTenantIds(filesBefore: Date, stuckBefore: Date): Promise<string[]> {
+    const rows = await this.base.$queryRaw<{ id: string }[]>`
+      SELECT import_cleanup_tenant_ids(
+        ${filesBefore.toISOString()}::timestamptz, ${stuckBefore.toISOString()}::timestamptz) AS id`;
+    return rows.map((r) => r.id);
+  }
+
+  /**
    * Transação interativa com o contexto atual fixado antes de `fn`. O contexto é lido na chamada
    * (corpo síncrono do método async); `withClient` dentro de `fn` não muda o `tx`. Todo o
    * trabalho de `fn` usa a mesma conexão e o mesmo contexto.

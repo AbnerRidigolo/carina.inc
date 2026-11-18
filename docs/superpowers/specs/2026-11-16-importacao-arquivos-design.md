@@ -93,9 +93,10 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
   fotografia; obrigatório porque a planilha não traz uma data confiável nas células e o nome do arquivo
   não é dado; a web sugere a data de hoje). Os campos extras são validados por um schema Zod em
   `packages/shared` e guardados no job (`import_job.options`, JSONB) para o worker.
-- Recusas síncronas (problem+json, nada gravado, nada cobrado): arquivo vazio ou maior que 10 MB (413),
+- Recusas síncronas (problem+json, nada gravado, nada cobrado): arquivo vazio (422) ou maior que 10 MB (413),
   formato não reconhecido ou incoerente com `format` (422), CSV sem mapeamento (422), mais de 5 jobs
-  `queued`/`parsing` do mesmo cliente (429).
+  `queued`/`parsing` do mesmo cliente (429, `Retry-After: 30`; o teto vale também para o reenvio de um
+  job `failed`).
 - Mesmo SHA-256 para o mesmo cliente (a unicidade já existe em
   `import_job (tenant_id, client_id, file_sha256)`):
   - job `queued`, `parsing` ou `done` → **200** com o job existente, sem criar outro e sem cobrar;

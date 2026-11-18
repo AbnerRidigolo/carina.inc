@@ -20,7 +20,10 @@
  * já foi gravado, e ACK: não há reentrega (os bytes podem já ter saído; o usuário reenvia, e o
  * upsert idempotente não duplica). `touchProgress` e `finish` levam o token do claim: se a limpeza
  * tirou o job do worker (`stuck`), mesmo que um reenvio já o tenha posto de novo em `parsing`
- * com outro worker, `touchProgress` → false e o worker para de gravar sem fechar nada.
+ * com outro worker, `touchProgress` → false e o worker antigo não fecha o job nem grava mais
+ * nada. Limite conhecido: um worker que trava e volta depois de o job ser retomado ainda pode
+ * gravar (e cobrar) no máximo UM lote em andamento; a gravação é upsert idempotente, então o
+ * efeito é só o lote regravado.
  *
  * LGPD: logs e eventos levam só ids, contadores e códigos fixos. Nunca `stats.ignored` (as chaves
  * podem ter texto de célula), linhas, valores ou descrições; de um erro, só nome e código (a

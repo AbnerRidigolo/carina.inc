@@ -20,6 +20,8 @@ import { SyncWorker } from "../../src/modules/data-ingestion/sync.worker.js";
 import { MarketService } from "../../src/modules/market/market.service.js";
 import { MarketController } from "../../src/modules/market/market.controller.js";
 import { HealthController } from "../../src/modules/health/health.controller.js";
+import { ImportCleanupJob } from "../../src/modules/imports/import-cleanup.job.js";
+import { ImportWorker } from "../../src/modules/imports/import.worker.js";
 import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js";
 import { ResumeWorker } from "../../src/modules/orchestrator/resume.worker.js";
 import { WorkerModule } from "../../src/worker.module.js";
@@ -80,17 +82,19 @@ describe("grafo de módulos de produção", () => {
     vi.restoreAllMocks();
   });
 
-  it("AppModule com WORKERS_ENABLED=true: os três workers ligam, mais o broadcast e o gateway", async () => {
+  it("AppModule com WORKERS_ENABLED=true: os workers ligam, mais o broadcast e o gateway", async () => {
     const groups = stubConsume();
     ref = await boot(AppModule.register(), "true");
 
     expect(ref.get(SyncWorker).running).toBe(true);
     expect(ref.get(ResumeWorker).running).toBe(true);
     expect(ref.get(ReconciliationJob).running).toBe(true);
+    expect(ref.get(ImportWorker).running).toBe(true);
+    expect(ref.get(ImportCleanupJob).running).toBe(true);
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(ref.get(ChatGateway)).toBeInstanceOf(ChatGateway);
     expect(ref.get(HealthController)).toBeInstanceOf(HealthController);
-    expect(groups.sort()).toEqual(["jobs:resumers", "jobs:sync"]);
+    expect(groups.sort()).toEqual(["jobs:imports", "jobs:resumers", "jobs:sync"]);
   });
 
   it("AppModule com WORKERS_ENABLED=false: providers existem, mas nenhum worker liga", async () => {
@@ -100,6 +104,8 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(SyncWorker).running).toBe(false);
     expect(ref.get(ResumeWorker).running).toBe(false);
     expect(ref.get(ReconciliationJob).running).toBe(false);
+    expect(ref.get(ImportWorker).running).toBe(false);
+    expect(ref.get(ImportCleanupJob).running).toBe(false);
     // O broadcast da inbox é por processo HTTP (repassa aos sockets dele), não é worker.
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(groups).toEqual([]);
@@ -118,14 +124,16 @@ describe("grafo de módulos de produção", () => {
     );
   });
 
-  it("WorkerModule: os três workers ligam; nenhum controller, gateway ou broadcast", async () => {
+  it("WorkerModule: os workers ligam; nenhum controller, gateway ou broadcast", async () => {
     const groups = stubConsume();
     ref = await boot(WorkerModule, "true");
 
     expect(ref.get(SyncWorker).running).toBe(true);
     expect(ref.get(ResumeWorker).running).toBe(true);
     expect(ref.get(ReconciliationJob).running).toBe(true);
-    expect(groups.sort()).toEqual(["jobs:resumers", "jobs:sync"]);
+    expect(ref.get(ImportWorker).running).toBe(true);
+    expect(ref.get(ImportCleanupJob).running).toBe(true);
+    expect(groups.sort()).toEqual(["jobs:imports", "jobs:resumers", "jobs:sync"]);
     expect(controllersOf(ref)).toEqual([]);
     expect(ref.get(MarketService)).toBeInstanceOf(MarketService);
     expect(() => ref?.get(MarketController, { strict: false })).toThrow();

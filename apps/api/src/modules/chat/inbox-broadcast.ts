@@ -12,6 +12,9 @@
  *  3. o `clientId` (externalId) da aprovação lida precisa ser o do assinante.
  * Depois vira o `ChatEvent` correspondente (`approval_required` / `approval_executed`, este com o
  * resultado gravado em `executed_action` quando `succeeded`).
+ * Os eventos `import.progress` / `import.finished` (publicados pelo ImportWorker) não leem o banco:
+ * viram `import_progress` / `import_finished` direto e vão só aos assinantes da chave
+ * `(tenantId, clientId)` do evento, na mesma cadeia por chave (progresso nunca passa o término).
  *
  * Ordem: as leituras de uma mesma chave são encadeadas (um `approval.executed` nunca chega antes
  * do `approval.created` da mesma aprovação); chaves diferentes não se bloqueiam.
@@ -43,6 +46,8 @@ export interface InboxSubscriber {
 }
 
 type InboxEvent = Extract<StreamEvent, { type: "approval.created" | "approval.executed" }>;
+
+type ImportStreamEvent = Extract<StreamEvent, { type: "import.progress" | "import.finished" }>;
 
 const keyOf = (tenantId: string, clientId: string) =>
   `${tenantId.toLowerCase()}:${clientId.toLowerCase()}`;
@@ -105,15 +110,52 @@ export class InboxBroadcast implements OnModuleInit, OnModuleDestroy {
   }
 
   private dispatch(e: StreamEvent): void {
-    if (e.type !== "approval.created" && e.type !== "approval.executed") return;
+    if (
+      e.type !== "approval.created" &&
+      e.type !== "approval.executed" &&
+      e.type !== "import.progress" &&
+      e.type !== "import.finished"
+    ) {
+      return;
+    }
     const key = keyOf(e.tenantId, e.clientId);
     if (!this.subscribers.get(key)?.size) return;
     const previous = this.chains.get(key) ?? Promise.resolve();
-    const next = previous.then(() => this.deliver(key, e));
+    const next = previous.then(() =>
+      e.type === "import.progress" || e.type === "import.finished"
+        ? this.deliverImport(key, e)
+        : this.deliver(key, e),
+    );
     this.chains.set(key, next);
     void next.finally(() => {
       if (this.chains.get(key) === next) this.chains.delete(key);
     });
+  }
+
+  /** Sem leitura de banco: o evento já traz tudo. Nunca rejeita (a cadeia da chave segue). */
+  private deliverImport(key: string, e: ImportStreamEvent): Promise<void> {
+    const event: ChatEvent =
+      e.type === "import.progress"
+        ? {
+            type: "import_progress",
+            importJobId: e.importJobId,
+            stage: e.stage,
+            processed: e.processed,
+            total: e.total,
+          }
+        : { type: "import_finished", importJobId: e.importJobId, status: e.status };
+    for (const s of [...(this.subscribers.get(key) ?? [])]) {
+      try {
+        s.send(event);
+      } catch (err) {
+        this.logger.warn({
+          msg: "Falha ao entregar evento de importação a um socket",
+          err,
+          importJobId: e.importJobId,
+        });
+      }
+    }
+    return Promise.resolve();
   }
 
   /** Nunca rejeita (a cadeia da chave segue). */

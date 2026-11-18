@@ -272,7 +272,7 @@ model ImportJob {
 
   client Client       @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
   /// no banco há no máximo um (import_job_id é a PK de import_file)
-  files  ImportFile[]
+  file   ImportFile[]
 
   /// o mesmo arquivo não é processado duas vezes
   @@unique([tenantId, clientId, fileSha256])
@@ -291,7 +291,7 @@ model ImportFile {
   bytes       Bytes
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  job ImportJob @relation(fields: [tenantId, clientId, importJobId], references: [tenantId, clientId, id], onDelete: Cascade)
+  job ImportJob @relation(fields: [tenantId, clientId, importJobId], references: [tenantId, clientId, id], onDelete: Cascade, map: "import_file_import_job_fkey")
 
   @@index([createdAt])
   @@map("import_file")

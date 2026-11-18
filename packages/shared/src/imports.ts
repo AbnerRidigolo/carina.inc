@@ -120,10 +120,13 @@ export type ImportFailureCode = z.infer<typeof ImportFailureCodeSchema>;
 
 export const MAX_IMPORT_ERRORS = 100;
 
+/** `fileName` exibido: só o nome-base, no máximo 120 caracteres. */
+export const MAX_IMPORT_FILE_NAME = 120;
+
 export const ImportJobViewSchema = z.object({
   id: z.uuid(),
   format: ImportFormatSchema,
-  fileName: z.string(),
+  fileName: z.string().max(MAX_IMPORT_FILE_NAME),
   status: ImportStatusSchema,
   failureCode: ImportFailureCodeSchema.nullable(),
   stats: ImportStatsSchema,

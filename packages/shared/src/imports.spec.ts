@@ -111,3 +111,23 @@ describe("ImportJobViewSchema", () => {
     expect(ImportJobListSchema.safeParse({ items: [job] }).success).toBe(false);
   });
 });
+
+describe("ImportJobViewSchema.fileName", () => {
+  const view = {
+    id: "0b6f4c0e-5d3a-4a52-9d57-1f1d9d6a7f11",
+    format: "ofx",
+    fileName: "a".repeat(120),
+    status: "queued",
+    failureCode: null,
+    stats: { rowsRead: 0, positions: 0, transactions: 0, errorRows: 0, ignored: {} },
+    errors: [],
+    createdAt: "2026-11-16T10:00:00.000Z",
+    updatedAt: "2026-11-16T10:00:00.000Z",
+  };
+  it("aceita 120 caracteres e recusa 121", () => {
+    expect(ImportJobViewSchema.safeParse(view).success).toBe(true);
+    expect(ImportJobViewSchema.safeParse({ ...view, fileName: "a".repeat(121) }).success).toBe(
+      false,
+    );
+  });
+});

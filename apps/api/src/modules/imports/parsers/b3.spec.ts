@@ -130,6 +130,23 @@ describe("parseB3", () => {
     expect(r.stats.errorRows).toBe(1);
   });
 
+  it("instituição com linha recusada fica fora da substituição (posições antigas mantidas)", () => {
+    const r = parseB3(fixture("b3-posicao-linha-com-erro.xlsx"), { asOf: ASOF });
+    expect(r.failure).toBeUndefined();
+    expect(r.errors).toMatchObject([{ row: 2, code: "formula_without_value" }]);
+    expect(r.positions.map((p) => p.assetCode ?? p.name)).toEqual(["VALE3", "Tesouro Selic 2029"]);
+    expect(r.positionInstitutions).toEqual(["XP INVESTIMENTOS CCTVM S/A", "Banco do Brasil"]);
+    expect(r.partialInstitutions).toEqual(["XP INVESTIMENTOS CCTVM S/A"]);
+  });
+
+  it("linha recusada sem instituição legível protege todas as instituições", () => {
+    const r = parseB3(fixture("b3-posicao-sem-instituicao.xlsx"), { asOf: ASOF });
+    expect(r.errors).toMatchObject([{ row: 2, code: "missing_field", field: "Instituição" }]);
+    expect(r.partialInstitutions).toEqual(["XP INVESTIMENTOS CCTVM S/A", "Banco do Brasil"]);
+    const ok = parseB3(fixture("b3-posicao.xlsx"), { asOf: ASOF });
+    expect(ok.partialInstitutions).toEqual([]);
+  });
+
   it("1001 posições estouram o limite", () => {
     const r = parseB3(fixture("b3-mil-posicoes.xlsx"), { asOf: ASOF });
     expect(r.failure).toBe("limit_exceeded");

@@ -476,6 +476,26 @@ describe("IngestionService: gravação com cliente resolvido e substituição de
       expect(await events()).toBe(1);
     });
 
+    it("keepInstitutions: grava, mas não apaga nada dessas instituições", async () => {
+      await reset(A.tenantId, aRef.id);
+      await seedRow(A.tenantId, aRef.id, "import", "petr4", "XP", "2026-10-01");
+      await seedRow(A.tenantId, aRef.id, "import", "vendido", "NuInvest", "2026-10-01");
+      const res = await asTenant(A.tenantId, () =>
+        svc.replaceImportedPositions(aRef, {
+          institutions: ["XP", "NuInvest"],
+          keepInstitutions: ["XP"],
+          asOf: "2026-11-10",
+          items: [pos("vale3", "XP", "2026-11-10"), pos("novo", "NuInvest", "2026-11-10")],
+        }),
+      );
+      expect(res).toMatchObject({ stale: false, upserted: 2, removed: 1 });
+      expect((await rowsOf(A.tenantId, aRef.id)).map((r) => r.external_id)).toEqual([
+        "novo",
+        "petr4",
+        "vale3",
+      ]);
+    });
+
     it("fotografia mais antiga: stale, nada muda, nenhuma cobrança, nenhum evento", async () => {
       await reset(A.tenantId, aRef.id);
       await seedRow(A.tenantId, aRef.id, "import", "a", "XP", "2026-11-10");

@@ -273,6 +273,7 @@ export class ImportWorker
       if (asOf === undefined) throw new TypeError("Posições sem a data da fotografia");
       const res = await this.ingestion.replaceImportedPositions(job.client, {
         institutions: parsed.positionInstitutions ?? [],
+        keepInstitutions: parsed.partialInstitutions ?? [],
         asOf,
         items: parsed.positions,
       });

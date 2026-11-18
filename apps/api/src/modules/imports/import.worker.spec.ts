@@ -235,7 +235,7 @@ describe("ImportWorker.handle", () => {
     await s.worker.handle(event());
     expect(s.ingestion.replaceImportedPositions).toHaveBeenCalledWith(
       { id: CLIENT, externalId: "c1" },
-      { institutions: ["XP"], asOf: "2025-10-31", items: [pos(1), pos(2)] },
+      { institutions: ["XP"], keepInstitutions: [], asOf: "2025-10-31", items: [pos(1), pos(2)] },
     );
     expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, TOKEN, {
       status: "done",
@@ -243,6 +243,22 @@ describe("ImportWorker.handle", () => {
       stats: expect.objectContaining({ positions: 2, transactions: 1 }),
       errors: [],
     });
+  });
+
+  it("B3: instituição com linha recusada vai em keepInstitutions (posições antigas mantidas)", async () => {
+    const s = setup({ format: "b3_xlsx", options: { format: "b3_xlsx", asOf: "2025-10-31" } });
+    parseFileMock.mockResolvedValue(
+      parsed({
+        positions: [pos(1)],
+        positionInstitutions: ["XP", "BB"],
+        partialInstitutions: ["XP"],
+      }),
+    );
+    await s.worker.handle(event());
+    expect(s.ingestion.replaceImportedPositions).toHaveBeenCalledWith(
+      { id: CLIENT, externalId: "c1" },
+      { institutions: ["XP", "BB"], keepInstitutions: ["XP"], asOf: "2025-10-31", items: [pos(1)] },
+    );
   });
 
   it("B3 com fotografia mais antiga: todas as posições viram stale_snapshot; nada gravado → no_valid_rows", async () => {

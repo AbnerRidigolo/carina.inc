@@ -269,6 +269,40 @@ describe("Importação de arquivos: worker e limpeza (integração)", () => {
     expect(await count("usage_record")).toBe(2);
   });
 
+  it("B3: linha recusada (fórmula sem valor) não apaga a posição anterior do ativo; a instituição só recebe as válidas", async () => {
+    const { job } = await upload(fixture("xlsx", "b3-posicao-linha-com-erro.xlsx"), {
+      asOf: "2025-10-31",
+    });
+    const client = await clientId();
+    const insertPosition = (externalId: string, institution: string) =>
+      migratorSql(
+        `INSERT INTO position (tenant_id, client_id, source, external_id, institution, kind,
+           asset_class, name, value_brl, as_of)
+         VALUES ($1, $2, 'import', $3, $4, 'investment', 'acao', 'Ativo', 100, '2025-10-01')`,
+        [tenantId, client, externalId, institution],
+        { tenantId, clientId: client },
+      );
+    // PETR4 da importação anterior (a linha dele agora tem fórmula sem valor).
+    await insertPosition("b3:pos:petr4-anterior", "XP INVESTIMENTOS CCTVM S/A");
+    // Instituição sem linha recusada: continua sendo substituída.
+    await insertPosition("b3:pos:vendido", "Banco do Brasil");
+
+    await run(job.id);
+
+    const row = await jobRow(job.id);
+    expect(row.status).toBe("done");
+    expect(row.stats).toMatchObject({ positions: 2, errorRows: 1 });
+    expect(row.errors.map((e) => e.code)).toEqual(["formula_without_value"]);
+    const imported = (
+      await sql<{ external_id: string }>(
+        `SELECT external_id FROM position WHERE tenant_id = $1 AND source = 'import'`,
+      )
+    ).map((p) => p.external_id);
+    expect(imported).toHaveLength(3);
+    expect(imported).toContain("b3:pos:petr4-anterior");
+    expect(imported).not.toContain("b3:pos:vendido");
+  });
+
   it("B3 com fotografia mais antiga que a gravada: stale_snapshot em todas, nada substituído → no_valid_rows", async () => {
     const { job } = await upload(fixture("xlsx", "b3-posicao.xlsx"), { asOf: "2025-10-01" });
     const client = await clientId();

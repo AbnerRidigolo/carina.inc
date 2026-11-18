@@ -196,6 +196,30 @@ writeFileSync(
     ]),
   ]),
 );
+// Linha com erro (fórmula sem cache) numa instituição que também tem linha válida.
+writeFileSync(
+  "b3-posicao-linha-com-erro.xlsx",
+  pacote([
+    aba("Acoes", [
+      posCab,
+      ["PETR4 - PETROBRAS PN", "XP INVESTIMENTOS CCTVM S/A", "PETR4", 100, { f: "D2*38,5" }],
+      ["VALE3 - VALE ON", "XP INVESTIMENTOS CCTVM S/A", "VALE3", 50, "R$ 3.100,00"],
+    ]),
+    tesouro,
+  ]),
+);
+// Linha recusada sem instituição: não dá para saber de quem é.
+writeFileSync(
+  "b3-posicao-sem-instituicao.xlsx",
+  pacote([
+    aba("Acoes", [
+      posCab,
+      ["PETR4 - PETROBRAS PN", null, "PETR4", 100, 3850.5],
+      ["VALE3 - VALE ON", "XP INVESTIMENTOS CCTVM S/A", "VALE3", 50, "R$ 3.100,00"],
+    ]),
+    tesouro,
+  ]),
+);
 writeFileSync(
   "b3-mil-posicoes.xlsx",
   pacote([

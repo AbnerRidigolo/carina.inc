@@ -226,10 +226,17 @@ export class IngestionService {
    * numa transação só (spec §5.5): fotografia mais antiga que a gravada → `stale`, sem gravar,
    * cobrar nem publicar; senão apaga as importadas dessas instituições que não estão em `items`,
    * faz o upsert e cobra um lote. Posições de `api` e `synthetic` nunca são tocadas.
+   * `keepInstitutions` (subconjunto de `institutions`): só recebem o upsert, nada é apagado delas
+   * (o arquivo teve linha recusada dessa instituição, então a fotografia dela está incompleta).
    */
   async replaceImportedPositions(
     client: ClientRef,
-    input: { institutions: readonly string[]; asOf: string; items: readonly NormalizedPosition[] },
+    input: {
+      institutions: readonly string[];
+      keepInstitutions?: readonly string[];
+      asOf: string;
+      items: readonly NormalizedPosition[];
+    },
   ): Promise<IngestResult & { removed: number; stale: boolean }> {
     assertBatchSize(input.items);
     assertDay("asOf", input.asOf);
@@ -247,12 +254,14 @@ export class IngestionService {
     }
     const rows = dedupeByExternalId(input.items);
     const institutions = [...input.institutions];
+    const keep = new Set(input.keepInstitutions ?? []);
+    const replaced = institutions.filter((i) => !keep.has(i));
     const done = await this.commitBatch(client, "import", async (tx) => {
       await this.repo.lockImportedPositions(tx);
       const latest = await this.repo.latestImportedAsOf(tx, institutions);
       if (latest !== null && latest > input.asOf) return null;
       const removed = await this.repo.deleteImportedPositionsExcept(tx, {
-        institutions,
+        institutions: replaced,
         keepExternalIds: rows.map((r) => r.externalId),
       });
       const upserted = await this.repo.upsertPositions(tx, "import", rows);

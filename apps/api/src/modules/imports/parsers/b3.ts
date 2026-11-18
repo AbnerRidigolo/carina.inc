@@ -25,7 +25,15 @@ import { type RowErrorCode, RowErrors } from "./row-errors.js";
 import { ImportLimitError, PARSE_LIMITS, type ParseResult } from "./types.js";
 import { type CellValue, readWorkbook, XlsxUnreadableError } from "./xlsx-reader.js";
 
-export type B3Result = ParseResult & { positionInstitutions: string[] };
+/**
+ * `partialInstitutions`: instituições com alguma linha de posição recusada. Ficam fora da
+ * substituição (as posições importadas antes não são apagadas): a linha recusada pode ser de um
+ * ativo que continua na carteira. Linha recusada sem instituição legível protege todas.
+ */
+export type B3Result = ParseResult & {
+  positionInstitutions: string[];
+  partialInstitutions: string[];
+};
 
 const SEP = "\u001f";
 const ACCOUNT = "B3";
@@ -77,6 +85,7 @@ function failed(failure: NonNullable<ParseResult["failure"]>): B3Result {
     stats: { rowsRead: 0, positions: 0, transactions: 0, errorRows: 0, ignored: {} },
     failure,
     positionInstitutions: [],
+    partialInstitutions: [],
   };
 }
 
@@ -147,6 +156,8 @@ interface Ctx {
   transactions: NormalizedTransaction[];
   ignored: Record<string, number>;
   institutions: string[];
+  /** Instituições com linha de posição recusada; `null` = alguma sem instituição legível. */
+  rejected: Set<string> | null;
   positionKeys: Map<string, number>;
   asOf: string;
   rowsRead: number;
@@ -252,31 +263,36 @@ function readPositions(
     if (ctx.rowsRead % 1024 === 0 && Date.now() > ctx.deadline) throw new ImportLimitError();
     const n = r + 1;
     const cell = (name: string): CellValue | undefined => row[idx[name] ?? -1];
+    const institution = textOf(cell("Instituição"));
+    const reject = (code: RowErrorCode, field?: string): void => {
+      ctx.errors.add(n, code, field);
+      if (!institution) ctx.rejected = null;
+      else ctx.rejected?.add(institution);
+    };
 
     const bad = formulaField(row, idx);
     if (bad !== undefined) {
-      ctx.errors.add(n, "formula_without_value", bad);
+      reject("formula_without_value", bad);
       continue;
     }
     const name = textOf(cell("Produto"));
-    const institution = textOf(cell("Instituição"));
     const assetCode = code === undefined ? "" : textOf(row[code]);
     if (!name) {
-      ctx.errors.add(n, "missing_field", "Produto");
+      reject("missing_field", "Produto");
       continue;
     }
     if (!institution) {
-      ctx.errors.add(n, "missing_field", "Instituição");
+      reject("missing_field", "Instituição");
       continue;
     }
     const value = parseMoney(cell("Valor Atualizado"));
     if ("error" in value) {
-      ctx.errors.add(n, value.error, "Valor Atualizado");
+      reject(value.error, "Valor Atualizado");
       continue;
     }
     const qty = parseQuantity(cell("Quantidade"));
     if ("error" in qty) {
-      ctx.errors.add(n, qty.error, "Quantidade");
+      reject(qty.error, "Quantidade");
       continue;
     }
     let assetClass = kind.assetClass;
@@ -302,7 +318,7 @@ function readPositions(
       asOf: ctx.asOf,
     });
     if (!parsed.success) {
-      ctx.errors.add(n, "schema");
+      reject("schema");
       continue;
     }
     ctx.positions.push(parsed.data);
@@ -455,6 +471,7 @@ export function parseB3(bytes: Uint8Array, opts: { asOf?: string }): B3Result {
     transactions: [],
     ignored: {},
     institutions: [],
+    rejected: new Set(),
     positionKeys: new Map(),
     asOf: opts.asOf ?? "",
     rowsRead: 0,
@@ -515,5 +532,6 @@ export function parseB3(bytes: Uint8Array, opts: { asOf?: string }): B3Result {
     errors: ctx.errors.list(),
     stats,
     positionInstitutions: ctx.institutions,
+    partialInstitutions: ctx.institutions.filter((i) => ctx.rejected?.has(i) ?? true),
   };
 }

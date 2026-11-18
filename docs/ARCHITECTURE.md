@@ -317,7 +317,8 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
   novo; reentrega ou segundo consumidor não tomam o job. O parse roda numa `worker_threads` que é
   encerrada aos 30 s (`limit_exceeded`). Posições da B3 substituem as `source = "import"` das
   instituições do arquivo (por instituição, sob advisory lock por cliente; fotografia mais antiga
-  que a gravada não substitui nada e as linhas viram `stale_snapshot`); as transações vão em lotes
+  que a gravada não substitui nada e as linhas viram `stale_snapshot`; instituição com linha de
+  posição recusada só recebe o upsert, sem apagar nada); as transações vão em lotes
   de 1000 pelo `IngestionService` (cada lote é um `data_ingestion` de R$ 0,05 e dispara o
   `data.ingested` do Sync). `touchProgress` e `finish` só valem com o `claim_token` do claim.
 - **Eventos**. `import.requested { importJobId }` em `jobs`; `import.progress { importJobId, stage,

@@ -10,8 +10,11 @@ import { parseCsv } from "./parsers/csv.js";
 import { parseOfx } from "./parsers/ofx.js";
 import type { ParseResult } from "./parsers/types.js";
 
-/** Resultado do parse; `positionInstitutions` só no XLSX da B3. */
-export type ParsedFile = ParseResult & { positionInstitutions?: string[] };
+/** Resultado do parse; `positionInstitutions` e `partialInstitutions` só no XLSX da B3. */
+export type ParsedFile = ParseResult & {
+  positionInstitutions?: string[];
+  partialInstitutions?: string[];
+};
 
 export function runParser(
   format: ImportFormat,

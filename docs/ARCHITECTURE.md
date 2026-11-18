@@ -291,7 +291,7 @@ web/tenant ── POST /imports (multipart) ──► api
         + INSERT import_file (bytes)  [mesma transação, RLS]
         → XADD jobs import.requested  → 202 {job}
 worker: consome import.requested → UPDATE status queued→parsing (claim atômico, claim_token novo)
-        → lê bytes → parser (worker_threads, 30 s) → itens normalizados + erros por linha
+        → lê bytes → parser (worker_threads, 30 s, 512 MB) → itens normalizados + erros por linha
         → IngestionService em lotes de 1000 (source "import") → stats/errors
         → status done|failed + DELETE import_file  [mesma transação, com o claim_token]
         → publica import.progress / import.finished em inbox.events → WebSocket do tenant+cliente
@@ -315,7 +315,7 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
 - **Worker** (`ImportWorker`, processo `worker`). Consome `import.requested` no grupo `imports` do
   stream `jobs`. O claim (`queued` → `parsing`) é um `UPDATE` atômico que grava um `claim_token`
   novo; reentrega ou segundo consumidor não tomam o job. O parse roda numa `worker_threads` que é
-  encerrada aos 30 s (`limit_exceeded`). Posições da B3 substituem as `source = "import"` das
+  encerrada aos 30 s e tem a heap limitada a 512 MB (os dois viram `limit_exceeded`). Posições da B3 substituem as `source = "import"` das
   instituições do arquivo (por instituição, sob advisory lock por cliente; fotografia mais antiga
   que a gravada não substitui nada e as linhas viram `stale_snapshot`; instituição com linha de
   posição recusada só recebe o upsert, sem apagar nada); as transações vão em lotes

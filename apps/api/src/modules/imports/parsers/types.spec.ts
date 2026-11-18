@@ -18,6 +18,7 @@ describe("types", () => {
       maxPositions: 1000,
       maxStoredErrors: 100,
       parseTimeoutMs: 30_000,
+      maxThreadHeapMb: 512,
     });
   });
 });

@@ -106,7 +106,7 @@ O tenant (ou o investidor, pelo painel "Importar arquivo" da web) sobe um arquiv
 dados entram na carteira sem custo de agregador: **OFX** (extrato bancário e de cartão), **CSV**
 (com mapeamento de colunas ou preset) e **XLSX da Área do Investidor B3**. Escopo `data:write`
 para enviar e `chat` para consultar. O upload responde 202 com um job; um worker faz o parse numa
-thread isolada (limite de 30 s), grava pelo mesmo caminho da ingestão (upsert idempotente,
+thread isolada (limites de 30 s e 512 MB de heap), grava pelo mesmo caminho da ingestão (upsert idempotente,
 `source: "import"`, cada lote de até 1.000 itens cobrado como `data_ingestion` de R$ 0,05) e o
 progresso chega pelo WebSocket. Os bytes do arquivo saem do banco na mesma transação que fecha o
 job.

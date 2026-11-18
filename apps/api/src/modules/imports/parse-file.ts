@@ -3,7 +3,9 @@
  * (uma planilha honesta de 49 MB descompactada leva segundos; uma hostil, mais), então roda numa
  * `worker_threads` Worker, uma por arquivo, encerrada à força (`terminate`) ao estourar
  * PARSE_LIMITS.parseTimeoutMs (30 s) → `failure: "limit_exceeded"`. Um timer cooperativo na
- * mesma thread não serviria: ele só dispara depois que o parser devolve o controle.
+ * mesma thread não serviria: ele só dispara depois que o parser devolve o controle. A heap da
+ * thread é limitada a PARSE_LIMITS.maxThreadHeapMb (512 MB, `resourceLimits`): estourar
+ * (`ERR_WORKER_OUT_OF_MEMORY`) também vira `limit_exceeded`, sem derrubar o processo.
  *
  * - Os bytes são TRANSFERIDOS para a thread (sem cópia de até 10 MB): o `Uint8Array` do chamador
  *   fica destacado (vazio) depois da chamada. Se ele for uma vista parcial de um buffer maior, só
@@ -42,6 +44,8 @@ export interface ParseThreadSpec {
 export interface ParseFileOptions {
   /** Padrão: PARSE_LIMITS.parseTimeoutMs. */
   timeoutMs?: number;
+  /** Padrão: PARSE_LIMITS.maxThreadHeapMb. */
+  maxHeapMb?: number;
   thread?: ParseThreadSpec;
 }
 
@@ -117,6 +121,7 @@ export function parseFile(
   if (signal.aborted) return Promise.reject(new ParseAbortedError());
   const spec = opts.thread ?? defaultThread();
   const timeoutMs = opts.timeoutMs ?? PARSE_LIMITS.parseTimeoutMs;
+  const maxHeapMb = opts.maxHeapMb ?? PARSE_LIMITS.maxThreadHeapMb;
   const own = transferable(bytes);
   const request: ParseRequest = { format, bytes: own, options };
 
@@ -124,6 +129,7 @@ export function parseFile(
     const thread = new Worker(spec.filename, {
       workerData: request,
       transferList: [own.buffer],
+      resourceLimits: { maxOldGenerationSizeMb: maxHeapMb },
       ...(spec.eval === true ? { eval: true } : {}),
       ...(spec.execArgv ? { execArgv: spec.execArgv } : {}),
     });
@@ -153,6 +159,11 @@ export function parseFile(
       });
     });
     thread.once("error", (err: unknown) => {
+      // Estourar a heap é limite do arquivo, como o tempo: limit_exceeded, não erro interno.
+      if ((err as { code?: unknown } | null)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
+        settle(() => resolve(limitExceeded()));
+        return;
+      }
       settle(() => reject(new ParseThreadError(err instanceof Error ? err.name : "Error")));
     });
     thread.once("exit", (code: number) => {

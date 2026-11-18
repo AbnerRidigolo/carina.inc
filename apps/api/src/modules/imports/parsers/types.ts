@@ -35,4 +35,6 @@ export const PARSE_LIMITS = {
   maxPositions: 1000,
   maxStoredErrors: MAX_IMPORT_ERRORS,
   parseTimeoutMs: 30_000,
+  /** Heap (old generation) da worker thread do parse; estourar → `limit_exceeded`. */
+  maxThreadHeapMb: 512,
 } as const;

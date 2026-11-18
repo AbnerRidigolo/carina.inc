@@ -152,4 +152,21 @@ describe("parseFile (parse numa worker thread)", () => {
       }),
     ).rejects.toBeInstanceOf(ParseThreadError);
   });
+
+  it("thread que estoura a memória (ERR_WORKER_OUT_OF_MEMORY) → limit_exceeded, não erro", async () => {
+    const hog = {
+      filename: `const keep = []; for (;;) keep.push(new Array(1e5).fill({ a: keep.length }));`,
+      eval: true,
+    };
+    const r = await parseFile(
+      "ofx",
+      new Uint8Array([1]),
+      { format: "ofx" },
+      new AbortController().signal,
+      { thread: hog, maxHeapMb: 16 },
+    );
+    expect(r.failure).toBe("limit_exceeded");
+    expect(r.positions).toEqual([]);
+    expect(r.transactions).toEqual([]);
+  });
 });

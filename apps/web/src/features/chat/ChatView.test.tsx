@@ -181,6 +181,21 @@ describe("ChatView", () => {
     expect(screen.getAllByText(/<img src=x onerror="alert\(1\)">/).length).toBeGreaterThan(0);
   });
 
+  it("import_progress e import_finished do socket chegam ao barramento dos painéis", async () => {
+    const { socket, seen } = await mount();
+    const progress = {
+      type: "import_progress",
+      importJobId: "j1",
+      stage: "parsing",
+      processed: 5,
+      total: 10,
+    } as const;
+    const finished = { type: "import_finished", importJobId: "j1", status: "done" } as const;
+    emit(socket, progress, finished);
+    expect(seen).toContainEqual(progress);
+    expect(seen).toContainEqual(finished);
+  });
+
   it("thread_busy mostra mensagem clara e libera o campo", async () => {
     const { socket } = await mount();
     await ask(socket, "oi");

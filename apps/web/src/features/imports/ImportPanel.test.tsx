@@ -146,6 +146,21 @@ describe("ImportPanel", () => {
     expect(await screen.findByText("processando 50%")).toBeInTheDocument();
   });
 
+  it("job na fila que recebe import_progress passa a mostrar processando", async () => {
+    const { bus } = mount([job({ status: "queued" })]);
+    expect(await screen.findByText("na fila")).toBeInTheDocument();
+    act(() =>
+      bus.publish({
+        type: "import_progress",
+        importJobId: JOB_ID,
+        stage: "parsing",
+        processed: 500,
+        total: 1000,
+      }),
+    );
+    expect(await screen.findByText("processando 50%")).toBeInTheDocument();
+  });
+
   it("status na fila", async () => {
     mount([job({ status: "queued" })]);
     expect(await screen.findByText("na fila")).toBeInTheDocument();

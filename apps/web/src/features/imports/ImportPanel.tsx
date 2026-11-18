@@ -58,7 +58,8 @@ function describeUploadError(err: unknown): string {
 function statusLabel(job: ImportJobView, progress: number | undefined): string {
   switch (job.status) {
     case "queued":
-      return "na fila";
+      // Já chegou progresso: o worker pegou o job, mesmo que a lista ainda diga "na fila".
+      return progress === undefined ? "na fila" : `processando ${progress}%`;
     case "parsing":
       return `processando ${progress ?? 0}%`;
     case "done":

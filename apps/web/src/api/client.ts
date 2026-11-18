@@ -1,4 +1,11 @@
-import { ProblemSchema } from "@carina/shared";
+import {
+  type ImportJobList,
+  ImportJobListSchema,
+  type ImportJobView,
+  ImportJobViewSchema,
+  type ImportUploadFields,
+  ProblemSchema,
+} from "@carina/shared";
 import type { ZodType } from "zod";
 import { getApiKey } from "../state/session";
 
@@ -9,12 +16,15 @@ export class ApiProblemError extends Error {
   readonly code: string;
   readonly traceId: string | undefined;
   readonly retryAfterSeconds: number | undefined;
+  /** `detail` do Problem (texto fixo do servidor, sem conteúdo de arquivo), quando houver. */
+  readonly detail: string | undefined;
 
   constructor(init: {
     status: number;
     code: string;
     traceId?: string;
     retryAfterSeconds?: number;
+    detail?: string;
     message?: string;
   }) {
     super(init.message ?? `A API respondeu ${init.status} (${init.code})`);
@@ -23,6 +33,7 @@ export class ApiProblemError extends Error {
     this.code = init.code;
     this.traceId = init.traceId;
     this.retryAfterSeconds = init.retryAfterSeconds;
+    this.detail = init.detail;
   }
 }
 
@@ -46,6 +57,8 @@ export interface ApiFetchInit {
   method?: "GET" | "POST";
   /** Corpo JSON (objeto); serializado aqui. */
   body?: unknown;
+  /** Corpo multipart (upload); o navegador define o `Content-Type` com o boundary. */
+  form?: FormData;
   signal?: AbortSignal | undefined;
   /** Chave explícita (tela de conexão, antes de guardá-la). Um 401 aqui não derruba a sessão. */
   apiKey?: string;
@@ -92,14 +105,16 @@ export async function apiFetch<T>(
   const headers: Record<string, string> = { Accept: "application/json" };
   if (key) headers["Authorization"] = `Bearer ${key}`;
   const hasBody = init.body !== undefined;
+  const hasForm = init.form !== undefined;
   if (hasBody) headers["Content-Type"] = "application/json";
 
   let response: Response;
   try {
     response = await fetch(new URL(path, globalThis.location.origin).href, {
-      method: init.method ?? (hasBody ? "POST" : "GET"),
+      method: init.method ?? (hasBody || hasForm ? "POST" : "GET"),
       headers,
       ...(hasBody ? { body: JSON.stringify(init.body) } : {}),
+      ...(hasForm ? { body: init.form as FormData } : {}),
       ...(init.signal ? { signal: init.signal } : {}),
       credentials: "omit",
       cache: "no-store",
@@ -126,6 +141,9 @@ export async function apiFetch<T>(
         ? codeOf(problem.data.type, response.status)
         : `http_${response.status}`,
       ...(problem.success ? { traceId: problem.data.traceId } : {}),
+      ...(problem.success && problem.data.detail !== undefined
+        ? { detail: problem.data.detail }
+        : {}),
       ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
     });
     if (response.status === 401 && init.apiKey === undefined) {
@@ -137,4 +155,28 @@ export async function apiFetch<T>(
   const parsed = schema.safeParse(json);
   if (!parsed.success) throw new ApiValidationError(path.split("?")[0] ?? path);
   return parsed.data;
+}
+
+/** Envia o arquivo para importação (`POST /api/clients/:id/imports`, multipart). */
+export function uploadImport(
+  clientId: string,
+  file: File,
+  fields: ImportUploadFields,
+): Promise<ImportJobView> {
+  const form = new FormData();
+  for (const [name, value] of Object.entries(fields)) {
+    if (typeof value === "string" && value !== "") form.append(name, value);
+  }
+  // O arquivo vai por último: o servidor lê os campos de texto antes dos bytes.
+  form.append("file", file, file.name);
+  return apiFetch(`/api/clients/${encodeURIComponent(clientId)}/imports`, ImportJobViewSchema, {
+    form,
+  });
+}
+
+/** Últimos jobs de importação do cliente, do mais novo ao mais antigo. */
+export function listImports(clientId: string, signal?: AbortSignal): Promise<ImportJobList> {
+  return apiFetch(`/api/clients/${encodeURIComponent(clientId)}/imports`, ImportJobListSchema, {
+    signal,
+  });
 }

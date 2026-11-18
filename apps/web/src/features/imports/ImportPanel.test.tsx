@@ -97,7 +97,7 @@ describe("ImportPanel", () => {
     await waitFor(() => expect(listCalls()).toBeGreaterThanOrEqual(2));
   });
 
-  it("formato automático não manda format nem campos de CSV; B3 manda asOf", async () => {
+  it("formato automático com .ofx não manda format nem campos de CSV; B3 manda asOf", async () => {
     mount();
     const forms: FormData[] = [];
     use(
@@ -118,6 +118,49 @@ describe("ImportPanel", () => {
     await waitFor(() => expect(forms).toHaveLength(2));
     expect(forms[1]?.get("format")).toBe("b3_xlsx");
     expect(forms[1]?.get("asOf")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("automático com .csv mostra e manda os campos de CSV, sem format", async () => {
+    mount();
+    let form: FormData | undefined;
+    use(
+      http.post("*/api/clients/cliente-moderado/imports", async ({ request }) => {
+        form = await request.formData();
+        return HttpResponse.json(job({ status: "queued", format: "csv" }), { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    expect(screen.queryByLabelText(/preset/i)).not.toBeInTheDocument();
+    await pick(user, "gastos.CSV");
+    await user.selectOptions(screen.getByLabelText(/preset/i), "nubank_conta");
+    expect(screen.queryByLabelText(/data da posição/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Importar" }));
+    await waitFor(() => expect(form).toBeDefined());
+    expect(form?.get("format")).toBeNull();
+    expect(form?.get("csvPreset")).toBe("nubank_conta");
+    expect(form?.get("institution")).toBe("Nubank");
+    expect(form?.get("account")).toBe("conta");
+    expect(form?.get("asOf")).toBeNull();
+  });
+
+  it("automático com .xlsx mostra e manda a data da posição, sem format", async () => {
+    mount();
+    let form: FormData | undefined;
+    use(
+      http.post("*/api/clients/cliente-moderado/imports", async ({ request }) => {
+        form = await request.formData();
+        return HttpResponse.json(job({ status: "queued", format: "b3_xlsx" }), { status: 202 });
+      }),
+    );
+    const user = userEvent.setup();
+    await pick(user, "posicao-b3.xlsx");
+    expect(screen.getByLabelText(/data da posição/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/preset/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Importar" }));
+    await waitFor(() => expect(form).toBeDefined());
+    expect(form?.get("format")).toBeNull();
+    expect(form?.get("asOf")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(form?.get("institution")).toBeNull();
   });
 
   it("413 mostra o detail do problem+json", async () => {

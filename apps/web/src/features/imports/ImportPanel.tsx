@@ -38,6 +38,18 @@ const FAILURE_MESSAGES: Record<ImportFailureCode, string> = {
   internal: "erro interno ao processar; tente de novo em instantes",
 };
 
+/**
+ * Formato provável pela extensão, só para o modo automático decidir quais campos mostrar e mandar
+ * (CSV precisa de preset, instituição e conta; B3 com posição precisa de `asOf`). Quem decide o
+ * formato de verdade é a API, pelo conteúdo.
+ */
+function guessFormat(file: File | null): FormatChoice {
+  const name = file?.name.toLowerCase() ?? "";
+  if (name.endsWith(".csv")) return "csv";
+  if (name.endsWith(".xlsx")) return "b3_xlsx";
+  return "auto";
+}
+
 function todayIso(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -97,6 +109,7 @@ export function ImportPanel({ clientId, bus }: Props) {
   const [institution, setInstitution] = useState("");
   const [account, setAccount] = useState("conta");
   const [asOf, setAsOf] = useState(todayIso);
+  const fieldsFor = format === "auto" ? guessFormat(file) : format;
   const titleId = useId();
   const ids = {
     file: useId(),
@@ -169,12 +182,12 @@ export function ImportPanel({ clientId, bus }: Props) {
     setUploadError(undefined);
     const fields: ImportUploadFields = {};
     if (format !== "auto") fields.format = format;
-    if (format === "csv") {
+    if (fieldsFor === "csv") {
       if (preset) fields.csvPreset = preset;
       fields.institution = institution;
       fields.account = account;
     }
-    if (format === "b3_xlsx") fields.asOf = asOf;
+    if (fieldsFor === "b3_xlsx") fields.asOf = asOf;
     try {
       await uploadImport(clientId, file, fields);
       if (!alive.current) return;
@@ -220,7 +233,7 @@ export function ImportPanel({ clientId, bus }: Props) {
           ))}
         </fieldset>
 
-        {format === "csv" ? (
+        {fieldsFor === "csv" ? (
           <div className={styles.row}>
             <div className={ui.field}>
               <label htmlFor={ids.preset}>Preset do CSV</label>
@@ -261,7 +274,7 @@ export function ImportPanel({ clientId, bus }: Props) {
           </div>
         ) : null}
 
-        {format === "b3_xlsx" ? (
+        {fieldsFor === "b3_xlsx" ? (
           <div className={ui.field}>
             <label htmlFor={ids.asOf}>Data da posição</label>
             <input

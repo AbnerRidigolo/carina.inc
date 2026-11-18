@@ -126,6 +126,17 @@ describe("ImportsService.create: fluxo", () => {
     expect(repo.insertFile).not.toHaveBeenCalled();
   });
 
+  it("5 ativos + failed existente: 429 sem reenfileirar", async () => {
+    const { svc, repo, run } = setup({
+      findBySha: vi.fn().mockResolvedValue({ id: JOB, status: "failed" }),
+      countActive: vi.fn().mockResolvedValue(5),
+    });
+    await expect(run(() => svc.create("c1", { bytes: OFX }, {}))).rejects.toBeInstanceOf(
+      RateLimitedError,
+    );
+    expect(repo.requeue).not.toHaveBeenCalled();
+  });
+
   it("5 ativos: RateLimitedError com Retry-After 30, sem gravar", async () => {
     const { svc, repo, publish, run } = setup({ countActive: vi.fn().mockResolvedValue(5) });
     const err = await run(() => svc.create("c1", { bytes: OFX }, {})).catch((e: unknown) => e);

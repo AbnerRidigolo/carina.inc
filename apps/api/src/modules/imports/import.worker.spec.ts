@@ -14,6 +14,7 @@ const TENANT = "11111111-1111-4111-8111-111111111111";
 const CLIENT = "22222222-2222-4222-8222-222222222222";
 const JOB = "33333333-3333-4333-8333-333333333333";
 const SECRET = "Padaria Secreta";
+const TOKEN = "55555555-5555-4555-8555-555555555555";
 
 const event = (over: Partial<Record<string, string>> = {}): StreamEvent => ({
   eventId: "44444444-4444-4444-8444-444444444444",
@@ -68,6 +69,7 @@ function setup(
       client: { id: CLIENT, externalId: "c1" },
     },
     bytes: new Uint8Array([1, 2, 3]),
+    claimToken: TOKEN,
   };
   const repo = {
     claim: vi.fn().mockResolvedValue(opts.claim === undefined ? claimed : opts.claim),
@@ -158,7 +160,7 @@ describe("ImportWorker.handle", () => {
     const s = setup();
     parseFileMock.mockResolvedValue(parsed({ failure: "unreadable" }));
     await s.worker.handle(event());
-    expect(s.repo.finish).toHaveBeenCalledWith({ tx: true }, JOB, {
+    expect(s.repo.finish).toHaveBeenCalledWith({ tx: true }, JOB, TOKEN, {
       status: "failed",
       failureCode: "unreadable",
       stats: expect.objectContaining({ transactions: 0 }),
@@ -201,6 +203,7 @@ describe("ImportWorker.handle", () => {
       externalId: "c1",
     });
     expect(s.repo.touchProgress).toHaveBeenCalledTimes(3);
+    expect(s.repo.touchProgress).toHaveBeenCalledWith(JOB, TOKEN);
     const progress = s
       .published()
       .filter((e) => e.type === "import.progress")
@@ -214,7 +217,7 @@ describe("ImportWorker.handle", () => {
       ["writing", 2000, 2500],
       ["writing", 2500, 2500],
     ]);
-    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, {
+    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, TOKEN, {
       status: "done",
       failureCode: null,
       stats: expect.objectContaining({ rowsRead: 2500, transactions: 2500 }),
@@ -234,7 +237,7 @@ describe("ImportWorker.handle", () => {
       { id: CLIENT, externalId: "c1" },
       { institutions: ["XP"], asOf: "2025-10-31", items: [pos(1), pos(2)] },
     );
-    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, {
+    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, TOKEN, {
       status: "done",
       failureCode: null,
       stats: expect.objectContaining({ positions: 2, transactions: 1 }),
@@ -258,7 +261,7 @@ describe("ImportWorker.handle", () => {
       }),
     );
     await s.worker.handle(event());
-    const call = s.repo.finish.mock.calls[0]?.[2] as {
+    const call = s.repo.finish.mock.calls[0]?.[3] as {
       status: string;
       failureCode: string;
       stats: { positions: number; errorRows: number };
@@ -279,7 +282,7 @@ describe("ImportWorker.handle", () => {
       .mockResolvedValueOnce({ upserted: 1000, usage: {} })
       .mockRejectedValueOnce(new Error(`falha com ${SECRET}`));
     await s.worker.handle(event());
-    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, {
+    expect(s.repo.finish).toHaveBeenCalledWith(expect.anything(), JOB, TOKEN, {
       status: "failed",
       failureCode: "internal",
       stats: expect.objectContaining({ transactions: 1000 }),
@@ -294,7 +297,7 @@ describe("ImportWorker.handle", () => {
     const s = setup({ options: { format: "csv" } });
     await s.worker.handle(event());
     expect(parseFileMock).not.toHaveBeenCalled();
-    expect(s.repo.finish.mock.calls[0]?.[2]).toMatchObject({
+    expect(s.repo.finish.mock.calls[0]?.[3]).toMatchObject({
       status: "failed",
       failureCode: "internal",
     });
@@ -326,7 +329,7 @@ describe("ImportWorker.handle", () => {
     s.publish.mockRejectedValue(new Error("redis fora"));
     parseFileMock.mockResolvedValue(parsed({ transactions: [tx(1)] }));
     await s.worker.handle(event());
-    expect(s.repo.finish.mock.calls[0]?.[2]).toMatchObject({ status: "done" });
+    expect(s.repo.finish.mock.calls[0]?.[3]).toMatchObject({ status: "done" });
     expect(s.logger.error).toHaveBeenCalled();
   });
 

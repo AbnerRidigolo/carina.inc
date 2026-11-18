@@ -59,6 +59,8 @@ type ViewRow = Prisma.ImportJobGetPayload<{ select: typeof VIEW_SELECT }>;
 /** Job tomado pelo worker: o que o parse e a gravação precisam (opções ainda não validadas). */
 export interface ClaimedJob {
   job: { id: string; format: ImportFormat; options: unknown; client: ClientRef };
+  /** Token deste claim: `touchProgress` e `finish` só valem com ele. */
+  claimToken: string;
   bytes: Uint8Array;
 }
 
@@ -203,15 +205,21 @@ export class ImportsRepository {
   /**
    * Toma o job para o worker: `queued` → `parsing` (UPDATE condicional, atômico: duas entregas
    * do mesmo evento não tomam o job duas vezes) e lê os bytes e o cliente. `null` se o job não
-   * está `queued`, não tem bytes, ou não é do cliente fixado: não há o que fazer.
+   * está `queued`, não tem bytes, ou não é do cliente fixado: não há o que fazer. Cada claim
+   * grava um `claim_token` novo: um worker que travou e perdeu o job (stuck → reenvio → outro
+   * claim) não consegue mais avançá-lo nem fechá-lo.
    */
   async claim(jobId: string): Promise<ClaimedJob | null> {
     return this.db.tx(async (tx) => {
-      const rows = await tx.$queryRaw<{ format: string; options: unknown; client_id: string }[]>`
-        UPDATE import_job SET status = 'parsing', progress_at = now(), updated_at = now()
+      const rows = await tx.$queryRaw<
+        { format: string; options: unknown; client_id: string; claim_token: string }[]
+      >`
+        UPDATE import_job
+        SET status = 'parsing', claim_token = gen_random_uuid(), progress_at = now(),
+            updated_at = now()
         WHERE id = ${jobId}::uuid AND status = 'queued'
           AND EXISTS (SELECT 1 FROM import_file f WHERE f.import_job_id = import_job.id)
-        RETURNING format, options, client_id`;
+        RETURNING format, options, client_id, claim_token`;
       const row = rows[0];
       if (row === undefined) return null;
       const file = await tx.importFile.findUniqueOrThrow({
@@ -225,14 +233,18 @@ export class ImportsRepository {
       return {
         job: { id: jobId, format: row.format as ImportFormat, options: row.options, client },
         bytes: file.bytes,
+        claimToken: row.claim_token,
       };
     });
   }
 
-  /** Marca avanço do job (`progress_at`); `false` se ele já não está `parsing` (foi tirado). */
-  async touchProgress(jobId: string): Promise<boolean> {
+  /**
+   * Marca avanço do job (`progress_at`); `false` se ele já não está `parsing` com o token deste
+   * claim (foi tirado pela limpeza, e talvez tomado de novo por outro worker).
+   */
+  async touchProgress(jobId: string, claimToken: string): Promise<boolean> {
     const res = await this.db.client.importJob.updateMany({
-      where: { id: jobId, status: "parsing" },
+      where: { id: jobId, status: "parsing", claimToken },
       data: { progressAt: new Date(), updatedAt: new Date() },
     });
     return res.count === 1;
@@ -240,11 +252,12 @@ export class ImportsRepository {
 
   /**
    * Fecha o job (`done`/`failed`) e apaga os bytes NA MESMA transação `tx`. Só fecha um job ainda
-   * `parsing`: se a limpeza o tirou do worker (stuck) e ele foi reenviado, os bytes novos ficam.
+   * `parsing` com o token deste claim: se a limpeza o tirou do worker (stuck) e ele foi
+   * reenviado (e talvez tomado por outro worker), nada muda e os bytes novos ficam.
    */
-  async finish(tx: Tx, jobId: string, outcome: JobOutcome): Promise<boolean> {
+  async finish(tx: Tx, jobId: string, claimToken: string, outcome: JobOutcome): Promise<boolean> {
     const res = await tx.importJob.updateMany({
-      where: { id: jobId, status: "parsing" },
+      where: { id: jobId, status: "parsing", claimToken },
       data: {
         status: outcome.status,
         failureCode: outcome.failureCode,

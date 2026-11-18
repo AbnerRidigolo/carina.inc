@@ -349,6 +349,73 @@ describe("Importação de arquivos: worker e limpeza (integração)", () => {
     expect(await count("import_job")).toBe(1);
   });
 
+  it("worker travado (não morto) perde o job: stuck → reenvio → outro claim; o antigo não avança nem fecha", async () => {
+    const bytes = csv(1500, "Travado");
+    const { job } = await upload(bytes, GENERICO);
+    const client = { id: await clientId(), externalId: "c1" };
+    const pinned = <R>(fn: () => Promise<R>) =>
+      TenantContext.run({ tenantId, clientId: client.id }, fn);
+
+    // Worker A toma o job, grava o lote 1 e trava.
+    const a = await pinned(async () => {
+      const claimed = must(await repo.claim(job.id), "claim de A");
+      const parsed = runParser("csv", claimed.bytes, {
+        format: "csv",
+        csvPreset: "generico_br",
+        institution: "Banco Exemplo",
+        account: "cc",
+      });
+      await ingestion.upsertTransactionsFor(client, "import", parsed.transactions.slice(0, 1000));
+      expect(await repo.touchProgress(job.id, claimed.claimToken)).toBe(true);
+      return claimed;
+    });
+    await sql(
+      `UPDATE import_job SET progress_at = now() - interval '20 minutes' WHERE tenant_id = $1`,
+    );
+    expect(await cleanup.run({ onlyTenants: [tenantId] })).toMatchObject({ stuck: 1 });
+    expect(await upload(bytes, GENERICO)).toMatchObject({ created: true });
+
+    // Worker B (o real) toma o job; no meio da gravação dele, A acorda.
+    const original = ingestion.upsertTransactionsFor.bind(ingestion);
+    let checked = false;
+    vi.spyOn(ingestion, "upsertTransactionsFor").mockImplementation(async (c, src, items) => {
+      if (!checked) {
+        checked = true;
+        const usage = await count("usage_record");
+        expect(await jobRow(job.id)).toMatchObject({ status: "parsing" });
+        expect(await repo.touchProgress(job.id, a.claimToken)).toBe(false);
+        const closed = await db.tx((tx) =>
+          repo.finish(tx, job.id, a.claimToken, {
+            status: "done",
+            failureCode: null,
+            stats: { rowsRead: 1, positions: 0, transactions: 1, errorRows: 0, ignored: {} },
+            errors: [],
+          }),
+        );
+        expect(closed).toBe(false);
+        expect(await jobRow(job.id)).toMatchObject({ status: "parsing" });
+        expect(await count("import_file")).toBe(1);
+        expect(await count("usage_record")).toBe(usage);
+      }
+      return original(c, src, items);
+    });
+    await run(job.id);
+
+    expect(checked).toBe(true);
+    const row = await jobRow(job.id);
+    expect(row).toMatchObject({ status: "done", failure_code: null });
+    expect(row.stats).toMatchObject({ transactions: 1500 });
+    expect(await count("transaction", "AND source = 'import'")).toBe(1500);
+    expect(await count("import_file")).toBe(0);
+    // 1 lote de A antes de travar + 2 lotes de B; nada de A depois do novo claim.
+    expect(await count("usage_record")).toBe(3);
+    expect(
+      logged.some(
+        (l) => typeof l === "object" && l !== null && "msg" in l && /tirado/.test(String(l.msg)),
+      ),
+    ).toBe(false);
+  });
+
   it("import_file de 2 h → expired (job mantido, bytes apagados); arquivo recente intocado", async () => {
     const old = await upload(fixture("ofx", "conta-sgml-1252.ofx"));
     const fresh = await upload(fixture("ofx", "cartao-sgml.ofx"));

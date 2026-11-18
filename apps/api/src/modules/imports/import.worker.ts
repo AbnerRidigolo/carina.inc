@@ -18,8 +18,9 @@
  *      `import.finished` em `inbox.events`.
  * Erro inesperado depois do claim → `failed`/`internal` em melhor esforço, com os `stats` do que
  * já foi gravado, e ACK: não há reentrega (os bytes podem já ter saído; o usuário reenvia, e o
- * upsert idempotente não duplica). Se a limpeza tirou o job do worker (`touchProgress` → false),
- * o worker para de gravar e não fecha nada: o job já está `failed`/`stuck`.
+ * upsert idempotente não duplica). `touchProgress` e `finish` levam o token do claim: se a limpeza
+ * tirou o job do worker (`stuck`), mesmo que um reenvio já o tenha posto de novo em `parsing`
+ * com outro worker, `touchProgress` → false e o worker para de gravar sem fechar nada.
  *
  * LGPD: logs e eventos levam só ids, contadores e códigos fixos. Nunca `stats.ignored` (as chaves
  * podem ter texto de célula), linhas, valores ou descrições; de um erro, só nome e código (a
@@ -233,7 +234,7 @@ export class ImportWorker
     }
 
     try {
-      await this.close(tenantId, clientId, jobId, outcome, ids);
+      await this.close(tenantId, clientId, jobId, claimed.claimToken, outcome, ids);
     } catch (err) {
       this.logger.error({
         msg: "Falha ao fechar o job de importação; a limpeza o marcará stuck",
@@ -249,7 +250,7 @@ export class ImportWorker
     progress: Progress,
     emit: (e: ImportEvent) => Promise<void>,
   ): Promise<JobOutcome> {
-    const { job, bytes } = claimed;
+    const { job, bytes, claimToken } = claimed;
     const options = ImportOptionsSchema.parse(job.options);
     const parsed = await parseFile(
       job.format,
@@ -287,7 +288,7 @@ export class ImportWorker
         progress.stats.positions = res.upserted;
         written += res.upserted;
       }
-      if (!(await this.repo.touchProgress(job.id))) throw new JobTakenError();
+      if (!(await this.repo.touchProgress(job.id, claimToken))) throw new JobTakenError();
     }
 
     const total = parsed.transactions.length;
@@ -296,7 +297,7 @@ export class ImportWorker
       const res = await this.ingestion.upsertTransactionsFor(job.client, "import", batch);
       progress.stats.transactions += res.upserted;
       written += res.upserted;
-      if (!(await this.repo.touchProgress(job.id))) throw new JobTakenError();
+      if (!(await this.repo.touchProgress(job.id, claimToken))) throw new JobTakenError();
       await emit({
         type: "import.progress",
         stage: "writing",
@@ -314,11 +315,12 @@ export class ImportWorker
     tenantId: string,
     clientId: string,
     jobId: string,
+    claimToken: string,
     outcome: JobOutcome,
     ids: Record<string, string>,
   ): Promise<void> {
     const closed = await this.db.tx(async (tx) => {
-      if (!(await this.repo.finish(tx, jobId, outcome))) return false;
+      if (!(await this.repo.finish(tx, jobId, claimToken, outcome))) return false;
       await this.repo.insertAudit(tx, `import.finished:${outcome.status}`);
       return true;
     });

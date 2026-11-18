@@ -10,6 +10,11 @@
 -- Mesmo desenho de 0004: as políticas de SELECT abaixo valem só quando current_user é
 -- carina_migrator e a sessão NÃO é (dentro de uma função SECURITY DEFINER do migrator chamada
 -- pela aplicação). pg_temp por último no search_path e tabelas qualificadas com public.
+-- claim_token: dono atual do job em 'parsing'. Cada claim grava um uuid novo; touchProgress e
+-- finish só valem com o token do claim, para um worker que travou (marcado 'stuck' e depois
+-- reenviado e tomado por outro worker) não gravar nem fechar o job que já não é dele.
+ALTER TABLE import_job ADD COLUMN claim_token uuid;
+
 CREATE POLICY import_cleanup_scan ON import_file FOR SELECT TO carina_migrator
   USING (current_user = 'carina_migrator' AND session_user <> 'carina_migrator');
 CREATE POLICY import_cleanup_scan ON import_job FOR SELECT TO carina_migrator

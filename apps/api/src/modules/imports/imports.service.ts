@@ -147,21 +147,22 @@ export class ImportsService {
       this.db.tx(async (tx) => {
         await this.repo.lockUploads(tx);
         const existing = await this.repo.findBySha(tx, fileSha256);
-        if (existing !== null) {
-          if (existing.status !== "failed") {
-            return { job: await this.repo.view(tx, existing.id), created: false };
-          }
-          if (await this.repo.requeue(tx, existing.id, options, fileName)) {
-            await this.repo.insertFile(tx, existing.id, file.bytes);
-            return { job: await this.repo.view(tx, existing.id), created: true };
-          }
+        if (existing !== null && existing.status !== "failed") {
           return { job: await this.repo.view(tx, existing.id), created: false };
         }
+        // Job novo e reenfileiramento de `failed` ocupam uma vaga: o teto vale para os dois.
         if ((await this.repo.countActive(tx)) >= MAX_ACTIVE_IMPORTS) {
           throw new RateLimitedError(
             `Há ${MAX_ACTIVE_IMPORTS} importações em andamento para este cliente; tente novamente em instantes`,
             ACTIVE_RETRY_AFTER_SECONDS,
           );
+        }
+        if (existing !== null) {
+          if (await this.repo.requeue(tx, existing.id, options, fileName)) {
+            await this.repo.insertFile(tx, existing.id, file.bytes);
+            return { job: await this.repo.view(tx, existing.id), created: true };
+          }
+          return { job: await this.repo.view(tx, existing.id), created: false };
         }
         const id = await this.repo.insertQueued(tx, { format, fileName, fileSha256, options });
         await this.repo.insertFile(tx, id, file.bytes);

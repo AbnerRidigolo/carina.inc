@@ -153,27 +153,62 @@ describe("Importação de arquivos E2E: /api/clients/:clientId/imports", () => {
       expect(await usageCount(A.tenantId)).toBe(0);
     });
 
-    it("job failed + reenvio: 202 com o mesmo id, queued, bytes regravados, novo evento", async () => {
-      const first = await upload(A.keys.ingest, ofx(), {}).expect(202);
-      const id = (first.body as { id: string }).id;
-      await migratorSql(
+    const failJob = (id: string) =>
+      migratorSql(
         `UPDATE import_job SET status = 'failed', failure_code = 'expired',
            stats = '{"rowsRead":9,"positions":0,"transactions":0,"errorRows":1,"ignored":{}}',
            errors = '[{"row":1,"code":"x","message":"m"}]' WHERE id = $1`,
         [id],
         { tenantId: A.tenantId },
       );
-      await migratorSql(`DELETE FROM import_file WHERE import_job_id = $1`, [id], {
-        tenantId: A.tenantId,
-      });
 
-      const res = await upload(A.keys.ingest, ofx(), {}).expect(202);
+    it("job failed + reenvio: 202 com o mesmo id, opções novas, bytes regravados, zerado, novo evento", async () => {
+      const first = await upload(
+        A.keys.ingest,
+        csvBytes,
+        { csvPreset: "generico_br", institution: "Banco", account: "antiga" },
+        "a.csv",
+      ).expect(202);
+      const id = (first.body as { id: string }).id;
+      await failJob(id);
+      expect(await fileRows(A.tenantId)).toHaveLength(1);
+
+      const res = await upload(
+        A.keys.ingest,
+        csvBytes,
+        { csvPreset: "generico_br", institution: "Banco", account: "nova" },
+        "a.csv",
+      ).expect(202);
       const job = ImportJobViewSchema.parse(res.body);
       expect(job).toMatchObject({ id, status: "queued", failureCode: null, errors: [] });
-      expect(job.stats.rowsRead).toBe(0);
-      expect(await jobRows(A.tenantId)).toHaveLength(1);
-      expect((await fileRows(A.tenantId)).map((f) => f.import_job_id)).toEqual([id]);
+      expect(job.stats).toEqual({
+        rowsRead: 0,
+        positions: 0,
+        transactions: 0,
+        errorRows: 0,
+        ignored: {},
+      });
+      const jobs = await jobRows(A.tenantId);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ status: "queued", failure_code: null });
+      expect(jobs[0]?.options).toMatchObject({ account: "nova" });
+      expect(await fileRows(A.tenantId)).toEqual([{ import_job_id: id, len: csvBytes.length }]);
       expect(await jobEvents()).toHaveLength(2);
+    });
+
+    it("5 ativos + reenvio de um failed: 429 com Retry-After e o job failed fica intacto", async () => {
+      const failed = await upload(A.keys.ingest, ofx(50), {}).expect(202);
+      const id = (failed.body as { id: string }).id;
+      await failJob(id);
+      for (let i = 0; i < 5; i++) await upload(A.keys.ingest, ofx(i), {}).expect(202);
+      const events = (await jobEvents()).length;
+
+      const res = await upload(A.keys.ingest, ofx(50), {});
+      expectProblem(res, 429);
+      expect(res.headers["retry-after"]).toBe("30");
+      const row = (await jobRows(A.tenantId)).find((j) => j.id === id);
+      expect(row).toMatchObject({ status: "failed", failure_code: "expired" });
+      expect((await jobEvents()).length).toBe(events);
     });
 
     it("acima de 10 MB: 413 problem+json, nada gravado", async () => {

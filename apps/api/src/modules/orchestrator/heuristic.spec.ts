@@ -66,10 +66,18 @@ describe("heuristicPlan", () => {
     }
   });
 
-  it("falsos positivos: 'ir' verbo, 'impostor' e 'IR' sozinho (minúsculas perdem a caixa) não acionam tax", () => {
-    for (const q of ["devo ir ao banco amanhã?", "impostor", "(IR)"]) {
+  it("'(IR)' sozinho não aciona tax (minúsculas perdem a caixa); 'ir' verbo e 'impostor' também não", () => {
+    for (const q of ["devo ir ao banco amanhã?", "impostor", "(IR)", "declaro o IR este ano"]) {
       expect(heuristicPlan(q).agents).toEqual([]);
     }
+  });
+
+  it('"imposto de renda" → tax (frase fixada, além de impostos?)', () => {
+    expect(heuristicPlan("imposto de renda").agents).toEqual(["tax"]);
+  });
+
+  it("declaração de IR tolera espaços múltiplos entre as palavras", () => {
+    expect(heuristicPlan("declaração  de   IR").agents).toEqual(["tax"]);
   });
 
   it("tax: declaração de IR, IRPF, impostos e pós-imposto", () => {

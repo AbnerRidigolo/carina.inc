@@ -51,7 +51,7 @@ const KEYWORDS: readonly (readonly [SpecialistName, readonly Matcher[]])[] = [
     [
       word("impostos?"),
       word("irpf"),
-      word("declaração de ir"),
+      word("declaração\\s+de\\s+ir"),
       "tribut",
       word("darf"),
       "come-cotas",

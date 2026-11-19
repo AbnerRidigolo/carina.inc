@@ -89,7 +89,7 @@ function setup(
   const logger: ImportLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const db = { tx: vi.fn((fn: (t: unknown) => unknown) => fn({ tx: true })) };
   const worker = new ImportWorker(
-    { WORKERS_ENABLED: "false" },
+    { WORKERS_ENABLED: "false", IMPORT_PARSE_MAX_HEAP_MB: 768 },
     { publish, consume: vi.fn() } as never,
     db as never,
     repo as never,
@@ -154,6 +154,19 @@ describe("ImportWorker.handle", () => {
     s.repo.claim.mockRejectedValue(new Error("db down"));
     await expect(s.worker.handle(event())).rejects.toThrow("db down");
     expect(s.logger.error).toHaveBeenCalled();
+  });
+
+  it("passa IMPORT_PARSE_MAX_HEAP_MB do ambiente como limite de heap do parse", async () => {
+    const s = setup();
+    parseFileMock.mockResolvedValue(parsed({ failure: "unreadable" }));
+    await s.worker.handle(event());
+    expect(parseFileMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { maxHeapMb: 768 },
+    );
   });
 
   it("falha do parser → finish(failed, código) com auditoria e import.finished failed", async () => {
@@ -369,7 +382,7 @@ describe("ImportWorker: ciclo de vida", () => {
       });
     });
     const worker = new ImportWorker(
-      { WORKERS_ENABLED: "true" },
+      { WORKERS_ENABLED: "true", IMPORT_PARSE_MAX_HEAP_MB: 512 },
       { publish: vi.fn(), consume } as never,
       {} as never,
       {} as never,

@@ -82,7 +82,7 @@ o motivo de cada uma:
 | Tema | Decisão | Motivo (e alternativa descartada) |
 | --- | --- | --- |
 | Onde ficam os bytes | Tabela `import_file` no Postgres, sob RLS, apagada na mesma transação que fecha o job | Sobrevive a reinício e o isolamento vem do banco. No Redis (TTL) não haveria RLS e o job se perderia com o Redis; parse síncrono prenderia a API numa planilha de 10 MB |
-| Parse | Assíncrono no `ImportWorker`, numa `worker_threads` encerrada aos 30 s e com heap limitada a 512 MB (`resourceLimits`); estourar qualquer dos dois → `limit_exceeded` | Um arquivo hostil não trava o event loop do worker, não passa do tempo nem leva a memória do processo; encerrar a thread é o único jeito de interromper um parse síncrono |
+| Parse | Assíncrono no `ImportWorker`, numa `worker_threads` encerrada aos 30 s e com heap limitada a 512 MB por padrão (`resourceLimits`, `IMPORT_PARSE_MAX_HEAP_MB`); estourar qualquer dos dois → `limit_exceeded` | Um arquivo hostil não trava o event loop do worker, não passa do tempo nem leva a memória do processo; encerrar a thread é o único jeito de interromper um parse síncrono |
 | Mesmo arquivo | Mesmo SHA-256 no mesmo cliente → 200 com o job existente (`queued`, `parsing`, `done`); `failed` → o mesmo job é reenfileirado (202) | Nunca processa duas vezes nem cobra de novo, e um mapeamento errado ou uma queda do worker não deixam o arquivo impossível de importar. Vale o teto de 5 ativos (429, `Retry-After: 30`) também no reenvio, para o reenfileiramento não furar o limite |
 | Arquivo vazio | 422; acima de 10 MB, 413 | Vazio é conteúdo inválido, não excesso de tamanho |
 | Nada é "chutado" | Separador decimal e formato de data do CSV vêm do mapeamento; valor ou data ambíguos viram erro de linha | Gravar número errado em silêncio é pior do que recusar a linha |
@@ -108,10 +108,10 @@ o motivo de cada uma:
   (extrato de investimentos) não é suportado; o arquivo é recusado (`unsupported_ofx_investment`).
 - **`externalId` mapeado no CSV é usado como veio.** Se a coluna mapeada não for única de fato, linhas
   distintas se sobrescrevem no upsert.
-- **Limite de memória da thread de parse fixo em 512 MB** (`PARSE_LIMITS.maxThreadHeapMb`). Uma
+- **Limite de memória da thread de parse: 512 MB por padrão** (`IMPORT_PARSE_MAX_HEAP_MB`). Uma
   planilha de poucos MB pode passar disso ao ser expandida (uma de 5,78 MB chegou a 2,2 GB de
-  heap sem limite) e termina como `failed`/`limit_exceeded`; o limite não é configurável por
-  ambiente.
+  heap sem limite) e termina como `failed`/`limit_exceeded`. Subir o limite exige memória
+  sobrando no container do worker; a solução de fundo é ler as planilhas em streaming.
 - **Worker travado que volta.** Um worker que trava e volta depois de o job ter sido retomado por
   outro pode ainda gravar (e cobrar) no máximo um lote em andamento; a gravação é upsert idempotente,
   então o efeito é só o lote regravado. O `claim_token` impede que ele grave os seguintes ou feche o

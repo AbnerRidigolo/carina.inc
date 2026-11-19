@@ -122,7 +122,7 @@ export class ImportWorker
   private readonly idle = new AbortController();
 
   constructor(
-    @Inject(ENV) private readonly env: Pick<Env, "WORKERS_ENABLED">,
+    @Inject(ENV) private readonly env: Pick<Env, "WORKERS_ENABLED" | "IMPORT_PARSE_MAX_HEAP_MB">,
     @Inject(StreamsService) private readonly streams: StreamsService,
     @Inject(TenantPrismaService) private readonly db: TenantPrismaService,
     @Inject(ImportsRepository) private readonly repo: ImportsRepository,
@@ -260,6 +260,7 @@ export class ImportWorker
       bytes,
       options,
       this.abort?.signal ?? this.idle.signal,
+      { maxHeapMb: this.env.IMPORT_PARSE_MAX_HEAP_MB },
     );
     progress.stats = { ...parsed.stats, positions: 0, transactions: 0 };
     progress.errors = [...parsed.errors];

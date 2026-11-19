@@ -315,7 +315,7 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
 - **Worker** (`ImportWorker`, processo `worker`). Consome `import.requested` no grupo `imports` do
   stream `jobs`. O claim (`queued` → `parsing`) é um `UPDATE` atômico que grava um `claim_token`
   novo; reentrega ou segundo consumidor não tomam o job. O parse roda numa `worker_threads` que é
-  encerrada aos 30 s e tem a heap limitada a 512 MB (os dois viram `limit_exceeded`). Posições da B3 substituem as `source = "import"` das
+  encerrada aos 30 s e tem a heap limitada a 512 MB por padrão, ajustável por `IMPORT_PARSE_MAX_HEAP_MB` (os dois viram `limit_exceeded`). Posições da B3 substituem as `source = "import"` das
   instituições do arquivo (por instituição, sob advisory lock por cliente; fotografia mais antiga
   que a gravada não substitui nada e as linhas viram `stale_snapshot`; instituição com linha de
   posição recusada só recebe o upsert, sem apagar nada); as transações vão em lotes

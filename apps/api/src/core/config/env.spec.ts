@@ -34,6 +34,19 @@ describe("loadEnv", () => {
     expect(env.MARKET_CLOSED_MAX_AGE_DAYS).toBe(5);
   });
 
+  it("IMPORT_PARSE_MAX_HEAP_MB: padrão 512, configurável, limites 64..16384", () => {
+    expect(loadEnv(min).IMPORT_PARSE_MAX_HEAP_MB).toBe(512);
+    expect(loadEnv({ ...min, IMPORT_PARSE_MAX_HEAP_MB: "2048" }).IMPORT_PARSE_MAX_HEAP_MB).toBe(
+      2048,
+    );
+    expect(() => loadEnv({ ...min, IMPORT_PARSE_MAX_HEAP_MB: "32" })).toThrow(
+      /IMPORT_PARSE_MAX_HEAP_MB/,
+    );
+    expect(() => loadEnv({ ...min, IMPORT_PARSE_MAX_HEAP_MB: "abc" })).toThrow(
+      /IMPORT_PARSE_MAX_HEAP_MB/,
+    );
+  });
+
   it("MARKET_MODE é obrigatória com NODE_ENV=production", () => {
     expect(() => loadEnv({ ...min, NODE_ENV: "production", LLM_MODE: "mock" })).toThrow(
       /MARKET_MODE/,

@@ -4,7 +4,7 @@
  * `worker_threads` Worker, uma por arquivo, encerrada à força (`terminate`) ao estourar
  * PARSE_LIMITS.parseTimeoutMs (30 s) → `failure: "limit_exceeded"`. Um timer cooperativo na
  * mesma thread não serviria: ele só dispara depois que o parser devolve o controle. A heap da
- * thread é limitada a PARSE_LIMITS.maxThreadHeapMb (512 MB, `resourceLimits`): estourar
+ * thread é limitada a `maxHeapMb` (env IMPORT_PARSE_MAX_HEAP_MB; padrão PARSE_LIMITS.maxThreadHeapMb, 512 MB, `resourceLimits`): estourar
  * (`ERR_WORKER_OUT_OF_MEMORY`) também vira `limit_exceeded`, sem derrubar o processo.
  *
  * - Os bytes são TRANSFERIDOS para a thread (sem cópia de até 10 MB): o `Uint8Array` do chamador

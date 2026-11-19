@@ -87,9 +87,10 @@ describe("agents", () => {
 });
 
 describe("especialistas novos", () => {
+  const milestone = { goal: "aposentadoria", byYear: 2045, successProbability: 0.8 };
   const plan = {
     targetAllocation: [{ assetClass: "renda fixa", pct: 60 }],
-    milestones: [{ goal: "aposentadoria", byYear: 2045, successProbability: 0.8 }],
+    milestones: [milestone],
     assumptions: ["selic 10%"],
     narrative: "plano",
   };
@@ -106,7 +107,7 @@ describe("especialistas novos", () => {
   });
 
   it("StrategyPlan recusa successProbability 1.5 e byYear 1999", () => {
-    const m = plan.milestones[0]!;
+    const m = milestone;
     expect(
       ok(StrategyPlanSchema, { ...plan, milestones: [{ ...m, successProbability: 1.5 }] }),
     ).toBe(false);

@@ -1,7 +1,8 @@
 /**
- * Limites das saídas estruturadas do Predictor, Risk, Strategist, Tax e Assessor Liaison (a saída do modelo é não confiável).
- * Aplicados como `refine` depois do schema Zod, no mesmo estilo do Executor. Violação =
- * `AllProvidersFailedError` (mesmo contrato das demais saídas ruins do modelo).
+ * Limites das saídas estruturadas do Predictor, Risk, Strategist, Tax e Assessor Liaison (a saída
+ * do modelo é não confiável). Aplicados como `refine` depois do schema Zod, no mesmo estilo do
+ * Executor. Violação = `AllProvidersFailedError` (mesmo contrato das demais saídas ruins do
+ * modelo).
  *
  * Limites escolhidos (generosos para uso real, baratos para quem abusa):
  * - texto de item (nome, premissa, achado, sugestão, correlação): até 500 caracteres;

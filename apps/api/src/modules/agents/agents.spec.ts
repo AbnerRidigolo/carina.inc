@@ -744,7 +744,7 @@ describe("limites das saídas dos quatro especialistas novos (saída forjada do 
         "strategist",
         strategy({ milestones: [{ goal: "g", byYear: 2040, successProbability: 1.5 }] }),
       ),
-    ).rejects.toThrow(); // barrado já pelo schema (ValidationError)
+    ).rejects.toThrow(ValidationError); // o modelo simulado já barra pelo schema (refine acima: defesa em profundidade)
   });
 
   it("strategist recusa pct não finito no refine", async () => {
@@ -802,8 +802,12 @@ describe("limites das saídas dos quatro especialistas novos (saída forjada do 
   });
 
   it("assessor_liaison recusa 6 perguntas e item com 501 caracteres", async () => {
-    // 6 perguntas: o schema já barra (ValidationError); o refine também, para saída forjada.
-    await expect(run("assessor_liaison", brief({ questions: list(6) }))).rejects.toThrow();
+    // 6 perguntas: o modelo simulado (mock-models.ts) já barra pelo schema com ValidationError, antes
+    // do `safeParse` do LlmAgent (que no caminho live daria AllProvidersFailedError). O refine direto
+    // abaixo fica como defesa em profundidade, para saída forjada.
+    await expect(run("assessor_liaison", brief({ questions: list(6) }))).rejects.toThrow(
+      ValidationError,
+    );
     const { refineAssessorBrief } = await import("./output-limits.js");
     expect(() => refineAssessorBrief(brief({ questions: list(6) }))).toThrow(
       AllProvidersFailedError,

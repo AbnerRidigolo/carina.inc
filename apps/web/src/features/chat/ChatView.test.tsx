@@ -222,6 +222,48 @@ describe("ChatView", () => {
     expect(within(card).getByText("Rascunho: nada foi enviado ao assessor.")).toBeInTheDocument();
   });
 
+  it("cartão do assessor mostra os dados compartilhados além das perguntas", async () => {
+    const { socket } = await mount();
+    await ask(socket, "fale com o assessor");
+    emit(
+      socket,
+      { type: "agent_started", agent: "assessor_liaison" },
+      {
+        type: "agent_result",
+        agent: "assessor_liaison",
+        result: {
+          questions: ["Qual a taxa atual?"],
+          sharedData: ["Revela o interesse em renda fixa.", "Revela o saldo total da carteira."],
+          narrative: "Rascunho",
+        },
+      },
+    );
+    const card = screen.getByRole("region", { name: /assessor/i });
+    expect(within(card).getByText("Outros dados compartilhados")).toBeInTheDocument();
+    expect(within(card).getByText("Revela o saldo total da carteira.")).toBeInTheDocument();
+  });
+
+  it("cartão do assessor avisa quando a pergunta não tem o que revela", async () => {
+    const { socket } = await mount();
+    await ask(socket, "fale com o assessor");
+    emit(
+      socket,
+      { type: "agent_started", agent: "assessor_liaison" },
+      {
+        type: "agent_result",
+        agent: "assessor_liaison",
+        result: {
+          questions: ["Primeira?", "Segunda?"],
+          sharedData: [""],
+          narrative: "Rascunho",
+        },
+      },
+    );
+    const card = screen.getByRole("region", { name: /assessor/i });
+    expect(within(card).getAllByText("Não informado o que esta pergunta revela.")).toHaveLength(2);
+    expect(within(card).queryByText("Outros dados compartilhados")).not.toBeInTheDocument();
+  });
+
   it("cartão de pesquisa mostra o texto", async () => {
     const { socket } = await mount();
     await ask(socket, "pesquise");

@@ -198,16 +198,18 @@ function Result({ agent, result }: { agent: AgentName; result: unknown }) {
               {b.questions.map((q, i) => (
                 <li key={i} className={ui.plain}>
                   {q}
-                  {b.sharedData[i] ? (
-                    <>
-                      <br />
-                      <span className={ui.muted}>{b.sharedData[i]}</span>
-                    </>
-                  ) : null}
+                  <br />
+                  <span className={ui.muted}>
+                    {b.sharedData[i] || "Não informado o que esta pergunta revela."}
+                  </span>
                 </li>
               ))}
             </ol>
           </div>
+          <List
+            title="Outros dados compartilhados"
+            items={b.sharedData.slice(b.questions.length)}
+          />
           <p className={ui.plain}>{b.narrative}</p>
           <p role="note">Rascunho: nada foi enviado ao assessor.</p>
         </>

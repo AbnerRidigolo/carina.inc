@@ -49,8 +49,9 @@ const KEYWORDS: readonly (readonly [SpecialistName, readonly Matcher[]])[] = [
   [
     "tax",
     [
-      "imposto",
-      word("ir"),
+      word("impostos?"),
+      word("irpf"),
+      word("declaração de ir"),
       "tribut",
       word("darf"),
       "come-cotas",
@@ -60,7 +61,10 @@ const KEYWORDS: readonly (readonly [SpecialistName, readonly Matcher[]])[] = [
     ],
   ],
   ["researcher", ["pesquis", "o que diz", word("fonte"), "verifique", "fact", "notícia"]],
-  ["assessor_liaison", [word("assessora?"), "gerente do banco", "perguntar ao", "pergunte ao"]],
+  [
+    "assessor_liaison",
+    [word("assessor(?:es|as|a)?"), "gerente do banco", "perguntar ao", "pergunte ao"],
+  ],
 ];
 
 const matches = (q: string, m: Matcher): boolean =>

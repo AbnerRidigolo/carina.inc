@@ -739,12 +739,13 @@ describe("limites das saídas dos quatro especialistas novos (saída forjada do 
       }) as never;
       expect(() => refineStrategy(forged)).toThrow(AllProvidersFailedError);
     }
+    // O modelo simulado já barra pelo schema (o refine acima é defesa em profundidade).
     await expect(
       run(
         "strategist",
         strategy({ milestones: [{ goal: "g", byYear: 2040, successProbability: 1.5 }] }),
       ),
-    ).rejects.toThrow(ValidationError); // o modelo simulado já barra pelo schema (refine acima: defesa em profundidade)
+    ).rejects.toThrow(ValidationError);
   });
 
   it("strategist recusa pct não finito no refine", async () => {

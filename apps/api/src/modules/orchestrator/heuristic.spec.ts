@@ -61,9 +61,27 @@ describe("heuristicPlan", () => {
   });
 
   it("imposto/IR/DARF → tax", () => {
-    for (const q of ["quanto de imposto pago?", "declaro o IR este ano", "emitir o DARF"]) {
+    for (const q of ["quanto de imposto pago?", "declaração de IR este ano", "emitir o DARF"]) {
       expect(heuristicPlan(q).agents).toEqual(["tax"]);
     }
+  });
+
+  it("falsos positivos: 'ir' verbo, 'impostor' e 'IR' sozinho (minúsculas perdem a caixa) não acionam tax", () => {
+    for (const q of ["devo ir ao banco amanhã?", "impostor", "(IR)"]) {
+      expect(heuristicPlan(q).agents).toEqual([]);
+    }
+  });
+
+  it("tax: declaração de IR, IRPF, impostos e pós-imposto", () => {
+    for (const q of ["declaração de IR", "IRPF", "meus impostos", "valor pós-imposto"]) {
+      expect(heuristicPlan(q).agents).toEqual(["tax"]);
+    }
+  });
+
+  it("assessores/assessoras casam; meta junto de pontuação casa", () => {
+    expect(heuristicPlan("falar com os assessores").agents).toEqual(["assessor_liaison"]);
+    expect(heuristicPlan("falar com as assessoras").agents).toEqual(["assessor_liaison"]);
+    expect(heuristicPlan("minha meta, hoje").agents).toEqual(["strategist"]);
   });
 
   it("aposentadoria e meta → strategist", () => {

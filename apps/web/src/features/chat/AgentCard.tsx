@@ -14,6 +14,10 @@ const AGENT_LABELS: Record<AgentName, string> = {
   insight: "Insight",
   predictor: "Predictor",
   risk: "Risk",
+  strategist: "Strategist",
+  tax: "Tributário",
+  researcher: "Pesquisa",
+  assessor_liaison: "Assessor",
   navigator: "Navigator",
   executor: "Executor",
 };

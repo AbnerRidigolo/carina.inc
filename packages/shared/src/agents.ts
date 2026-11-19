@@ -1,10 +1,18 @@
 import { z } from "zod";
 import { MoneySchema } from "./money.js";
 
-export const SpecialistNameSchema = z.enum(["insight", "predictor", "risk"]);
+export const SpecialistNameSchema = z.enum([
+  "insight",
+  "predictor",
+  "risk",
+  "strategist",
+  "tax",
+  "researcher",
+  "assessor_liaison",
+]);
 export type SpecialistName = z.infer<typeof SpecialistNameSchema>;
 
-export const AgentNameSchema = z.enum(["insight", "predictor", "risk", "navigator", "executor"]);
+export const AgentNameSchema = z.enum([...SpecialistNameSchema.options, "navigator", "executor"]);
 export type AgentName = z.infer<typeof AgentNameSchema>;
 
 export const PlanSchema = z.object({

@@ -6,8 +6,12 @@ import type { AgentDef, AgentLogger } from "./agent.js";
 import { ExecutorAgent } from "./executor.js";
 import { createInsight } from "./insight.js";
 import { NavigatorAgent } from "./navigator.js";
+import { createAssessorLiaison } from "./assessor-liaison.js";
 import { createPredictor } from "./predictor.js";
+import { createResearcher } from "./researcher.js";
 import { createRisk } from "./risk.js";
+import { createStrategist } from "./strategist.js";
+import { createTax } from "./tax.js";
 
 export const AGENTS_LOGGER = Symbol("AGENTS_LOGGER");
 
@@ -28,6 +32,10 @@ export class AgentRegistry {
       insight: createInsight(models, logger),
       predictor: createPredictor(models, logger),
       risk: createRisk(models, logger),
+      strategist: createStrategist(models, logger),
+      tax: createTax(models, logger),
+      researcher: createResearcher(models, logger),
+      assessor_liaison: createAssessorLiaison(models, logger),
       executor: this.executorAgent,
     };
   }

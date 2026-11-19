@@ -6,7 +6,14 @@
  * NÃO registra o `classifier`: o responder dele nasce com a heurística da Task 18.
  */
 import type { BaseMessage } from "@langchain/core/messages";
-import type { CashFlowForecast, RiskAssessment, ActionProposal } from "@carina/shared";
+import type {
+  ActionProposal,
+  AssessorBrief,
+  CashFlowForecast,
+  RiskAssessment,
+  StrategyPlan,
+  TaxAdvice,
+} from "@carina/shared";
 import type { MockResponder, MockResponderRegistry } from "../llm/mock-models.js";
 import {
   CONTEXT_MESSAGE_ID,
@@ -104,6 +111,54 @@ const risk: MockResponder = () => {
   return out;
 };
 
+const strategist: MockResponder = () => {
+  const out: StrategyPlan = {
+    targetAllocation: [
+      { assetClass: "renda fixa", pct: 50 },
+      { assetClass: "renda variável", pct: 30 },
+      { assetClass: "multimercado", pct: 10 },
+      { assetClass: "exterior", pct: 10 },
+    ],
+    milestones: [{ goal: "independência financeira", byYear: 2040, successProbability: 0.7 }],
+    assumptions: ["inflação em linha com a meta", "retorno real de 4% ao ano"],
+    narrative:
+      "Esta é uma estimativa de longo prazo baseada nas premissas listadas; considere validar " +
+      "com um planejador financeiro.",
+  };
+  return out;
+};
+
+const tax: MockResponder = () => {
+  const out: TaxAdvice = {
+    estimatedTaxBrl: "12000.00",
+    harvestingOpportunities: ["Compensar prejuízos realizados com ganhos em renda variável."],
+    offshoreVsBr: "Estimativa: a tributação offshore exige comparação caso a caso com o Brasil.",
+    actions: ["Revisar prejuízos a compensar antes do fechamento do ano."],
+    consultAccountant: true,
+    narrative:
+      "Estimativa de IR baseada nas posições conhecidas; não é aconselhamento tributário " +
+      "formal, consulte um contador.",
+  };
+  return out;
+};
+
+const researcher: MockResponder = ({ messages }) => {
+  const title = [...textById(messages, CONTEXT_MESSAGE_ID).matchAll(FONTE_RE)][0]?.[1];
+  if (!title) return "A base de conhecimento não tem a informação solicitada.";
+  return `Segundo "${title}" (fonte: base de conhecimento), confiança média; data não informada.`;
+};
+
+const assessorLiaison: MockResponder = ({ messages }) => {
+  const title = [...textById(messages, CONTEXT_MESSAGE_ID).matchAll(FONTE_RE)][0]?.[1];
+  const ref = title ? ` (ref.: ${title})` : "";
+  const out: AssessorBrief = {
+    questions: [`Quais são as condições atuais dos produtos de renda fixa disponíveis${ref}?`],
+    sharedData: ["Revela o interesse do cliente em renda fixa."],
+    narrative: "Rascunho de pergunta ao assessor; nada foi enviado.",
+  };
+  return out;
+};
+
 const executor: MockResponder = ({ messages }) => {
   const question = lastQuestion(messages);
   const m = TRADE_RE.exec(question);
@@ -137,6 +192,10 @@ export function registerAgentMockResponders(registry: MockResponderRegistry): vo
     insight,
     predictor,
     risk,
+    strategist,
+    tax,
+    researcher,
+    assessor_liaison: assessorLiaison,
     executor,
   };
   for (const [key, responder] of Object.entries(responders)) {

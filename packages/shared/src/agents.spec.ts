@@ -36,6 +36,13 @@ describe("agents", () => {
     expect(ok(AgentNameSchema, "outro")).toBe(false);
   });
 
+  it("AgentName inclui os quatro especialistas novos", () => {
+    for (const a of ["strategist", "tax", "researcher", "assessor_liaison"]) {
+      expect(ok(AgentNameSchema, a)).toBe(true);
+      expect(ok(SpecialistNameSchema, a)).toBe(true);
+    }
+  });
+
   it("Plan", () => {
     const plan = {
       complexity: "média",

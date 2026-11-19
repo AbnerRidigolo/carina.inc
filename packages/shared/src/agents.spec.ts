@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   ActionProposalSchema,
   AgentNameSchema,
+  AssessorBriefSchema,
   CashFlowForecastSchema,
   CashFlowScenarioSchema,
   PlanSchema,
   RiskAssessmentSchema,
   SpecialistNameSchema,
+  StrategyPlanSchema,
+  TaxAdviceSchema,
 } from "./agents.js";
 
 const scenario = {
@@ -80,5 +83,56 @@ describe("agents", () => {
     const a = { action: "buy", payload: { code: "X" }, valueBrl: "10.00", rationale: "r" };
     expect(ok(ActionProposalSchema, a)).toBe(true);
     expect(ok(ActionProposalSchema, { ...a, valueBrl: "10.123" })).toBe(false);
+  });
+});
+
+describe("especialistas novos", () => {
+  const plan = {
+    targetAllocation: [{ assetClass: "renda fixa", pct: 60 }],
+    milestones: [{ goal: "aposentadoria", byYear: 2045, successProbability: 0.8 }],
+    assumptions: ["selic 10%"],
+    narrative: "plano",
+  };
+
+  it("StrategyPlan aceita plano válido e recusa pct não numérico e alocação vazia", () => {
+    expect(ok(StrategyPlanSchema, plan)).toBe(true);
+    expect(
+      ok(StrategyPlanSchema, {
+        ...plan,
+        targetAllocation: [{ assetClass: "renda fixa", pct: "60" }],
+      }),
+    ).toBe(false);
+    expect(ok(StrategyPlanSchema, { ...plan, targetAllocation: [] })).toBe(false);
+  });
+
+  it("StrategyPlan recusa successProbability 1.5 e byYear 1999", () => {
+    const m = plan.milestones[0]!;
+    expect(
+      ok(StrategyPlanSchema, { ...plan, milestones: [{ ...m, successProbability: 1.5 }] }),
+    ).toBe(false);
+    expect(ok(StrategyPlanSchema, { ...plan, milestones: [{ ...m, byYear: 1999 }] })).toBe(false);
+  });
+
+  it("TaxAdvice exige Money em estimatedTaxBrl e consultAccountant boolean", () => {
+    const tax = {
+      estimatedTaxBrl: "1200.00",
+      harvestingOpportunities: [],
+      offshoreVsBr: "comparação",
+      actions: ["compensar perdas"],
+      consultAccountant: true,
+      narrative: "texto",
+    };
+    expect(ok(TaxAdviceSchema, tax)).toBe(true);
+    expect(ok(TaxAdviceSchema, { ...tax, estimatedTaxBrl: 1200 })).toBe(false);
+    expect(ok(TaxAdviceSchema, { ...tax, consultAccountant: "sim" })).toBe(false);
+  });
+
+  it("AssessorBrief exige de 1 a 5 perguntas", () => {
+    const brief = { questions: ["q1"], sharedData: ["carteira"], narrative: "texto" };
+    expect(ok(AssessorBriefSchema, brief)).toBe(true);
+    expect(ok(AssessorBriefSchema, { ...brief, questions: [] })).toBe(false);
+    expect(ok(AssessorBriefSchema, { ...brief, questions: ["a", "b", "c", "d", "e", "f"] })).toBe(
+      false,
+    );
   });
 });

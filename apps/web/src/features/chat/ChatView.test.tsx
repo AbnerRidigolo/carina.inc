@@ -118,6 +118,135 @@ describe("ChatView", () => {
     expect(within(risk).getByText("PETR4~VALE3")).toBeInTheDocument();
   });
 
+  it("cartão do strategist mostra a alocação e os marcos", async () => {
+    const { socket } = await mount();
+    await ask(socket, "plano");
+    emit(
+      socket,
+      { type: "agent_started", agent: "strategist" },
+      {
+        type: "agent_result",
+        agent: "strategist",
+        result: {
+          targetAllocation: [
+            { assetClass: "renda fixa", pct: 60 },
+            { assetClass: "exterior", pct: 40 },
+          ],
+          milestones: [{ goal: "independência financeira", byYear: 2040, successProbability: 0.7 }],
+          assumptions: ["retorno real de 4% ao ano"],
+          narrative: "Narrativa do strategist",
+        },
+      },
+    );
+    const card = screen.getByRole("region", { name: /strategist/i });
+    const table = within(card).getByRole("table", { name: /aloca[cç][aã]o/i });
+    expect(within(table).getByText("renda fixa")).toBeInTheDocument();
+    expect(within(table).getByText("60%")).toBeInTheDocument();
+    expect(within(card).getByText(/independência financeira/)).toBeInTheDocument();
+    expect(within(card).getByText(/2040/)).toBeInTheDocument();
+    expect(within(card).getByText(/70%/)).toBeInTheDocument();
+    expect(within(card).getByText("retorno real de 4% ao ano")).toBeInTheDocument();
+    expect(within(card).getByText("Narrativa do strategist")).toBeInTheDocument();
+  });
+
+  it("cartão tributário mostra o IR em R$ e o aviso de contador só com consultAccountant", async () => {
+    const { socket } = await mount();
+    await ask(socket, "imposto");
+    const base = {
+      estimatedTaxBrl: "12000.00",
+      harvestingOpportunities: ["Compensar prejuízos"],
+      offshoreVsBr: "Comparar offshore e Brasil",
+      actions: ["Revisar prejuízos"],
+      narrative: "Narrativa tributária",
+    };
+    emit(
+      socket,
+      { type: "agent_started", agent: "tax" },
+      { type: "agent_result", agent: "tax", result: { ...base, consultAccountant: true } },
+    );
+    const card = screen.getByRole("region", { name: /tribut[aá]rio/i });
+    expect(within(card).getByText(/R\$\s12\.000,00/)).toBeInTheDocument();
+    expect(within(card).getByText("Compensar prejuízos")).toBeInTheDocument();
+    expect(within(card).getByText("Revisar prejuízos")).toBeInTheDocument();
+    expect(within(card).getByText("Consulte um contador antes de agir.")).toBeInTheDocument();
+  });
+
+  it("cartão tributário sem consultAccountant não mostra o aviso de contador", async () => {
+    const { socket } = await mount();
+    await ask(socket, "imposto");
+    emit(
+      socket,
+      { type: "agent_started", agent: "tax" },
+      {
+        type: "agent_result",
+        agent: "tax",
+        result: {
+          estimatedTaxBrl: "0.00",
+          harvestingOpportunities: [],
+          offshoreVsBr: "n/a",
+          actions: [],
+          consultAccountant: false,
+          narrative: "Sem imposto",
+        },
+      },
+    );
+    const card = screen.getByRole("region", { name: /tribut[aá]rio/i });
+    expect(within(card).getByText("Sem imposto")).toBeInTheDocument();
+    expect(within(card).queryByText(/Consulte um contador/)).not.toBeInTheDocument();
+  });
+
+  it("cartão do assessor numera as perguntas e avisa que nada foi enviado", async () => {
+    const { socket } = await mount();
+    await ask(socket, "fale com o assessor");
+    emit(
+      socket,
+      { type: "agent_started", agent: "assessor_liaison" },
+      {
+        type: "agent_result",
+        agent: "assessor_liaison",
+        result: {
+          questions: ["Qual a taxa atual?", "Há carência?"],
+          sharedData: ["Revela o interesse em renda fixa.", "Revela o horizonte do cliente."],
+          narrative: "Rascunho",
+        },
+      },
+    );
+    const card = screen.getByRole("region", { name: /assessor/i });
+    const [first, second, ...rest] = within(card).getAllByRole("listitem");
+    expect(rest).toHaveLength(0);
+    if (!first || !second) throw new Error("esperava duas perguntas");
+    expect(within(first).getByText(/Qual a taxa atual\?/)).toBeInTheDocument();
+    expect(within(first).getByText(/Revela o interesse em renda fixa\./)).toBeInTheDocument();
+    expect(within(second).getByText(/Há carência\?/)).toBeInTheDocument();
+    expect(card.querySelector("ol")).not.toBeNull();
+    expect(within(card).getByText("Rascunho: nada foi enviado ao assessor.")).toBeInTheDocument();
+  });
+
+  it("cartão de pesquisa mostra o texto", async () => {
+    const { socket } = await mount();
+    await ask(socket, "pesquise");
+    emit(
+      socket,
+      { type: "agent_started", agent: "researcher" },
+      { type: "agent_result", agent: "researcher", result: "Segundo a base, confiança média." },
+    );
+    const card = screen.getByRole("region", { name: /pesquisa/i });
+    expect(within(card).getByText("Segundo a base, confiança média.")).toBeInTheDocument();
+  });
+
+  it("resultado fora do schema cai no render genérico", async () => {
+    const { socket } = await mount();
+    await ask(socket, "x");
+    emit(socket, {
+      type: "agent_result",
+      agent: "strategist",
+      result: { targetAllocation: [], segredo: "ZZZ-conteudo-cru" },
+    });
+    const card = screen.getByRole("region", { name: /strategist/i });
+    expect(within(card).getByText(/formato inesperado/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ZZZ-conteudo-cru/)).not.toBeInTheDocument();
+  });
+
   it("executor que não pôde propor a ordem mostra a frase do servidor no card", async () => {
     const { socket } = await mount();
     await ask(socket, "compre 4 ações de ABEV3");

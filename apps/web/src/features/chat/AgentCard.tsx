@@ -1,8 +1,11 @@
 import {
   type AgentName,
+  AssessorBriefSchema,
   CashFlowForecastSchema,
   MoneySchema,
   RiskAssessmentSchema,
+  StrategyPlanSchema,
+  TaxAdviceSchema,
 } from "@carina/shared";
 import { z } from "zod";
 import ui from "../../styles/ui.module.css";
@@ -112,6 +115,101 @@ function Result({ agent, result }: { agent: AgentName; result: unknown }) {
           <List title="Correlações principais" items={r.topCorrelations} />
           <List title="Testes de estresse" items={r.stressFindings} />
           <List title="Sugestões de rebalanceamento" items={r.rebalanceSuggestions} />
+        </>
+      );
+    }
+  } else if (agent === "strategist") {
+    const parsed = StrategyPlanSchema.safeParse(result);
+    if (parsed.success) {
+      const p = parsed.data;
+      return (
+        <>
+          <div className={ui.tableWrap}>
+            <table className={ui.table} aria-label="Alocação-alvo">
+              <thead>
+                <tr>
+                  <th scope="col">Classe de ativo</th>
+                  <th scope="col" className={ui.num}>
+                    Alocação
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {p.targetAllocation.map((a, i) => (
+                  <tr key={`${a.assetClass}-${i}`}>
+                    <th scope="row">{a.assetClass}</th>
+                    <td className={ui.num}>{formatNumber(a.pct)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {p.milestones.length > 0 ? (
+            <div className={styles.sub}>
+              <h4>Marcos</h4>
+              <ul>
+                {p.milestones.map((m, i) => (
+                  <li key={i} className={ui.plain}>
+                    {m.goal}: até {m.byYear}, probabilidade de{" "}
+                    {formatNumber(Math.round(m.successProbability * 100))}%
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <List title="Premissas" items={p.assumptions} />
+          <p className={ui.plain}>{p.narrative}</p>
+        </>
+      );
+    }
+  } else if (agent === "tax") {
+    const parsed = TaxAdviceSchema.safeParse(result);
+    if (parsed.success) {
+      const t = parsed.data;
+      return (
+        <>
+          <p>
+            IR estimado: <span className={styles.bigValue}>{formatBrl(t.estimatedTaxBrl)}</span>
+          </p>
+          <List title="Oportunidades de compensação" items={t.harvestingOpportunities} />
+          <div className={styles.sub}>
+            <h4>Exterior x Brasil</h4>
+            <p className={ui.plain}>{t.offshoreVsBr}</p>
+          </div>
+          <List title="Ações sugeridas" items={t.actions} />
+          <p className={ui.plain}>{t.narrative}</p>
+          {t.consultAccountant ? (
+            <p role="note">
+              <strong>Consulte um contador antes de agir.</strong>
+            </p>
+          ) : null}
+        </>
+      );
+    }
+  } else if (agent === "assessor_liaison") {
+    const parsed = AssessorBriefSchema.safeParse(result);
+    if (parsed.success) {
+      const b = parsed.data;
+      return (
+        <>
+          <div className={styles.sub}>
+            <h4>Perguntas para o assessor</h4>
+            <ol>
+              {b.questions.map((q, i) => (
+                <li key={i} className={ui.plain}>
+                  {q}
+                  {b.sharedData[i] ? (
+                    <>
+                      <br />
+                      <span className={ui.muted}>{b.sharedData[i]}</span>
+                    </>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </div>
+          <p className={ui.plain}>{b.narrative}</p>
+          <p role="note">Rascunho: nada foi enviado ao assessor.</p>
         </>
       );
     }

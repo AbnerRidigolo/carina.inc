@@ -193,6 +193,20 @@ describe("Importação de arquivos: worker e limpeza (integração)", () => {
     for (const e of await inboxOf(job.id)) expect(e).toMatchObject({ tenantId });
   });
 
+  it("OFX importado sai com categorias inferidas onde a regra casa", async () => {
+    const { job } = await upload(fixture("ofx", "conta-sgml-1252.ofx"));
+    await run(job.id);
+    const rows = await sql<{ description: string; category: string | null }>(
+      `SELECT description, category FROM "transaction" WHERE tenant_id = $1 ORDER BY description`,
+    );
+    // "Conta de luz" casa `luz` (moradia); padaria e salário não têm regra e ficam sem categoria.
+    expect(rows.map((r) => [r.description, r.category])).toEqual([
+      ["Conta de luz", "moradia"],
+      ["Padaria São João", null],
+      ["Salário outubro", null],
+    ]);
+  });
+
   it("CSV de 2 500 transações → 3 lotes, 3 cobranças, progresso 1000/2000/2500", async () => {
     const { job } = await upload(csv(2500), GENERICO);
     await run(job.id);

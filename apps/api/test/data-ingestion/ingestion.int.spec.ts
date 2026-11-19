@@ -587,6 +587,63 @@ describe("IngestionService: gravação com cliente resolvido e substituição de
     });
   });
 
+  describe("categorização determinística", () => {
+    const item = (externalId: string, description: string, category?: string) => ({
+      externalId,
+      institution: "Itaú",
+      account: "cc",
+      date: "2026-11-01",
+      description,
+      amountBrl: "-1.00",
+      kind: "debit" as const,
+      ...(category !== undefined ? { category } : {}),
+    });
+    const categories = async () =>
+      Object.fromEntries(
+        (
+          await migratorSql<{ external_id: string; category: string | null }>(
+            `SELECT external_id, category FROM "transaction"
+             WHERE tenant_id = $1 AND client_id = $2 ORDER BY external_id`,
+            [A.tenantId, aRef.id],
+            { tenantId: A.tenantId },
+          )
+        ).map((r) => [r.external_id, r.category]),
+      );
+
+    it("transação sem categoria é gravada com a inferida; com categoria enviada, a enviada prevalece", async () => {
+      await reset(A.tenantId, aRef.id);
+      await asTenant(A.tenantId, () =>
+        svc.upsertTransactions(aRef.externalId, "api", [
+          item("c1", "Uber*Trip"),
+          item("c2", "Uber*Trip", "viagens"),
+          item("c3", "Padaria São João"),
+        ]),
+      );
+      expect(await categories()).toEqual({ c1: "transporte", c2: "viagens", c3: null });
+    });
+
+    it("reenviar o lote sem categoria grava a inferida de novo (idempotente)", async () => {
+      await reset(A.tenantId, aRef.id);
+      const batch = [item("c1", "Aluguel de março"), item("c2", "Netflix")];
+      for (let i = 0; i < 2; i++) {
+        await asTenant(A.tenantId, () => svc.upsertTransactionsFor(aRef, "import", batch));
+      }
+      expect(await categories()).toEqual({ c1: "moradia", c2: "lazer" });
+    });
+
+    it("reenvio com e sem categoria: vale a do último envio", async () => {
+      await reset(A.tenantId, aRef.id);
+      await asTenant(A.tenantId, () =>
+        svc.upsertTransactionsFor(aRef, "import", [item("c1", "Uber", "viagens")]),
+      );
+      expect(await categories()).toEqual({ c1: "viagens" });
+      await asTenant(A.tenantId, () =>
+        svc.upsertTransactionsFor(aRef, "import", [item("c1", "Uber")]),
+      );
+      expect(await categories()).toEqual({ c1: "transporte" });
+    });
+  });
+
   describe("upsertTransactionsFor", () => {
     it("grava e cobra como o POST, sem resolver cliente, e publica data.ingested", async () => {
       await reset(A.tenantId, aRef.id);

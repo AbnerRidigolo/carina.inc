@@ -23,6 +23,7 @@ import { StreamsService } from "../../core/redis/streams.service.js";
 import type { Prisma } from "../../generated/prisma/client.js";
 import { BillingService } from "../billing/billing.service.js";
 import { ClientsService, type ClientRef } from "../tenancy/clients.service.js";
+import { withInferredCategories } from "./categorize.js";
 import {
   IngestionRepository,
   type Page,
@@ -206,7 +207,7 @@ export class IngestionService {
     items: readonly NormalizedTransaction[],
   ): Promise<IngestResult> {
     return this.ingest(clientExternalId, source, items, (tx, rows) =>
-      this.repo.upsertTransactions(tx, source, rows),
+      this.repo.upsertTransactions(tx, source, withInferredCategories(rows)),
     );
   }
 
@@ -217,7 +218,7 @@ export class IngestionService {
     items: readonly NormalizedTransaction[],
   ): Promise<IngestResult> {
     return this.ingestFor(client, source, items, (tx, rows) =>
-      this.repo.upsertTransactions(tx, source, rows),
+      this.repo.upsertTransactions(tx, source, withInferredCategories(rows)),
     );
   }
 

@@ -18,6 +18,10 @@ pontos de segurança e as limitações conhecidas. A descrição dos processos e
 | Modelos | **LangChain.js** com `withFallbacks()` por papel; embeddings NVIDIA | LiteLLM (só Python); misturar LangChain com AI SDK |
 | Cache, limites, eventos | **Redis**: TTL, sorted set + Lua (limites e cota atômicos), **Streams** com consumer groups e DLQ | Limites em memória (não valem com várias instâncias) |
 | Dados de clientes | **Custo zero**: API de ingestão, gerador sintético e (fase 2) importação de arquivos, atrás de `FinancialDataProvider` | Pluggy/Belvo (a partir de R$ 1.500–2.500/mês); APIs da B3 (contrato); Open Finance direto (autorização do BC) |
+| Agentes restantes | Quatro especialistas no mesmo grafo e no mesmo caminho dos três atuais (prompt, schema Zod + `refine`, fallback, mock, cartão na web): strategist, tax, researcher e assessor_liaison | Tool calling para researcher e assessor gravarem na base (escrita disparada por modelo a partir de conteúdo não confiável envenena a base); categorizer como agente no chat (é transformação de dado, não conversa) |
+| Custo por turno | **No máximo 3 especialistas por turno**, na ordem fixa insight, risk, predictor, strategist, tax, researcher, assessor_liaison, na heurística e no `normalizePlan` | Deixar o classificador chamar todos (a pergunta comum passaria a acionar muito mais modelos) |
+| Pesquisa e assessor | Researcher **só sobre a base de conhecimento**, com fontes; assessor_liaison **só redige** (`AssessorBrief`), nada é enviado | Busca web (não há ferramenta, nem havia no Python); envio por WhatsApp ou e-mail (canais são da fase 3) |
+| Categorizer | **Regras determinísticas** na gravação das transações, nos dois caminhos de upsert; `kind` primeiro, depois as regras; sem regra, `null`; categoria enviada nunca é sobrescrita | LLM no ambíguo (custo por transação e resultado não repetível); "outros" inventado (o Sync já mostra "sem categoria") |
 | Testes | **Vitest**, Supertest, Testing Library + MSW; Postgres/Redis reais | Jest (problemas com pacotes só-ESM do NestJS 12) |
 | Qualidade | TypeScript `strict` + `noUncheckedIndexedAccess`, ESLint + Prettier, versões exatas no lockfile | — |
 
@@ -55,6 +59,37 @@ O que foi construído difere do plano em alguns pontos. Cada mudança tem um mot
 - **Node 22.22.2.** O jsdom 31 exige `^22.22.2`. O `.nvmrc` é a única fonte, e o CI, as imagens
   Docker e o `engines` seguem essa versão
   ([`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts)).
+
+### Agentes restantes e categorizer (fase 2, entrega 1)
+
+Desenho completo no [spec](superpowers/specs/2026-11-19-agentes-restantes-design.md). O que a
+implementação mudou em relação a ele:
+
+- **"ir" não é palavra-chave.** O spec listava `ir ` como termo do `tax`. O "ir" solto foi
+  descartado porque também é o verbo ("vou ir ao banco"). Acionam o `tax`: `irpf`, `imposto de
+  renda` (via `impostos?`) e `declaração de IR`. Um "IR" sozinho não aciona. Termos curtos ou
+  ambíguos (`meta`, `imposto`, `fonte`, `assessor`, `darf`) casam só como palavra inteira.
+- **Categorizer: `kind` primeiro.** `buy`, `sell`, `dividend` e `jcp` → `investimento`; `tax` →
+  `impostos`; `fee` → `tarifas`; depois a regra de `impostos` (imposto, darf, iof); depois as
+  regras do Python. "mercado" solto foi retirado das regras (casava Mercado Livre, Mercado Pago e
+  "mercado financeiro" como alimentação).
+- **Cartão do assessor.** Mostra todo o `sharedData`, não só o que casa com cada pergunta: sobras
+  vão em "Outros dados compartilhados" e a pergunta sem entrada correspondente é sinalizada.
+
+### Limitações dos agentes restantes e do categorizer
+
+- **Researcher sem web.** Responde só com a base de conhecimento do cliente (nem o Python tinha
+  busca web). Não grava na base; o `ingest_findings` do Python não foi portado.
+- **Assessor_liaison só redige.** Nada é enviado ao assessor; o `ingest_assessor_knowledge` do
+  Python não foi portado. Os canais (WhatsApp, e-mail) são da fase 3.
+- **Categorizer só por regras, sem parcelas e sem LLM.** Descrição fora das listas fica sem
+  categoria. Não há detecção de parcela (`N/M`): não existe coluna para ela.
+- **Reenvio troca a categoria.** Uma categoria enviada no item nunca é sobrescrita, mas se a mesma
+  transação for reenviada, vale o que vier no último envio (o upsert já funcionava assim): reenviar
+  sem categoria volta a inferida, mesmo que antes tivesse sido enviada uma.
+- **Monitor pendente.** Fica para a entrega 2, porque precisa de um canal de alerta, que não existe.
+- **Palavras-chave são heurística.** Só valem quando o classificador (LLM) falha e no modo mock;
+  uma pergunta fora das listas pode não acionar o especialista certo nesse caminho.
 
 ## Defeitos do Python corrigidos
 
@@ -154,6 +189,16 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Cobrança por lote da importação**: 2.500 transações → 3 lotes, 3 cobranças, progresso 1000/2000/2500 | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("CSV de 2 500 transações → 3 lotes, 3 cobranças, progresso 1000/2000/2500") |
 | **Worker travado perde o job**: depois de `stuck` e reenvio, o worker antigo não avança nem fecha o job tomado por outro (`claim_token`); a limpeza só enxerga tenants com trabalho, sob lock global | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("worker travado (não morto) perde o job: stuck → reenvio → outro claim; o antigo não avança nem fecha", "limpeza: só enxerga tenants com trabalho; outro tenant não é tocado; lock global") |
 | **Isolamento da importação entre tenants**: o mesmo arquivo em tenants diferentes gera jobs independentes; job de outro tenant → 404; escopos `data:write`/`chat`; o progresso só chega ao socket do mesmo tenant e cliente | [`imports.e2e.spec.ts`](../apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo em tenants diferentes gera jobs independentes", "job de outro tenant, id inexistente ou malformado: 404; sem escopo: 403", "chave sem data:write: 403; sem chave: 401"), [`ws.e2e.spec.ts`](../apps/api/test/chat/ws.e2e.spec.ts) ("socket do cliente recebe import_progress e import_finished done; outro tenant não recebe nada") |
+| **No máximo 3 especialistas por turno**, na ordem fixa do plano, na heurística e no `normalizePlan`; uma pergunta que casa 5 áreas roda só 3 | [`heuristic.spec.ts`](../apps/api/src/modules/orchestrator/heuristic.spec.ts) ("corta em 3 na ordem fixa: imposto + risco + aposentadoria + projeção + assessor → [risk, predictor, strategist]", "normalizePlan corta em 3 e mantém a ordem do modelo depois de deduplicar"), [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts) ("pergunta que casa 5 áreas roda só 3 especialistas") |
+| **Palavras-chave sem falso positivo**: "IR" sozinho, o verbo "ir" e "impostor" não acionam o `tax`; "imposto de renda", "IRPF" e "declaração de IR" (com espaços múltiplos) acionam; "metade", "cometa", "irmão" e "assessoria" não acionam ninguém | [`heuristic.spec.ts`](../apps/api/src/modules/orchestrator/heuristic.spec.ts) ("'(IR)' sozinho não aciona tax (minúsculas perdem a caixa); 'ir' verbo e 'impostor' também não", "\"imposto de renda\" → tax (frase fixada, além de impostos?)", "declaração de IR tolera espaços múltiplos entre as palavras", "tax: declaração de IR, IRPF, impostos e pós-imposto", "limite de palavra: metade, cometa, irmão, assessoria não acionam ninguém") |
+| **Saída forjada dos novos especialistas é recusada**: alocação que soma 90, `pct` ou `successProbability` fora da faixa, IR negativo, seis perguntas ao assessor e listas ou textos grandes demais viram `AllProvidersFailedError`; os limites exatos passam | [`agents.spec.ts`](../apps/api/src/modules/agents/agents.spec.ts) ("strategist recusa alocação que soma 90 → AllProvidersFailedError", "strategist aceita soma 100 e a tolerância de 0,5", "strategist recusa successProbability fora de 0..1", "tax recusa estimatedTaxBrl negativo", "tax aceita IR zero e o máximo de 16 dígitos", "assessor_liaison recusa 6 perguntas e item com 501 caracteres", "assessor_liaison aceita 5 perguntas de 500 caracteres"); schemas em [`agents.spec.ts`](../packages/shared/src/agents.spec.ts) ("StrategyPlan recusa successProbability 1.5 e byYear 1999", "TaxAdvice exige Money em estimatedTaxBrl e consultAccountant boolean", "AssessorBrief exige de 1 a 5 perguntas") |
+| **Prompts dos novos agentes**: terminam com o aviso de conteúdo não confiável; o researcher diz que não tem acesso à web e o assessor_liaison que só redige e lista o que revela | [`agents.spec.ts`](../apps/api/src/modules/agents/agents.spec.ts) ("todos os prompts novos terminam com o aviso de conteúdo não confiável", "prompt do researcher diz que não tem acesso à web", "prompt do assessor_liaison diz que só redige e lista o que é revelado") |
+| **Pergunta de imposto de ponta a ponta (mock)**: plano com `tax`, `agent_result` válido em `TaxAdviceSchema` e síntese | [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts) ("pergunta de imposto: plano com tax, resultado válido em TaxAdviceSchema e síntese") |
+| **Categorizer**: `kind` vence a descrição; Mercado Livre, Mercado Pago, "mercado financeiro", Uberlândia, "aguardando" e "R$ 199,00" não casam; acento decomposto casa; sem regra → `null` | [`categorize.spec.ts`](../apps/api/src/modules/data-ingestion/categorize.spec.ts) (tabela `categorize`: "kind vence a descrição", "Mercado Livre não é alimentação", "Mercado Pago não é alimentação", "Uberlândia não casa uber", "R$ 199,00 não casa 99", "FARMÁCIA em NFD → saúde", "texto sem regra → null") |
+| **Categoria enviada nunca é sobrescrita**, e sem regra o item não ganha "outros" | [`categorize.spec.ts`](../apps/api/src/modules/data-ingestion/categorize.spec.ts) ("mantém a categoria enviada e não inventa 'outros'"), [`ingestion.int.spec.ts`](../apps/api/test/data-ingestion/ingestion.int.spec.ts) ("transação sem categoria é gravada com a inferida; com categoria enviada, a enviada prevalece") |
+| **Categorização idempotente**; no reenvio da mesma transação vale o último envio | [`ingestion.int.spec.ts`](../apps/api/test/data-ingestion/ingestion.int.spec.ts) ("reenviar o lote sem categoria grava a inferida de novo (idempotente)", "reenvio com e sem categoria: vale a do último envio") |
+| **Importação categorizada**: o OFX importado sai com categorias onde a regra casa | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("OFX importado sai com categorias inferidas onde a regra casa") |
+| **Cartões dos novos agentes**: strategist, tributário (aviso de contador só com `consultAccountant`), assessor (todo o `sharedData` e o aviso de que nada foi enviado) e pesquisa; resultado fora do schema cai no render genérico | [`ChatView.test.tsx`](../apps/web/src/features/chat/ChatView.test.tsx) ("cartão tributário mostra o IR em R$ e o aviso de contador só com consultAccountant", "cartão do assessor numera as perguntas e avisa que nada foi enviado", "cartão do assessor mostra os dados compartilhados além das perguntas", "cartão do assessor avisa quando a pergunta não tem o que revela", "resultado fora do schema cai no render genérico") |
 | **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](../apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](../apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](../apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
 | **Append-only**: em `usage_record` e `audit_event`, o INSERT do `carina_app` passa e UPDATE, DELETE e TRUNCATE falham com 42501 (permission denied) | [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts); pelo cliente Prisma do serviço (UPDATE e DELETE recusados): [`watchtower.int.spec.ts`](../apps/api/test/watchtower/watchtower.int.spec.ts) |
@@ -291,8 +336,9 @@ O que **não** está feito ou tem limite conhecido na fase 1:
   queima da cota mensal, mas não a confere: dimensione-o pela cota do plano.
 - **Modo live sem teste automatizado.** A cadeia de fallback é testada com modelos falsos; os ids
   `:free` do OpenRouter em `models.yaml` têm `TODO confirmar` e podem mudar.
-- **Agentes da fase 1:** navigator, insight, predictor, risk e executor. Os outros seis do Python
-  ficam para a fase 2. Os docs [`AGENTS.md`](AGENTS.md), [`B2B.md`](B2B.md) e
+- **Agentes:** navigator, insight, predictor, risk, strategist, tax, researcher, assessor_liaison
+  e executor no chat, mais o categorizer na ingestão. Falta o monitor (entrega 2); ver
+  [Limitações dos agentes restantes](#limitações-dos-agentes-restantes-e-do-categorizer). Os docs [`AGENTS.md`](AGENTS.md), [`B2B.md`](B2B.md) e
   [`DEPLOYMENT.md`](DEPLOYMENT.md) ainda descrevem a versão Python e a visão de produto.
 - **Conversa guardada no checkpoint.** O schema `langgraph` guarda as mensagens da conversa
   (perguntas e respostas, em texto) sem RLS (são tabelas da biblioteca), sem TTL e sem limpeza em

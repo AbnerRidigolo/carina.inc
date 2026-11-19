@@ -282,8 +282,11 @@ A lista completa, com os próximos passos de engenharia em ordem de prioridade, 
 ## Roadmap
 
 **Fase 2 — produtos B2B:** importação de arquivos (OFX, CSV e planilhas da Área do Investidor B3
-já feitos; notas de corretagem em PDF na entrega 2), AOPs, `evaluation`, `builder` e os seis agentes restantes
-(strategist, researcher, assessor_liaison, monitor, categorizer e tax).
+já feitos; notas de corretagem em PDF na entrega 2), AOPs, `evaluation`, `builder` e os agentes restantes.
+Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
+categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
+base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor fica para a
+entrega 2, porque depende de um canal de alerta.
 
 **Fase 3 — integrações e remoção do Python:** notificações (WhatsApp e SMTP), monitor de carteiras
 e remoção de `legacy/python` e do job `legacy-python` do CI.

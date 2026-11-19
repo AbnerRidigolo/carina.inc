@@ -48,7 +48,8 @@ apps/api/src/modules
   limits          RateLimitGuard (janela deslizante) e QuotaService (cota mensal), em Lua
   llm             ModelFactory por papel, withFallbacks, limitador por provedor, embeddings, mock
   knowledge       ingestão de documentos (chunks, entidades, relações, embeddings) e busca híbrida
-  agents          navigator, insight, predictor, risk, executor (prompt + schema + limites)
+  agents          navigator, insight, predictor, risk, strategist, tax, researcher,
+                  assessor_liaison, executor (prompt + schema + limites)
   orchestrator    grafo LangGraph, checkpointer Postgres, ResumeWorker
   inbox           risco, solicitações, decisão com trava, executores simulados, execução única,
                   reconciliação
@@ -56,7 +57,7 @@ apps/api/src/modules
   watchtower      flags de compliance e trilha de auditoria append-only (pergunta com PII
                   mascarada e truncada; resposta só como digest)
   chat            POST /chat, ticket do WS, ChatGateway, InboxBroadcast
-  data-ingestion  API de ingestão em lote, gerador sintético, SyncWorker
+  data-ingestion  API de ingestão em lote, gerador sintético, categorizer, SyncWorker
   imports         upload de OFX/CSV/XLSX B3, parsers, ImportWorker e ImportCleanupJob
   market          cotações, histórico e indicadores macro (brapi.dev + BCB SGS ou mock), cache no
                   Redis, rotas `/api/market/*` e `MarketService.priceFor` (preço de servidor)
@@ -134,6 +135,15 @@ Dinheiro é `numeric(18,2)` e trafega como string decimal (`MoneySchema`). Quant
   instituições, categorias) e relações. Um lock Redis por `(tenant, cliente)` serializa as
   sincronizações. Quem não pega o lock relança `SyncBusyError` e a entrega é repetida pelo
   reclaim.
+- **Categorizer** (`data-ingestion/categorize.ts`, sem LLM): `IngestionService` chama
+  `withInferredCategories` nos dois caminhos de upsert de transações, o que cobre a API de
+  ingestão, a importação de arquivos e o seed. Ordem: (1) `kind` decide (`buy`, `sell`,
+  `dividend`, `jcp` → `investimento`; `tax` → `impostos`; `fee` → `tarifas`); (2) regra de
+  `impostos` (imposto, darf, iof); (3) as regras do Python (investimento, moradia, alimentação,
+  transporte, saúde, lazer), com listas de palavra inteira e de trecho, sem acento e sem
+  distinção de caixa; "mercado" solto ficou de fora (Mercado Livre e Mercado Pago não são
+  alimentação). Sem regra, a categoria fica nula. Uma categoria enviada no item nunca é
+  sobrescrita. Não detecta parcelas.
 
 ## 6. Modelos (`llm`)
 
@@ -170,10 +180,29 @@ flowchart LR
 - **`classify`** usa o papel `reasoning` com saída estruturada (`Plan`). A saída do modelo é
   revalidada (`normalizePlan`): ele pode desligar a execução, mas só liga `wantsExecution` se a
   própria pergunta tiver um verbo de execução. Se todos os modelos falharem, cai na heurística
-  por palavras-chave do Python.
+  por palavras-chave (`heuristic.ts`).
+- **Limite de custo na classificação**: no máximo **3 especialistas por turno**
+  (`MAX_SPECIALISTS`), tanto na heurística quanto em `normalizePlan`, na ordem fixa do plano:
+  insight, risk, predictor, strategist, tax, researcher, assessor_liaison (não é a ordem do enum).
+  Termos curtos ou ambíguos casam só como palavra inteira. A palavra solta "ir" ficou de fora de
+  propósito (é também o verbo): "IRPF", "imposto de renda" e "declaração de IR" acionam o `tax`,
+  um "IR" sozinho não.
 - **`retrieve`** faz a busca híbrida no conhecimento do cliente.
-- **Especialistas** (insight, predictor, risk) rodam em paralelo via `Send`. A falha de um vira
-  `{agent, error}` no estado, e a síntese menciona a análise que faltou.
+- **Especialistas** (insight, predictor, risk, strategist, tax, researcher, assessor_liaison)
+  rodam em paralelo via `Send`, no máximo 3 por turno. A falha de um vira `{agent, error}` no
+  estado, e a síntese menciona a análise que faltou. Todos têm prompt com o aviso de conteúdo não
+  confiável e saída limitada por `refine` (`output-limits.ts`):
+  - **strategist** (`reasoning`, `StrategyPlan`: alocação alvo que soma 100 ± 0,5, marcos com
+    probabilidade 0..1) e **tax** (`reasoning`, `TaxAdvice`: IR estimado ≥ 0 e `consultAccountant`)
+    estimam e recomendam; não executam (propostas vão ao Executor);
+  - **researcher** (`conversational`, texto) responde **só com a base de conhecimento**, cita as
+    fontes pelo título e diz quando a base não tem a resposta. Não há busca web nem gravação na base;
+  - **assessor_liaison** (`conversational`, `AssessorBrief`: 1 a 5 perguntas e o que cada uma
+    revela do cliente em `sharedData`) **só redige**; nada é enviado (canais são da fase 3).
+  O filtro do `agent_result` aceita qualquer `SpecialistName`. A cobrança não muda: o tipo de
+  trabalho continua vindo do número de agentes do plano. Na web, `AgentCard` tem um cartão por
+  schema; o do assessor mostra todo `sharedData` (extras em "Outros dados compartilhados" e o que
+  falta é sinalizado com "Não informado o que esta pergunta revela.").
 - **`respond` / `synthesize`**: o Navigator produz a resposta final (em streaming de `token`).
 - **`executor`** gera uma `ActionProposal` validada. `classifyRisk`: `READ` executa direto,
   `REVERSIBLE` executa, e **qualquer outra ação é `IRREVERSIBLE`**. Para uma ação irreversível o

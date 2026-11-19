@@ -15,8 +15,17 @@ const tx = (over: Partial<NormalizedTransaction> = {}): NormalizedTransaction =>
 
 describe("categorize", () => {
   it.each([
-    ["FARMÁCIA em NFD → saúde", "FARMÁCIA Popular", "debit", "saúde"],
-    ["FARMÁCIA composta → saúde", "FARMÁCIA Popular", "debit", "saúde"],
+    ["FARMÁCIA em NFD → saúde", "FARMÁCIA Popular".normalize("NFD"), "debit", "saúde"],
+    ["Imposto de renda → impostos", "Imposto de renda", "debit", "impostos"],
+    ["IOF compra internacional → impostos", "IOF compra internacional", "debit", "impostos"],
+    ["Posto Ipiranga → transporte", "Posto Ipiranga", "debit", "transporte"],
+    ["Mercado Livre não é alimentação", "Mercado Livre", "debit", null],
+    ["Mercado Pago não é alimentação", "Mercado Pago", "debit", null],
+    ["mercado financeiro não é alimentação", "mercado financeiro", "debit", null],
+    ["Supermercado Extra → alimentação", "Supermercado Extra", "debit", "alimentação"],
+    ["Uberlândia não casa uber", "Uberlândia", "debit", null],
+    ["Uber Eats segue transporte", "Uber Eats", "debit", "transporte"],
+    ["aguardando não casa agua", "Pagamento aguardando", "debit", null],
     ["Uber*Trip → transporte", "Uber*Trip", "debit", "transporte"],
     ["Corrida 99 → transporte", "Corrida 99", "debit", "transporte"],
     ["R$ 199,00 não casa 99", "Pagamento R$ 199,00", "debit", null],
@@ -43,8 +52,15 @@ describe("withInferredCategories", () => {
       tx({ externalId: "b", description: "Uber" }),
       tx({ externalId: "c", description: "Uber", category: "" }),
       tx({ externalId: "d" }),
+      tx({ externalId: "e", description: "Uber", category: "   " }),
     ]);
-    expect(out.map((i) => i.category)).toEqual(["viagens", "transporte", "transporte", undefined]);
+    expect(out.map((i) => i.category)).toEqual([
+      "viagens",
+      "transporte",
+      "transporte",
+      undefined,
+      "transporte",
+    ]);
     expect("category" in (out[3] ?? {})).toBe(false);
   });
 });

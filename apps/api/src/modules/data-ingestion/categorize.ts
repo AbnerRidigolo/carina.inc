@@ -17,14 +17,46 @@ const KIND_CATEGORY: Partial<Record<Kind, string>> = {
   fee: "tarifas",
 };
 
-/** Porta de `_RULES` (legacy/python/.../categorizer.py), na mesma ordem de categorias. */
-const RULES: readonly (readonly [string, readonly string[]])[] = [
-  ["investimento", ["corretora", "tesouro", "cdb", "fundo", "b3", "xp", "nuinvest"]],
-  ["moradia", ["aluguel", "condominio", "iptu", "luz", "agua", "energia"]],
-  ["alimentação", ["supermercado", "restaurante", "ifood", "mercado"]],
-  ["transporte", ["uber", "99", "combustivel", "posto", "estacionamento"]],
-  ["saúde", ["farmacia", "hospital", "consulta", "plano de saude"]],
-  ["lazer", ["netflix", "spotify", "cinema", "viagem", "hotel"]],
+interface Rule {
+  category: string;
+  /** Casam como palavra inteira (evita "luz" em "Luzia", "posto" em "imposto", "99" em "199"). */
+  whole: readonly string[];
+  /** Casam como trecho da descrição. */
+  contains: readonly string[];
+}
+
+/**
+ * Porta de `_RULES` (legacy/python/.../categorizer.py), na mesma ordem de categorias, com
+ * `impostos` na frente e sem o `mercado` solto (casava "Mercado Livre" e "mercado financeiro").
+ */
+const RULES: readonly Rule[] = [
+  { category: "impostos", whole: ["imposto", "impostos", "darf", "iof"], contains: [] },
+  {
+    category: "investimento",
+    whole: ["cdb", "b3", "xp"],
+    contains: ["corretora", "tesouro", "fundo", "nuinvest"],
+  },
+  {
+    category: "moradia",
+    whole: ["luz", "agua"],
+    contains: ["aluguel", "condominio", "iptu", "energia"],
+  },
+  {
+    category: "alimentação",
+    whole: [],
+    contains: ["supermercado", "mercadinho", "restaurante", "ifood"],
+  },
+  {
+    category: "transporte",
+    whole: ["uber", "99", "posto"],
+    contains: ["combustivel", "estacionamento"],
+  },
+  {
+    category: "saúde",
+    whole: [],
+    contains: ["farmacia", "hospital", "consulta", "plano de saude"],
+  },
+  { category: "lazer", whole: [], contains: ["netflix", "spotify", "cinema", "viagem", "hotel"] },
 ];
 
 /** Minúsculas, NFD e sem marcas combinantes: "FARMÁCIA" e "farmacia" se igualam. */
@@ -32,20 +64,22 @@ function fold(text: string): string {
   return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 }
 
-const SHORT_WORD = 3;
+function hasWholeWord(text: string, word: string): boolean {
+  return new RegExp(`(?<![\\p{L}\\p{N}])${word}(?![\\p{L}\\p{N}])`, "u").test(text);
+}
 
-/** Palavras curtas (`99`, `xp`, `luz`) só como palavra inteira; as demais por substring. */
-function hasWord(haystack: string, word: string): boolean {
-  if (word.length > SHORT_WORD) return haystack.includes(word);
-  return new RegExp(`(?<![\\p{L}\\p{N}])${word}(?![\\p{L}\\p{N}])`, "u").test(haystack);
+function matches(text: string, rule: Rule): boolean {
+  return (
+    rule.whole.some((w) => hasWholeWord(text, w)) || rule.contains.some((w) => text.includes(w))
+  );
 }
 
 export function categorize(description: string, kind: Kind): string | null {
   const byKind = KIND_CATEGORY[kind];
   if (byKind !== undefined) return byKind;
   const text = fold(description);
-  for (const [category, words] of RULES) {
-    if (words.some((w) => hasWord(text, w))) return category;
+  for (const rule of RULES) {
+    if (matches(text, rule)) return rule.category;
   }
   return null;
 }
@@ -55,10 +89,10 @@ export function withInferredCategories(
   items: readonly NormalizedTransaction[],
 ): NormalizedTransaction[] {
   return items.map((item) => {
-    if (item.category !== undefined && item.category !== "") return item;
+    if (item.category !== undefined && item.category.trim() !== "") return item;
     const inferred = categorize(item.description, item.kind);
     const base = { ...item };
-    // `category` vazio é descartado: sem regra, o item segue sem categoria.
+    // `category` vazia ou só com espaços é descartada: sem regra, o item segue sem categoria.
     delete base.category;
     return inferred === null ? base : { ...base, category: inferred };
   });

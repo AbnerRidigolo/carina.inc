@@ -99,8 +99,10 @@ alocação, probabilidades em 0..1, IR ≥ 0.
 
 - `orchestrator.service.ts`: o filtro do `agent_result` do nó `specialist` passa a aceitar qualquer
   `SpecialistName` (`SpecialistNameSchema.safeParse`), não a lista fixa de três.
-- Cobrança: o tipo de trabalho continua sendo decidido como hoje (pela complexidade do plano); os
-  novos agentes entram em `usage_record.agents`. Sem tipo de trabalho novo.
+- Cobrança: o tipo de trabalho continua sendo decidido por `classifyWork` (`pricing.ts`): um turno
+  com `tax` no plano é `optimization` (R$ 30,00), como no Python (a fase 2 exige os mesmos tipos);
+  os demais seguem pelo número de agentes. Os novos agentes entram em `usage_record.agents`. Sem
+  tipo de trabalho novo.
 - Mock (`mock-responders.ts`): responders determinísticos para os quatro, válidos nos schemas, que
   citam o primeiro título de fonte quando houver (o researcher sempre). O mock do classificador
   continua sendo a heurística.

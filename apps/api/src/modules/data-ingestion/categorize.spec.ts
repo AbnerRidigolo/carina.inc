@@ -39,6 +39,14 @@ describe("categorize", () => {
     ["Conta de luz → moradia (palavra curta com limite)", "Conta de luz", "debit", "moradia"],
     ["'luz' dentro de outra palavra não casa", "Luzia Maria", "debit", null],
     ["kind vence a descrição", "Supermercado", "tax", "impostos"],
+    ["TARIFA CONSULTA SALDO → tarifas", "TARIFA CONSULTA SALDO", "debit", "tarifas"],
+    ["Tar. consulta extrato → tarifas", "Tar. consulta extrato", "debit", "tarifas"],
+    ["Anuidade do cartão → tarifas", "Anuidade do cartão", "debit", "tarifas"],
+    ["'tar' dentro de outra palavra não casa", "Tarso Silva", "debit", null],
+    ["Consulta médica → saúde", "Consulta médica Dr. Paulo", "debit", "saúde"],
+    ["consulta avulsa sem tarifa → null", "Consulta ao SPC", "debit", null],
+    ["Fundo de reserva condomínio → moradia", "Fundo de reserva condomínio", "debit", "moradia"],
+    ["Fundo de investimento segue investimento", "Aplicação fundo XP", "debit", "investimento"],
     ["texto sem regra → null", "Padaria São João", "debit", null],
   ] as const)("%s", (_t, description, kind, expected) => {
     expect(categorize(description, kind)).toBe(expected);

@@ -191,7 +191,9 @@ flowchart LR
 - **Especialistas** (insight, predictor, risk, strategist, tax, researcher, assessor_liaison)
   rodam em paralelo via `Send`, no máximo 3 por turno. A falha de um vira `{agent, error}` no
   estado, e a síntese menciona a análise que faltou. Todos têm prompt com o aviso de conteúdo não
-  confiável e saída limitada por `refine` (`output-limits.ts`):
+  confiável. A saída dos que têm schema (predictor, risk, strategist, tax e assessor_liaison) é
+  limitada por `refine` (`output-limits.ts`); o researcher (como o insight, ambos em texto) não tem `refine` e só
+  é cortado por `MAX_OUTPUT_CHARS`/`MAX_RESULT_CHARS`:
   - **strategist** (`reasoning`, `StrategyPlan`: alocação alvo que soma 100 ± 0,5, marcos com
     probabilidade 0..1) e **tax** (`reasoning`, `TaxAdvice`: IR estimado ≥ 0 e `consultAccountant`)
     estimam e recomendam; não executam (propostas vão ao Executor);
@@ -199,8 +201,9 @@ flowchart LR
     fontes pelo título e diz quando a base não tem a resposta. Não há busca web nem gravação na base;
   - **assessor_liaison** (`conversational`, `AssessorBrief`: 1 a 5 perguntas e o que cada uma
     revela do cliente em `sharedData`) **só redige**; nada é enviado (canais são da fase 3).
-  O filtro do `agent_result` aceita qualquer `SpecialistName`. A cobrança não muda: o tipo de
-  trabalho continua vindo do número de agentes do plano. Na web, `AgentCard` tem um cartão por
+  O filtro do `agent_result` aceita qualquer `SpecialistName`. Na cobrança, um turno com `tax` no
+  plano é `optimization` (R$ 30,00), como no Python; os demais turnos seguem pelo número de agentes.
+  Na web, `AgentCard` tem um cartão por
   schema; o do assessor mostra todo `sharedData` (extras em "Outros dados compartilhados" e o que
   falta é sinalizado com "Não informado o que esta pergunta revela.").
 - **`respond` / `synthesize`**: o Navigator produz a resposta final (em streaming de `token`).
@@ -260,7 +263,8 @@ flowchart LR
 
 **Cobrança** ([`pricing.ts`](../apps/api/src/modules/billing/pricing.ts)):
 
-- o tipo de trabalho do chat vem dos agentes do plano: nenhum → `query` R$ 1,50; um →
+- o tipo de trabalho do chat vem dos agentes do plano: com `tax` (ou `tax_optimizer`,
+  `rebalancer`) → `optimization` R$ 30,00, como no Python; senão nenhum → `query` R$ 1,50; um →
   `analysis` R$ 7,50; dois ou mais → `multi_agent_analysis` R$ 15,00;
 - `execution` custa R$ 75,00 + `round_half_up(valor × EXECUTION_FEE_PCT / 100, 2)`, com taxa
   padrão de 0,5%;

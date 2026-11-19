@@ -137,6 +137,21 @@ describe("prompts portados", () => {
     expect(SYNTHESIZE_PROMPT).toMatch(/tributação/);
     expect(SYNTHESIZE_PROMPT).toMatch(/não constitui recomendação/);
   });
+
+  it("síntese: o aviso também vale para plano de longo prazo, alocação-alvo e probabilidade de sucesso", () => {
+    const trigger = SYNTHESIZE_PROMPT.split("\n").find((l) =>
+      l.includes("não constitui recomendação"),
+    );
+    expect(trigger).toMatch(/plano de longo prazo/);
+    expect(trigger).toMatch(/alocação-alvo/);
+    expect(trigger).toMatch(/probabilidade de sucesso/);
+  });
+
+  it("síntese: nunca afirma acesso à web nem envio de mensagens ao assessor", () => {
+    expect(SYNTHESIZE_PROMPT).toContain(
+      "O CARINA não acessa a web nem envia mensagens ao assessor; nunca afirme o contrário.",
+    );
+  });
 });
 
 describe("AgentRegistry", () => {

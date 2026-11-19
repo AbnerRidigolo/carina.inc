@@ -31,6 +31,10 @@ interface Rule {
  */
 const RULES: readonly Rule[] = [
   { category: "impostos", whole: ["imposto", "impostos", "darf", "iof"], contains: [] },
+  // "Tar. consulta extrato" é tarifa bancária, não saúde: vem antes de `saúde`.
+  { category: "tarifas", whole: ["tarifa", "tar", "anuidade"], contains: [] },
+  // "Fundo de reserva" do condomínio não é aplicação: vem antes de `investimento` ("fundo").
+  { category: "moradia", whole: [], contains: ["fundo de reserva"] },
   {
     category: "investimento",
     whole: ["cdb", "b3", "xp"],
@@ -54,7 +58,7 @@ const RULES: readonly Rule[] = [
   {
     category: "saúde",
     whole: [],
-    contains: ["farmacia", "hospital", "consulta", "plano de saude"],
+    contains: ["farmacia", "hospital", "consulta medica", "plano de saude"],
   },
   { category: "lazer", whole: [], contains: ["netflix", "spotify", "cinema", "viagem", "hotel"] },
 ];

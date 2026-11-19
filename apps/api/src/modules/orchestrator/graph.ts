@@ -86,7 +86,7 @@ import type { ModelFactory } from "../llm/model-factory.js";
 import type { MarketService } from "../market/market.service.js";
 import { MarketPriceError, type MarketPriceErrorCode } from "../market/market-price-error.js";
 import type { StreamsService } from "../../core/redis/streams.service.js";
-import { CLASSIFIER_PROMPT, heuristicPlan, normalizePlan } from "./heuristic.js";
+import { CLASSIFIER_PROMPT, heuristicPlan, MAX_SPECIALISTS, normalizePlan } from "./heuristic.js";
 import {
   type Execution,
   GraphState,
@@ -206,7 +206,8 @@ export function buildGraph(deps: GraphDeps, checkpointer: BaseCheckpointSaver) {
     });
 
   const route = (state: GraphStateValue) => {
-    const specialists = state.plan?.agents ?? [];
+    // Defesa em profundidade: o plano já é cortado no classificador, mas o estado pode vir de fora.
+    const specialists = (state.plan?.agents ?? []).slice(0, MAX_SPECIALISTS);
     if (specialists.length === 0) return "respond";
     return specialists.map(
       (agent) =>

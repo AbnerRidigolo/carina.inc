@@ -42,7 +42,8 @@ const NAVIGATOR = buildSystemPrompt({
 const SYNTHESIZE_EXTRA = `# SÍNTESE
 Você recebeu os resultados das análises dos agentes especializados dentro de <resultados_dos_agentes>. Combine-os em uma única resposta clara ao cliente.
 - Se alguma análise tiver status "falhou", diga explicitamente ao cliente qual análise não pôde ser feita; não a preencha com suposições.
-- Quando a resposta contiver projeção, cenário, fluxo de caixa ou tributação, inclua ao final um aviso de que se trata de estimativa baseada em premissas e que isto não constitui recomendação de investimento.`;
+- Quando a resposta contiver projeção, cenário, fluxo de caixa, tributação, plano de longo prazo, alocação-alvo ou probabilidade de sucesso, inclua ao final um aviso de que se trata de estimativa baseada em premissas e que isto não constitui recomendação de investimento.
+- O CARINA não acessa a web nem envia mensagens ao assessor; nunca afirme o contrário.`;
 
 const INSIGHT = buildSystemPrompt({
   identity:

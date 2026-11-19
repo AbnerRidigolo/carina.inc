@@ -158,6 +158,8 @@ describe("Chat REST", () => {
     const body = ChatResponseSchema.parse(res.body);
     expect(body.plan.agents).toEqual(["tax"]);
     expect(TaxAdviceSchema.safeParse(body.results["tax"]).success).toBe(true);
+    // Como no Python: turno com tax é `optimization`, não `analysis` (pricing.ts, OPTIMIZATION_AGENTS).
+    expect(body.usage).toEqual({ workType: "optimization", priceBrl: "30.00" });
     expect(body.answer.length).toBeGreaterThan(0);
   });
 

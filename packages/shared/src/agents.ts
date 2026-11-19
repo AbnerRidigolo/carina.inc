@@ -1,10 +1,18 @@
 import { z } from "zod";
 import { MoneySchema } from "./money.js";
 
-export const SpecialistNameSchema = z.enum(["insight", "predictor", "risk"]);
+export const SpecialistNameSchema = z.enum([
+  "insight",
+  "predictor",
+  "risk",
+  "strategist",
+  "tax",
+  "researcher",
+  "assessor_liaison",
+]);
 export type SpecialistName = z.infer<typeof SpecialistNameSchema>;
 
-export const AgentNameSchema = z.enum(["insight", "predictor", "risk", "navigator", "executor"]);
+export const AgentNameSchema = z.enum([...SpecialistNameSchema.options, "navigator", "executor"]);
 export type AgentName = z.infer<typeof AgentNameSchema>;
 
 export const PlanSchema = z.object({
@@ -46,3 +54,37 @@ export const ActionProposalSchema = z.object({
   rationale: z.string(),
 });
 export type ActionProposal = z.infer<typeof ActionProposalSchema>;
+
+// Plano estratégico de longo prazo (agente strategist).
+export const StrategyPlanSchema = z.object({
+  targetAllocation: z.array(z.object({ assetClass: z.string(), pct: z.number() })).min(1),
+  milestones: z.array(
+    z.object({
+      goal: z.string(),
+      byYear: z.number().int().min(2000).max(2200),
+      successProbability: z.number().min(0).max(1),
+    }),
+  ),
+  assumptions: z.array(z.string()),
+  narrative: z.string(),
+});
+export type StrategyPlan = z.infer<typeof StrategyPlanSchema>;
+
+// Orientação tributária (agente tax).
+export const TaxAdviceSchema = z.object({
+  estimatedTaxBrl: MoneySchema,
+  harvestingOpportunities: z.array(z.string()),
+  offshoreVsBr: z.string(),
+  actions: z.array(z.string()),
+  consultAccountant: z.boolean(),
+  narrative: z.string(),
+});
+export type TaxAdvice = z.infer<typeof TaxAdviceSchema>;
+
+// Briefing para o assessor humano (agente assessor_liaison).
+export const AssessorBriefSchema = z.object({
+  questions: z.array(z.string()).min(1).max(5),
+  sharedData: z.array(z.string()),
+  narrative: z.string(),
+});
+export type AssessorBrief = z.infer<typeof AssessorBriefSchema>;

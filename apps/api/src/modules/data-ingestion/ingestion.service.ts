@@ -23,6 +23,7 @@ import { StreamsService } from "../../core/redis/streams.service.js";
 import type { Prisma } from "../../generated/prisma/client.js";
 import { BillingService } from "../billing/billing.service.js";
 import { ClientsService, type ClientRef } from "../tenancy/clients.service.js";
+import { withInferredCategories } from "./categorize.js";
 import {
   IngestionRepository,
   type Page,
@@ -171,6 +172,12 @@ export function dedupeByExternalId<T extends { externalId: string }>(items: read
   );
 }
 
+function assertBatchSize(items: readonly unknown[]): void {
+  if (items.length === 0 || items.length > MAX_BATCH_ITEMS) {
+    throw new ValidationError(`O lote precisa ter de 1 a ${MAX_BATCH_ITEMS} itens`);
+  }
+}
+
 @Injectable()
 export class IngestionService {
   constructor(
@@ -200,7 +207,74 @@ export class IngestionService {
     items: readonly NormalizedTransaction[],
   ): Promise<IngestResult> {
     return this.ingest(clientExternalId, source, items, (tx, rows) =>
-      this.repo.upsertTransactions(tx, source, rows),
+      this.repo.upsertTransactions(tx, source, withInferredCategories(rows)),
+    );
+  }
+
+  /** Cliente já resolvido (o worker de importação): não cria nem busca pelo `externalId`. */
+  upsertTransactionsFor(
+    client: ClientRef,
+    source: Source,
+    items: readonly NormalizedTransaction[],
+  ): Promise<IngestResult> {
+    return this.ingestFor(client, source, items, (tx, rows) =>
+      this.repo.upsertTransactions(tx, source, withInferredCategories(rows)),
+    );
+  }
+
+  /**
+   * Substitui a fotografia de posições importadas (`source = "import"`) das instituições dadas,
+   * numa transação só (spec §5.5): fotografia mais antiga que a gravada → `stale`, sem gravar,
+   * cobrar nem publicar; senão apaga as importadas dessas instituições que não estão em `items`,
+   * faz o upsert e cobra um lote. Posições de `api` e `synthetic` nunca são tocadas.
+   * `keepInstitutions` (subconjunto de `institutions`): só recebem o upsert, nada é apagado delas
+   * (o arquivo teve linha recusada dessa instituição, então a fotografia dela está incompleta).
+   */
+  async replaceImportedPositions(
+    client: ClientRef,
+    input: {
+      institutions: readonly string[];
+      keepInstitutions?: readonly string[];
+      asOf: string;
+      items: readonly NormalizedPosition[];
+    },
+  ): Promise<IngestResult & { removed: number; stale: boolean }> {
+    assertBatchSize(input.items);
+    assertDay("asOf", input.asOf);
+    if (input.institutions.length === 0) {
+      throw new ValidationError("institutions precisa ter ao menos uma instituição");
+    }
+    const known = new Set(input.institutions);
+    for (const item of input.items) {
+      if (!known.has(item.institution)) {
+        throw new ValidationError("Toda posição precisa ser de uma das instituições informadas");
+      }
+      if (item.asOf !== input.asOf) {
+        throw new ValidationError("Toda posição precisa ter o asOf da fotografia");
+      }
+    }
+    const rows = dedupeByExternalId(input.items);
+    const institutions = [...input.institutions];
+    const keep = new Set(input.keepInstitutions ?? []);
+    const replaced = institutions.filter((i) => !keep.has(i));
+    const done = await this.commitBatch(client, "import", async (tx) => {
+      await this.repo.lockImportedPositions(tx);
+      const latest = await this.repo.latestImportedAsOf(tx, institutions);
+      if (latest !== null && latest > input.asOf) return null;
+      const removed = await this.repo.deleteImportedPositionsExcept(tx, {
+        institutions: replaced,
+        keepExternalIds: rows.map((r) => r.externalId),
+      });
+      const upserted = await this.repo.upsertPositions(tx, "import", rows);
+      return { upserted, removed, stale: false };
+    });
+    return (
+      done ?? {
+        upserted: 0,
+        removed: 0,
+        stale: true,
+        usage: { workType: "data_ingestion", priceBrl: "0.00" },
+      }
     );
   }
 
@@ -298,23 +372,53 @@ export class IngestionService {
     );
   }
 
+  /**
+   * Ingestão HTTP: valida o lote, resolve (ou cria) o cliente pelo `externalId` e delega a
+   * `ingestFor`, o caminho único de gravação.
+   */
   private async ingest<T extends { externalId: string }>(
     clientExternalId: string,
     source: Source,
     items: readonly T[],
     upsert: (tx: Prisma.TransactionClient, rows: T[]) => Promise<number>,
   ): Promise<IngestResult> {
-    if (items.length === 0 || items.length > MAX_BATCH_ITEMS) {
-      throw new ValidationError(`O lote precisa ter de 1 a ${MAX_BATCH_ITEMS} itens`);
-    }
-    const { tenantId } = TenantContext.current();
+    assertBatchSize(items);
     const client = await this.clients.resolve(clientExternalId, { create: true });
-    const rows = dedupeByExternalId(items);
+    return this.ingestFor(client, source, items, upsert);
+  }
 
+  /** Mesmo caminho, com o cliente já resolvido (o worker de importação). */
+  private async ingestFor<T extends { externalId: string }>(
+    client: ClientRef,
+    source: Source,
+    items: readonly T[],
+    upsert: (tx: Prisma.TransactionClient, rows: T[]) => Promise<number>,
+  ): Promise<IngestResult> {
+    assertBatchSize(items);
+    const rows = dedupeByExternalId(items);
+    const res = await this.commitBatch(client, source, async (tx) => ({
+      upserted: await upsert(tx, rows),
+    }));
+    // `commitBatch` só devolve `null` quando o corpo pede para não gravar; aqui nunca pede.
+    return res as IngestResult;
+  }
+
+  /**
+   * Núcleo da gravação: com o cliente fixado (RLS), roda `body` e a cobrança `data_ingestion` na
+   * MESMA transação (lote gravado ⇔ lote cobrado) e só depois do COMMIT publica `data.ingested`.
+   * Se `body` devolve `null`, nada é cobrado nem publicado e o resultado é `null`.
+   */
+  private async commitBatch<E extends object>(
+    client: ClientRef,
+    source: Source,
+    body: (tx: Prisma.TransactionClient) => Promise<({ upserted: number } & E) | null>,
+  ): Promise<(IngestResult & E) | null> {
+    const { tenantId } = TenantContext.current();
     const started = performance.now();
     const result = await TenantContext.withClient(client.id, () =>
       this.db.tx(async (tx) => {
-        const upserted = await upsert(tx, rows);
+        const written = await body(tx);
+        if (written === null) return null;
         const usage = await this.billing.record({
           tx,
           clientId: client.id,
@@ -323,13 +427,12 @@ export class IngestionService {
           durationMs: Math.round(performance.now() - started),
         });
         return {
-          upserted,
+          ...written,
           usage: { workType: "data_ingestion" as const, priceBrl: usage.priceBrl.toFixed(2) },
         };
       }),
     );
-
-    await this.notify(tenantId, client, source);
+    if (result !== null) await this.notify(tenantId, client, source);
     return result;
   }
 

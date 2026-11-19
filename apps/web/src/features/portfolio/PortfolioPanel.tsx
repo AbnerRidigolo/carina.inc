@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { z } from "zod";
 import { apiFetch, isAbortError } from "../../api/client";
 import { describeApiError } from "../../api/errors";
+import type { SignalBus } from "../../state/event-bus";
 import ui from "../../styles/ui.module.css";
 import { formatBrl, sumMoney } from "../../util/format";
 import styles from "./PortfolioPanel.module.css";
@@ -24,7 +25,7 @@ const CLASS_LABELS: Record<(typeof CLASS_ORDER)[number], string> = {
 };
 
 /** Posições do cliente agrupadas por classe de ativo; páginas por cursor ("Ver mais"). */
-export function PortfolioPanel({ clientId }: { clientId: string }) {
+export function PortfolioPanel({ clientId, bus }: { clientId: string; bus?: SignalBus }) {
   const [positions, setPositions] = useState<NormalizedPosition[] | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | undefined>();
@@ -68,6 +69,15 @@ export function PortfolioPanel({ clientId }: { clientId: string }) {
     void fetchPage(null);
     return () => ctrl.current?.abort();
   }, [fetchPage]);
+
+  // Importação concluída: a carteira pode ter mudado; recarrega do começo.
+  useEffect(
+    () =>
+      bus?.subscribe((signal) => {
+        if (signal.type === "import_finished" && signal.status === "done") void fetchPage(null);
+      }),
+    [bus, fetchPage],
+  );
 
   const groups = CLASS_ORDER.map((cls) => ({
     cls,

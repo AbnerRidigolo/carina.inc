@@ -3,7 +3,9 @@ import { PlanSchema } from "@carina/shared";
 import { describe, expect, it } from "vitest";
 import { QUESTION_MESSAGE_ID } from "../agents/agent.js";
 import {
+  CLASSIFIER_PROMPT,
   MAX_RATIONALE_CHARS,
+  MAX_SPECIALISTS,
   classifierMockResponder,
   heuristicPlan,
   normalizePlan,
@@ -58,6 +60,66 @@ describe("heuristicPlan", () => {
     expect(wantsExecution("olá")).toBe(false);
   });
 
+  it("imposto/IR/DARF → tax", () => {
+    for (const q of ["quanto de imposto pago?", "declaração de IR este ano", "emitir o DARF"]) {
+      expect(heuristicPlan(q).agents).toEqual(["tax"]);
+    }
+  });
+
+  it("'(IR)' sozinho não aciona tax (minúsculas perdem a caixa); 'ir' verbo e 'impostor' também não", () => {
+    for (const q of ["devo ir ao banco amanhã?", "impostor", "(IR)", "declaro o IR este ano"]) {
+      expect(heuristicPlan(q).agents).toEqual([]);
+    }
+  });
+
+  it('"imposto de renda" → tax (frase fixada, além de impostos?)', () => {
+    expect(heuristicPlan("imposto de renda").agents).toEqual(["tax"]);
+  });
+
+  it("declaração de IR tolera espaços múltiplos entre as palavras", () => {
+    expect(heuristicPlan("declaração  de   IR").agents).toEqual(["tax"]);
+  });
+
+  it("tax: declaração de IR, IRPF, impostos e pós-imposto", () => {
+    for (const q of ["declaração de IR", "IRPF", "meus impostos", "valor pós-imposto"]) {
+      expect(heuristicPlan(q).agents).toEqual(["tax"]);
+    }
+  });
+
+  it("assessores/assessoras casam; meta junto de pontuação casa", () => {
+    expect(heuristicPlan("falar com os assessores").agents).toEqual(["assessor_liaison"]);
+    expect(heuristicPlan("falar com as assessoras").agents).toEqual(["assessor_liaison"]);
+    expect(heuristicPlan("minha meta, hoje").agents).toEqual(["strategist"]);
+  });
+
+  it("aposentadoria e meta → strategist", () => {
+    expect(heuristicPlan("minha aposentadoria").agents).toEqual(["strategist"]);
+    expect(heuristicPlan("qual a meta?").agents).toEqual(["strategist"]);
+    expect(heuristicPlan("minhas metas").agents).toEqual(["strategist"]);
+  });
+
+  it("pesquise na base / o que diz a fonte → researcher", () => {
+    expect(heuristicPlan("pesquise na base sobre FIIs").agents).toEqual(["researcher"]);
+    expect(heuristicPlan("o que diz a fonte?").agents).toEqual(["researcher"]);
+  });
+
+  it("pergunte ao assessor → assessor_liaison", () => {
+    expect(heuristicPlan("pergunte ao assessor").agents).toEqual(["assessor_liaison"]);
+    expect(heuristicPlan("fale com a assessora").agents).toEqual(["assessor_liaison"]);
+  });
+
+  it("limite de palavra: metade, cometa, irmão, assessoria não acionam ninguém", () => {
+    for (const q of ["metade", "cometa", "irmão", "assessoria", "fontes", "darfs"]) {
+      expect(heuristicPlan(q).agents).toEqual([]);
+    }
+  });
+
+  it("corta em 3 na ordem fixa: imposto + risco + aposentadoria + projeção + assessor → [risk, predictor, strategist]", () => {
+    const plan = heuristicPlan("imposto, risco, aposentadoria, projeção e pergunte ao assessor");
+    expect(MAX_SPECIALISTS).toBe(3);
+    expect(plan.agents).toEqual(["risk", "predictor", "strategist"]);
+  });
+
   it("entrada não-string ou gigante não quebra", () => {
     expect(heuristicPlan(undefined as unknown as string).complexity).toBe("simples");
     expect(heuristicPlan(`${"x".repeat(100_000)} risco`).agents).toEqual([]);
@@ -85,6 +147,19 @@ describe("normalizePlan (saída do modelo é não confiável)", () => {
     expect(plan?.rationale.length).toBe(MAX_RATIONALE_CHARS);
   });
 
+  it("normalizePlan corta em 3 e mantém a ordem do modelo depois de deduplicar", () => {
+    const plan = normalizePlan(
+      {
+        complexity: "complexa",
+        agents: ["tax", "tax", "researcher", "insight", "risk", "predictor"],
+        wantsExecution: false,
+        rationale: "x",
+      },
+      "oi",
+    );
+    expect(plan?.agents).toEqual(["tax", "researcher", "insight"]);
+  });
+
   it("o modelo não liga execução sozinho: precisa do verbo de execução na pergunta", () => {
     const raw = { complexity: "média", agents: [], wantsExecution: true, rationale: "x" };
     expect(normalizePlan(raw, "como está minha carteira?")?.wantsExecution).toBe(false);
@@ -92,6 +167,23 @@ describe("normalizePlan (saída do modelo é não confiável)", () => {
     expect(
       normalizePlan({ ...raw, wantsExecution: false }, "compre 10 VALE3")?.wantsExecution,
     ).toBe(false);
+  });
+});
+
+describe("CLASSIFIER_PROMPT", () => {
+  it("o prompt do classificador lista os sete especialistas e o limite de 3", () => {
+    for (const a of [
+      "insight",
+      "predictor",
+      "risk",
+      "strategist",
+      "tax",
+      "researcher",
+      "assessor_liaison",
+    ]) {
+      expect(CLASSIFIER_PROMPT).toContain(a);
+    }
+    expect(CLASSIFIER_PROMPT).toContain("no máximo 3");
   });
 });
 

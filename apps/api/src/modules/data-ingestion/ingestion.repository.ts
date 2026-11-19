@@ -166,6 +166,48 @@ export class IngestionRepository {
   }
 
   /**
+   * Serializa as substituições de posições importadas do cliente fixado (lock até o fim da
+   * transação): sem isso, duas importações concorrentes veriam a fotografia uma da outra só depois
+   * do COMMIT (união das duas, ou a mais antiga sobrescrevendo a mais nova). Um lock por cliente,
+   * não por instituição: uma única chave não tem ordem de bloqueio a respeitar (sem deadlock).
+   */
+  async lockImportedPositions(tx: Tx): Promise<void> {
+    await tx.$queryRaw`
+      SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
+        'import_positions',
+        current_setting('app.tenant_id', true),
+        current_setting('app.client_id', true)
+      )::text, 0)) IS NULL AS locked`;
+  }
+
+  /**
+   * Maior `as_of` (`YYYY-MM-DD`) das posições `source = 'import'` dessas instituições do cliente
+   * fixado; `null` se não há nenhuma.
+   */
+  async latestImportedAsOf(tx: Tx, institutions: string[]): Promise<string | null> {
+    const rows = await tx.$queryRaw<{ latest: string | null }[]>`
+      SELECT max(as_of)::text AS latest FROM position
+      WHERE source = 'import' AND institution = ANY(${institutions}::text[])`;
+    return rows[0]?.latest ?? null;
+  }
+
+  /**
+   * Apaga as posições `source = 'import'` dessas instituições cujo `external_id` não está em
+   * `keepExternalIds`; devolve quantas. Nunca toca `api` nem `synthetic`. O RLS limita ao
+   * tenant e ao cliente fixados.
+   */
+  async deleteImportedPositionsExcept(
+    tx: Tx,
+    input: { institutions: string[]; keepExternalIds: string[] },
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM position
+      WHERE source = 'import'
+        AND institution = ANY(${input.institutions}::text[])
+        AND NOT (external_id = ANY(${input.keepExternalIds}::text[]))`;
+  }
+
+  /**
    * O cliente (id interno) existe no tenant do TenantContext atual? Lido sob RLS: um cliente de
    * outro tenant é invisível (false). O filtro por tenant é defesa em profundidade.
    */

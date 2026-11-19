@@ -26,6 +26,11 @@ export class NotFoundError extends DomainError {
   readonly code = "not_found";
   readonly status = 404;
 }
+/** Corpo ou arquivo acima do limite aceito (ex.: upload de importação acima de 10 MB). */
+export class PayloadTooLargeError extends DomainError {
+  readonly code = "payload_too_large";
+  readonly status = 413;
+}
 export class ApprovalConflictError extends DomainError {
   readonly code = "approval_conflict";
   readonly status = 409;

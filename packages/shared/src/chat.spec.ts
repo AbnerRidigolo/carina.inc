@@ -77,6 +77,10 @@ describe("ChatEventSchema", () => {
       { type: "approval_executed", approvalId: "ap1", status: "failed", result: null },
       done,
       { ...done, status: "awaiting_approval" },
+      { type: "import_progress", importJobId: "j", stage: "parsing", processed: 1, total: 2 },
+      { type: "import_progress", importJobId: "j", stage: "writing", processed: 2, total: 2 },
+      { type: "import_finished", importJobId: "j", status: "done" },
+      { type: "import_finished", importJobId: "j", status: "failed" },
     ];
     for (const e of events) expect(ChatEventSchema.safeParse(e).success).toBe(true);
   });
@@ -89,6 +93,12 @@ describe("ChatEventSchema", () => {
     expect(ChatEventSchema.safeParse({ type: "token", agent: "zzz", text: "x" }).success).toBe(
       false,
     );
+    const prog = { type: "import_progress", importJobId: "j", processed: 1, total: 2 };
+    expect(ChatEventSchema.safeParse({ ...prog, stage: "x" }).success).toBe(false);
+    expect(
+      ChatEventSchema.safeParse({ type: "import_finished", importJobId: "j", status: "queued" })
+        .success,
+    ).toBe(false);
   });
 });
 

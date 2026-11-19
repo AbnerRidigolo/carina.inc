@@ -13,7 +13,7 @@
 import { AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
 import { type BaseCheckpointSaver, Command } from "@langchain/langgraph";
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
-import { type ChatEvent, ChatEventSchema, type Plan } from "@carina/shared";
+import { type ChatEvent, ChatEventSchema, type Plan, SpecialistNameSchema } from "@carina/shared";
 import {
   ApprovalConflictError,
   NotFoundError,
@@ -332,8 +332,9 @@ export class OrchestratorService {
           break;
         case "specialist":
           for (const [agent, result] of Object.entries(results)) {
-            if (agent === "insight" || agent === "predictor" || agent === "risk") {
-              events.push({ type: "agent_result", agent, result });
+            const name = SpecialistNameSchema.safeParse(agent);
+            if (name.success) {
+              events.push({ type: "agent_result", agent: name.data, result });
             }
           }
           break;

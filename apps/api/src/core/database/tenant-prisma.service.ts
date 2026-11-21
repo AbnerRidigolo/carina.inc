@@ -122,6 +122,18 @@ export class TenantPrismaService {
   }
 
   /**
+   * Ids dos tenants a vigiar pelo monitor de carteira (`monitor_tenant_ids()`, SECURITY DEFINER,
+   * migrations/0009): não suspensos e com ao menos uma posição de investimento com código de
+   * ativo. Mesmo desenho de `activeTenantIds`: só ids, e cada tenant é tratado depois sob
+   * `TenantContext.run`.
+   */
+  async monitorTenantIds(): Promise<string[]> {
+    const rows = await this.base.$queryRaw<{ id: string }[]>`
+      SELECT monitor_tenant_ids() AS id`;
+    return rows.map((r) => r.id);
+  }
+
+  /**
    * Transação interativa com o contexto atual fixado antes de `fn`. O contexto é lido na chamada
    * (corpo síncrono do método async); `withClient` dentro de `fn` não muda o `tx`. Todo o
    * trabalho de `fn` usa a mesma conexão e o mesmo contexto.

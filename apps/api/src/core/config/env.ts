@@ -73,6 +73,17 @@ export const EnvSchema = z
     /** Orçamento separado (por minuto) para o preço de servidor das ordens (`priceFor`). */
     MARKET_PRICE_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(30),
     /**
+     * Orçamento separado (por minuto) para o monitor de carteira (`monitorQuotes`): nunca esgota o
+     * das rotas nem o do preço. Esgotado → o ciclo do monitor para de cotar e retoma no seguinte.
+     */
+    MARKET_MONITOR_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(10),
+    /** Intervalo (ms) entre ciclos do monitor de carteira. Padrão 10 min; mínimo 1 min. */
+    MONITOR_INTERVAL_MS: z.coerce.number().int().min(60_000).default(600_000),
+    /** Símbolos cotados por ciclo do monitor (rodízio sobre a carteira de todos os tenants). */
+    MONITOR_MAX_SYMBOLS_PER_TICK: z.coerce.number().int().min(1).max(200).default(20),
+    /** Variação diária (%, em módulo) a partir da qual o monitor gera alerta. */
+    MONITOR_MOVE_THRESHOLD_PCT: z.coerce.number().int().min(1).max(50).default(5),
+    /**
      * Idade máxima de uma cotação com o mercado aberto (ms). Padrão 5 min; no live precisa ser pelo
      * menos o atraso do plano da brapi (ex.: ~35 min no gratuito), senão toda ordem em pregão é
      * recusada como `price_stale`.

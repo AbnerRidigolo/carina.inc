@@ -54,6 +54,19 @@ describe("detectMove", () => {
     expect(detectMove(quote({ source: "mock" }), 5, "live")).toBeNull();
   });
 
+  it("variação absurda (|changePct| que não cabe em numeric(9,4)) → null", () => {
+    // ex.: desdobramento não ajustado pelo provedor; o insert estouraria a coluna
+    expect(detectMove(quote({ changePct: "100000" }), 5, "mock")).toBeNull();
+    expect(detectMove(quote({ changePct: "-100000" }), 5, "mock")).toBeNull();
+    expect(detectMove(quote({ changePct: "250000.5" }), 5, "mock")).toBeNull();
+    // arredondado a 4 casas pelo banco viraria 100000.0000
+    expect(detectMove(quote({ changePct: "99999.99995" }), 5, "mock")).toBeNull();
+    expect(detectMove(quote({ changePct: "-99999.99995" }), 5, "mock")).toBeNull();
+    // o maior que cabe ainda alerta
+    expect(detectMove(quote({ changePct: "99999.9999" }), 5, "mock")?.direction).toBe("up");
+    expect(detectMove(quote({ changePct: "-99999.99994" }), 5, "mock")?.direction).toBe("down");
+  });
+
   it("limite diferente do padrão vale nos dois sentidos", () => {
     expect(detectMove(quote({ changePct: "9.99" }), 10, "mock")).toBeNull();
     expect(detectMove(quote({ changePct: "-10" }), 10, "mock")?.direction).toBe("down");

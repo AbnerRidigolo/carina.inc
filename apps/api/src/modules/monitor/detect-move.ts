@@ -5,6 +5,10 @@
  *
  * A comparação é feita sobre a string decimal, em inteiros (milionésimos), nunca em `number`:
  * "4.999999" fica abaixo de 5 e "5.00" alcança 5 sem depender de arredondamento de ponto flutuante.
+ *
+ * Variação que não cabe na coluna `change_pct numeric(9,4)` (|valor| arredondado a 4 casas ≥ 100000,
+ * ou seja, ≥ 99999,99995) é descartada: é falha do provedor (ex.: desdobramento não ajustado), e o
+ * insert estouraria.
  */
 import type { Quote } from "@carina/shared";
 
@@ -26,6 +30,8 @@ const SOURCE_OF_MODE: Readonly<Record<MonitorMode, Quote["source"]>> = {
 
 const DECIMAL_RE = /^(-?)(\d+)(?:\.(\d{1,6}))?$/;
 const SCALE = 6;
+/** Menor |variação| (em milionésimos) que, arredondada a 4 casas, estoura `numeric(9,4)`. */
+const OVERFLOW_MICROS = 99_999_999_950n;
 
 /** Valor absoluto em milionésimos; `null` se a string não é um decimal válido. */
 function absMicros(value: string): bigint | null {
@@ -45,7 +51,7 @@ export function detectMove(
   if (quote.source !== SOURCE_OF_MODE[mode]) return null;
   if (quote.changePct === null) return null;
   const abs = absMicros(quote.changePct);
-  if (abs === null) return null;
+  if (abs === null || abs >= OVERFLOW_MICROS) return null;
   // O limite vem da env (inteiro de 1 a 50); arredondado a milionésimos por segurança.
   const limit = BigInt(Math.round(thresholdPct * 10 ** SCALE));
   if (abs < limit) return null;

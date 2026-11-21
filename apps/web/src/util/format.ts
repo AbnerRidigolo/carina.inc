@@ -1,4 +1,4 @@
-import { MoneySchema } from "@carina/shared";
+import { MoneySchema, PriceSchema, SignedDecimalSchema } from "@carina/shared";
 
 const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const dateTime = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" });
@@ -47,4 +47,24 @@ export function formatMonth(month: string): string {
 
 export function formatNumber(value: number): string {
   return percent.format(value);
+}
+
+const variation = new Intl.NumberFormat("pt-BR", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+/**
+ * Cotação (string decimal, até 6 casas) em R$, arredondada para centavos só na exibição.
+ * `formatBrl` não serve: ele só aceita dinheiro com no máximo 2 casas.
+ */
+export function formatPrice(price: string): string {
+  if (!PriceSchema.safeParse(price).success) return "—";
+  return brl.format(price as `${number}`);
+}
+
+/** Variação percentual em valor absoluto, uma casa e vírgula ("-6.24" vira "6,2"); o sinal vai no texto. */
+export function formatVariationPct(changePct: string): string {
+  if (!SignedDecimalSchema.safeParse(changePct).success) return "—";
+  return variation.format(changePct.replace(/^-/, "") as `${number}`);
 }

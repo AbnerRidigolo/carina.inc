@@ -4,6 +4,8 @@ import {
   type ImportJobView,
   ImportJobViewSchema,
   type ImportUploadFields,
+  type PortfolioAlertPage,
+  PortfolioAlertPageSchema,
   ProblemSchema,
 } from "@carina/shared";
 import type { ZodType } from "zod";
@@ -179,4 +181,18 @@ export function listImports(clientId: string, signal?: AbortSignal): Promise<Imp
   return apiFetch(`/api/clients/${encodeURIComponent(clientId)}/imports`, ImportJobListSchema, {
     signal,
   });
+}
+
+/** Alertas da carteira do cliente, do mais novo ao mais antigo (`cursor` vem do `nextCursor`). */
+export function listAlerts(
+  clientId: string,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<PortfolioAlertPage> {
+  const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+  return apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/alerts${query}`,
+    PortfolioAlertPageSchema,
+    { signal },
+  );
 }

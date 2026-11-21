@@ -367,6 +367,24 @@ describe("ChatView", () => {
     expect(seen).toContainEqual(finished);
   });
 
+  it("portfolio_alert do socket chega ao barramento dos painéis", async () => {
+    const { socket, seen } = await mount();
+    const alert = {
+      type: "portfolio_alert",
+      alert: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        assetCode: "PETR4",
+        direction: "down",
+        changePct: "-6.2",
+        price: "31.40",
+        tradingDay: "2026-11-20",
+        createdAt: "2026-11-20T15:00:00.000Z",
+      },
+    } as const;
+    emit(socket, alert);
+    expect(seen).toContainEqual(alert);
+  });
+
   it("thread_busy mostra mensagem clara e libera o campo", async () => {
     const { socket } = await mount();
     await ask(socket, "oi");

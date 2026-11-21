@@ -9,4 +9,5 @@ export * from "./ingestion.js";
 export * from "./inbox.js";
 export * from "./market.js";
 export * from "./money.js";
+export * from "./monitor.js";
 export * from "./problem.js";

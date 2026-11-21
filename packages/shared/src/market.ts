@@ -8,7 +8,7 @@ export const PriceSchema = z.string().regex(/^\d{1,12}(\.\d{1,6})?$/, "preço de
 export type Price = z.infer<typeof PriceSchema>;
 
 /** Decimal com sinal opcional e até 6 casas (variação percentual, indicadores macro). */
-const SignedDecimalSchema = z
+export const SignedDecimalSchema = z
   .string()
   .regex(/^-?\d{1,12}(\.\d{1,6})?$/, "decimal com sinal inválido");
 

@@ -18,6 +18,11 @@ pontos de segurança e as limitações conhecidas. A descrição dos processos e
 | Modelos | **LangChain.js** com `withFallbacks()` por papel; embeddings NVIDIA | LiteLLM (só Python); misturar LangChain com AI SDK |
 | Cache, limites, eventos | **Redis**: TTL, sorted set + Lua (limites e cota atômicos), **Streams** com consumer groups e DLQ | Limites em memória (não valem com várias instâncias) |
 | Dados de clientes | **Custo zero**: API de ingestão, gerador sintético e (fase 2) importação de arquivos, atrás de `FinancialDataProvider` | Pluggy/Belvo (a partir de R$ 1.500–2.500/mês); APIs da B3 (contrato); Open Finance direto (autorização do BC) |
+| Agentes restantes | Quatro especialistas no mesmo grafo e no mesmo caminho dos três atuais (prompt, schema Zod + `refine`, fallback, mock, cartão na web): strategist, tax, researcher e assessor_liaison | Tool calling para researcher e assessor gravarem na base (escrita disparada por modelo a partir de conteúdo não confiável envenena a base); categorizer como agente no chat (é transformação de dado, não conversa) |
+| Custo por turno | **No máximo 3 especialistas por turno**, na ordem fixa insight, risk, predictor, strategist, tax, researcher, assessor_liaison, na heurística e no `normalizePlan` | Deixar o classificador chamar todos (a pergunta comum passaria a acionar muito mais modelos) |
+| Pesquisa e assessor | Researcher **só sobre a base de conhecimento**, com fontes; assessor_liaison **só redige** (`AssessorBrief`), nada é enviado | Busca web (não há ferramenta, nem havia no Python); envio por WhatsApp ou e-mail (canais são da fase 3) |
+| Cobrança do `tax` | Turno com `tax` no plano é cobrado como `optimization` (R$ 30,00), como no Python (fase 2 exige os mesmos tipos de trabalho); os demais turnos seguem pelo número de agentes, sem mudança | Cobrar o `tax` por número de agentes (R$ 7,50): divergiria do Python |
+| Categorizer | **Regras determinísticas** na gravação das transações, nos dois caminhos de upsert; `kind` primeiro, depois as regras; sem regra, `null`; categoria enviada nunca é sobrescrita | LLM no ambíguo (custo por transação e resultado não repetível); "outros" inventado (o Sync já mostra "sem categoria") |
 | Testes | **Vitest**, Supertest, Testing Library + MSW; Postgres/Redis reais | Jest (problemas com pacotes só-ESM do NestJS 12) |
 | Qualidade | TypeScript `strict` + `noUncheckedIndexedAccess`, ESLint + Prettier, versões exatas no lockfile | — |
 
@@ -56,6 +61,37 @@ O que foi construído difere do plano em alguns pontos. Cada mudança tem um mot
   Docker e o `engines` seguem essa versão
   ([`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts)).
 
+### Agentes restantes e categorizer (fase 2, entrega 1)
+
+Desenho completo no [spec](superpowers/specs/2026-11-19-agentes-restantes-design.md). O que a
+implementação mudou em relação a ele:
+
+- **"ir" não é palavra-chave.** O spec listava `ir ` como termo do `tax`. O "ir" solto foi
+  descartado porque também é o verbo ("vou ir ao banco"). Acionam o `tax`: `irpf`, `imposto de
+  renda` (via `impostos?`) e `declaração de IR`. Um "IR" sozinho não aciona. Termos curtos ou
+  ambíguos (`meta`, `imposto`, `fonte`, `assessor`, `darf`) casam só como palavra inteira.
+- **Categorizer: `kind` primeiro.** `buy`, `sell`, `dividend` e `jcp` → `investimento`; `tax` →
+  `impostos`; `fee` → `tarifas`; depois a regra de `impostos` (imposto, darf, iof); depois as
+  regras do Python. "mercado" solto foi retirado das regras (casava Mercado Livre, Mercado Pago e
+  "mercado financeiro" como alimentação).
+- **Cartão do assessor.** Mostra todo o `sharedData`, não só o que casa com cada pergunta: sobras
+  vão em "Outros dados compartilhados" e a pergunta sem entrada correspondente é sinalizada.
+
+### Limitações dos agentes restantes e do categorizer
+
+- **Researcher sem web.** Responde só com a base de conhecimento do cliente (nem o Python tinha
+  busca web). Não grava na base; o `ingest_findings` do Python não foi portado.
+- **Assessor_liaison só redige.** Nada é enviado ao assessor; o `ingest_assessor_knowledge` do
+  Python não foi portado. Os canais (WhatsApp, e-mail) são da fase 3.
+- **Categorizer só por regras, sem parcelas e sem LLM.** Descrição fora das listas fica sem
+  categoria. Não há detecção de parcela (`N/M`): não existe coluna para ela.
+- **Reenvio troca a categoria.** Uma categoria enviada no item nunca é sobrescrita, mas se a mesma
+  transação for reenviada, vale o que vier no último envio (o upsert já funcionava assim): reenviar
+  sem categoria volta a inferida, mesmo que antes tivesse sido enviada uma.
+- **Monitor pendente.** Fica para a entrega 2, porque precisa de um canal de alerta, que não existe.
+- **Palavras-chave são heurística.** Só valem quando o classificador (LLM) falha e no modo mock;
+  uma pergunta fora das listas pode não acionar o especialista certo nesse caminho.
+
 ## Defeitos do Python corrigidos
 
 | # | Defeito no Python | Correção na versão TypeScript | Onde ver |
@@ -71,6 +107,55 @@ O que foi construído difere do plano em alguns pontos. Cada mudança tem um mot
 | — | Dinheiro em `float` | `numeric(18,2)` / `Decimal`, string decimal nos contratos; fee com arredondamento meio-para-cima | [`pricing.spec.ts`](../apps/api/src/modules/billing/pricing.spec.ts), [`billing.int.spec.ts`](../apps/api/test/billing/billing.int.spec.ts) |
 | — | Chave de API na URL do WebSocket | Ticket de uso único (30 s) emitido por `POST /api/ws/ticket` | [`ws.e2e.spec.ts`](../apps/api/test/chat/ws.e2e.spec.ts) |
 | — | Ferramentas de lint sem versão fixada | Versões exatas em todos os `package.json` e lockfile congelado no CI | `pnpm install --frozen-lockfile` |
+
+## Importação de arquivos (fase 2, entrega 1)
+
+OFX, CSV e a planilha da Área do Investidor B3 entram por `POST /api/clients/:clientId/imports`
+(fluxo, tabelas e eventos em [ARCHITECTURE.md](ARCHITECTURE.md#10-importação-de-arquivos-imports);
+desenho original no [spec](superpowers/specs/2026-11-16-importacao-arquivos-design.md)). Decisões e
+o motivo de cada uma:
+
+| Tema | Decisão | Motivo (e alternativa descartada) |
+| --- | --- | --- |
+| Onde ficam os bytes | Tabela `import_file` no Postgres, sob RLS, apagada na mesma transação que fecha o job | Sobrevive a reinício e o isolamento vem do banco. No Redis (TTL) não haveria RLS e o job se perderia com o Redis; parse síncrono prenderia a API numa planilha de 10 MB |
+| Parse | Assíncrono no `ImportWorker`, numa `worker_threads` encerrada aos 30 s e com heap limitada a 512 MB por padrão (`resourceLimits`, `IMPORT_PARSE_MAX_HEAP_MB`); estourar qualquer dos dois → `limit_exceeded` | Um arquivo hostil não trava o event loop do worker, não passa do tempo nem leva a memória do processo; encerrar a thread é o único jeito de interromper um parse síncrono |
+| Mesmo arquivo | Mesmo SHA-256 no mesmo cliente → 200 com o job existente (`queued`, `parsing`, `done`); `failed` → o mesmo job é reenfileirado (202) | Nunca processa duas vezes nem cobra de novo, e um mapeamento errado ou uma queda do worker não deixam o arquivo impossível de importar. Vale o teto de 5 ativos (429, `Retry-After: 30`) também no reenvio, para o reenfileiramento não furar o limite |
+| Arquivo vazio | 422; acima de 10 MB, 413 | Vazio é conteúdo inválido, não excesso de tamanho |
+| Nada é "chutado" | Separador decimal e formato de data do CSV vêm do mapeamento; valor ou data ambíguos viram erro de linha | Gravar número errado em silêncio é pior do que recusar a linha |
+| Chaves de idempotência | OFX `ofx:<banco>:<conta>:<FITID>`; CSV a coluna mapeada ou um hash de instituição, conta, data, valor, descrição e n-ésima ocorrência igual; B3 posição `b3:pos:<instituição>:<ativo>`, negociação e movimentação por hash da linha com a contagem de ocorrências | Reimportar o mesmo extrato (ou um sobreposto) não duplica, duas linhas idênticas legítimas não se fundem e contas diferentes não colidem |
+| Posições da B3 | A planilha é uma fotografia: as posições `source = "import"` das instituições do arquivo são substituídas (remove as ausentes, upsert das presentes), por instituição, sob advisory lock por cliente; fotografia mais antiga que a gravada → nada substituído e as linhas viram `stale_snapshot`. Instituição com alguma linha de posição recusada só recebe o upsert das válidas, sem apagar nada (linha recusada sem instituição legível protege todas). Posições `api` e `synthetic` nunca são tocadas | Só com upsert, um ativo vendido entre duas fotografias ficaria na carteira para sempre. O lock serializa dois arquivos concorrentes, e a mais nova vence em qualquer ordem. Uma linha recusada pode ser de um ativo que continua na carteira: apagá-lo por causa de uma fórmula sem valor seria perder dado |
+| `asOf` da B3 | Informado no upload | A planilha não traz uma data confiável nas células e o nome do arquivo não é dado |
+| Cobrança | Cada lote gravado (até 1.000 itens) é um `data_ingestion` de R$ 0,05, pelo `IngestionService` (lote gravado ⇔ lote cobrado). Recusas síncronas e reenvio de arquivo já processado não cobram | Mesma regra da API de ingestão. Consequência: reprocessar um job que ficou `stuck` cobra de novo os lotes que ele regrava |
+| Posse do job | `import_job.claim_token` (uuid novo a cada claim): `touchProgress` e `finish` só valem com o token do claim | Um worker que travou, foi marcado `stuck` e teve o arquivo reenviado não fecha nem avança o job que agora é de outro |
+| Limpeza sob RLS | A migração 0008 cria `import_cleanup_tenant_ids()`, `SECURITY DEFINER`, que devolve só ids de tenants com arquivo vencido ou job parado (mesmo modelo de `active_tenant_ids`, 0004); cada tenant é limpo sob RLS como `carina_app` | `carina_app` não pode listar `import_file` de todos os tenants; sem a função, a limpeza não acharia o trabalho. A função não devolve conteúdo |
+| Limpeza | `import_file` com mais de 1 h → apagada e job `failed` (`expired`); `parsing` sem progresso há mais de 15 min → `failed` (`stuck`) | Os bytes não podem ficar além do necessário (LGPD) e um job preso não pode ficar `parsing` para sempre |
+| LGPD nos erros | Erro de linha é `{ row, field?, code, message }` com `message` fixa por `code`; log, auditoria e eventos levam só ids, contadores e códigos | Nunca o conteúdo de uma linha, um valor, uma descrição ou um nome de arquivo |
+| Escopos | `data:write` para enviar, `chat` para ler; o seed dá `data:write` à chave da demo | Quem lê a carteira pode acompanhar a importação sem poder gravar |
+| Presets de CSV | `nubank_conta` e `generico_br` | Um preset por layout conhecido; os demais vão por `csvMapping` |
+
+### Limitações da importação
+
+- **Sem arquivo real.** Os quatro formatos (OFX SGML e XML, CSV e a planilha da B3) foram
+  reconstruídos da documentação pública (especificação OFX, layout conhecido do CSV da Nubank,
+  planilhas da Área do Investidor B3); as fixtures são sintéticas. Um arquivo real pode quebrar um
+  parser, e cada quebra vira erro de linha ou `failed` com código fixo, nunca número errado em
+  silêncio.
+- **PDF de nota de corretagem (SINACOR) e qualquer uso de LLM**: entrega 2. **OFX `INVSTMTRS`**
+  (extrato de investimentos) não é suportado; o arquivo é recusado (`unsupported_ofx_investment`).
+- **`externalId` mapeado no CSV é usado como veio.** Se a coluna mapeada não for única de fato, linhas
+  distintas se sobrescrevem no upsert.
+- **Limite de memória da thread de parse: 512 MB por padrão** (`IMPORT_PARSE_MAX_HEAP_MB`). Uma
+  planilha de poucos MB pode passar disso ao ser expandida (uma de 5,78 MB chegou a 2,2 GB de
+  heap sem limite) e termina como `failed`/`limit_exceeded`. Subir o limite exige memória
+  sobrando no container do worker; a solução de fundo é ler as planilhas em streaming.
+- **Worker travado que volta.** Um worker que trava e volta depois de o job ter sido retomado por
+  outro pode ainda gravar (e cobrar) no máximo um lote em andamento; a gravação é upsert idempotente,
+  então o efeito é só o lote regravado. O `claim_token` impede que ele grave os seguintes ou feche o
+  job.
+- **Reprocessar cobra de novo.** O reenvio de um job `failed` regrava todos os lotes, e os lotes já
+  gravados antes da falha são cobrados outra vez (lote gravado ⇔ lote cobrado).
+- **Sem mapeamento salvo por tenant**, e reprocessar um job com outro mapeamento exige subir o
+  arquivo de novo.
 
 ## Garantias provadas por testes
 
@@ -95,6 +180,26 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Cota do token protegida**: 20 chamadas com 20 símbolos desconhecidos → 1 busca por símbolo em 60 s (cache negativo); orçamento das rotas esgotado → 503 com `Retry-After` sem cobrança, enquanto o `priceFor` segue com orçamento próprio; zera no minuto seguinte; Redis fora → rotas 502, preço segue | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("cache negativo e orçamento…"), [`market-service.int.spec.ts`](../apps/api/test/market/market-service.int.spec.ts) ("orçamento das rotas no Redis real…"), [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) ("orçamento de chamadas ao provedor esgotado") |
 | **Rotas `/api/market/*`**: sem `market:read` → 403; cada chamada bem-sucedida (inclusive acerto de cache) cobra `data_query` de R$ 0,05; entrada inválida → 422, provedor fora → 502 e orçamento esgotado → 503 com `Retry-After`, todos problem+json, sem cobrança e sem texto interno | [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) |
 | **`MARKET_MODE` explícita no compose** (a API recusa subir em produção sem ela): `api`, `worker` e `seed` a definem, com padrão `mock` | [`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts) ("docker-compose.yml: MARKET_MODE") |
+| **Importação: os bytes não sobram.** `import_file` fica vazia ao fechar o job (`done`, arquivo ilegível ou erro inesperado), e a limpeza apaga o arquivo com mais de 1 h marcando o job `expired` | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("OFX de ponta a ponta: done, transações source import, import_file vazio, 1 cobrança, data.ingested", "arquivo ilegível → failed/unreadable, sem bytes e sem cobrança", "erro inesperado → failed/internal, bytes apagados, evento confirmado (handle resolve)", "import_file de 2 h → expired (job mantido, bytes apagados); arquivo recente intocado") |
+| **RLS em `import_file`**: outro tenant não lê nem apaga; com cliente fixado, o arquivo de outro cliente do mesmo tenant é invisível; INSERT com `tenant_id` alheio viola a política; o banco recusa bytes acima de 10 MB e a exclusão do job leva o arquivo | [`rls-isolation.int.spec.ts`](../apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não enxerga import_file de A em SELECT nem apaga em DELETE", "com cliente fixado, o import_file de outro cliente do mesmo tenant é invisível", "INSERT em import_file com tenant_id alheio viola a RLS"), [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts) ("import_file: bytes acima de 10 MB são recusados (23514); 10 MB exatos passam", "apagar o import_job apaga o import_file (ON DELETE CASCADE)") |
+| **Importação: sem conteúdo em log, erro, auditoria nem evento.** A descrição de uma transação da fixture não aparece em nenhum deles; a mensagem de erro de linha é fixa (sem interpolação); a de erro de opções não repete o valor enviado; o erro da thread de parse leva só o nome | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("nenhum log, erro de linha, auditoria ou evento contém a descrição de uma transação da fixture"), [`row-errors.spec.ts`](../apps/api/src/modules/imports/parsers/row-errors.spec.ts) ("não tem interpolação"), [`imports.service.spec.ts`](../apps/api/src/modules/imports/imports.service.spec.ts) ("a mensagem de erro de opções não repete o valor enviado"), [`parse-file.spec.ts`](../apps/api/src/modules/imports/parse-file.spec.ts) ("erro dentro da thread → ParseThreadError só com o nome do erro (nunca a mensagem)") |
+| **Importação idempotente**: o mesmo arquivo → 200 com o mesmo job, sem novo evento nem cobrança; envios concorrentes criam um job só; reentrega do `import.requested` e dois handles concorrentes processam uma vez; reenviar depois de `stuck` termina `done` sem duplicar; o `externalId` derivado é estável | [`imports.e2e.spec.ts`](../apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo de novo: 200 com o mesmo id, sem novo job, evento nem cobrança", "uploads concorrentes do mesmo arquivo criam um job só"), [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("reentrega do mesmo import.requested não processa de novo (claim)", "dois handles concorrentes do mesmo evento: só um processa", "reenvio após stuck: lote 1 gravado, worker caiu → limpeza marca stuck → reenvio → done sem duplicar"), [`external-id.spec.ts`](../apps/api/src/modules/imports/parsers/external-id.spec.ts) ("é estável") |
+| **Reenvio de job `failed`**: o mesmo job volta a `queued` com opções novas, bytes regravados e contadores zerados; com 5 ativos o reenvio dá 429 com `Retry-After` e o job `failed` fica intacto | [`imports.e2e.spec.ts`](../apps/api/test/imports/imports.e2e.spec.ts) ("job failed + reenvio: 202 com o mesmo id, opções novas, bytes regravados, zerado, novo evento", "5 ativos + reenvio de um failed: 429 com Retry-After e o job failed fica intacto"), [`imports.service.spec.ts`](../apps/api/src/modules/imports/imports.service.spec.ts) ("5 ativos + failed existente: 429 sem reenfileirar") |
+| **Limites da importação**: vazio → 422, acima de 10 MB → 413 (e 10 MB exatos passam), sexto job ativo → 429 com `Retry-After`; zip bomb e razão de compressão recusados sem inflar; mais de 100 000 linhas → `limit_exceeded`; o parse é encerrado aos 30 s; a thread que estoura a heap termina em `limit_exceeded` | [`imports.e2e.spec.ts`](../apps/api/test/imports/imports.e2e.spec.ts) ("arquivo ausente ou vazio: 422", "acima de 10 MB: 413 problem+json, nada gravado", "exatamente 10 MB passa", "sexto job ativo: 429 com Retry-After; o mesmo arquivo já enfileirado ainda responde 200"), [`xlsx-reader.spec.ts`](../apps/api/src/modules/imports/parsers/xlsx-reader.spec.ts) ("zip bomb (entrada que declara 60 MB) é recusado como limite, sem inflar", "razão de compressão acima de 200 é recusada"), [`csv.spec.ts`](../apps/api/src/modules/imports/parsers/csv.spec.ts) ("mais de 100 000 linhas -> limit_exceeded"), [`parse-file.spec.ts`](../apps/api/src/modules/imports/parse-file.spec.ts) ("parser que dorme 31 s: a thread é encerrada aos 30 s → limit_exceeded (relógio fake)", "thread que estoura a memória (ERR_WORKER_OUT_OF_MEMORY) → limit_exceeded, não erro") |
+| **Substituição de posições da B3**: a posição importada das instituições do arquivo é substituída, `api` e `synthetic` ficam intactas; fotografia mais antiga não substitui nada (`stale_snapshot`, sem cobrança nem evento); duas importações concorrentes terminam com a mais nova, em qualquer ordem | [`ingestion.int.spec.ts`](../apps/api/test/data-ingestion/ingestion.int.spec.ts) ("remove o ativo vendido da mesma instituição; preserva outra instituição e source api/synthetic", "keepInstitutions: grava, mas não apaga nada dessas instituições", "fotografia mais antiga: stale, nada muda, nenhuma cobrança, nenhum evento", "concorrência: a fotografia mais nova vence em qualquer ordem de chegada, sem união"), [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("B3: a posição importada das instituições do arquivo é substituída; api intocada", "B3: linha recusada (fórmula sem valor) não apaga a posição anterior do ativo; a instituição só recebe as válidas", "B3 com fotografia mais antiga que a gravada: stale_snapshot em todas, nada substituído → no_valid_rows") |
+| **Cobrança por lote da importação**: 2.500 transações → 3 lotes, 3 cobranças, progresso 1000/2000/2500 | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("CSV de 2 500 transações → 3 lotes, 3 cobranças, progresso 1000/2000/2500") |
+| **Worker travado perde o job**: depois de `stuck` e reenvio, o worker antigo não avança nem fecha o job tomado por outro (`claim_token`); a limpeza só enxerga tenants com trabalho, sob lock global | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("worker travado (não morto) perde o job: stuck → reenvio → outro claim; o antigo não avança nem fecha", "limpeza: só enxerga tenants com trabalho; outro tenant não é tocado; lock global") |
+| **Isolamento da importação entre tenants**: o mesmo arquivo em tenants diferentes gera jobs independentes; job de outro tenant → 404; escopos `data:write`/`chat`; o progresso só chega ao socket do mesmo tenant e cliente | [`imports.e2e.spec.ts`](../apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo em tenants diferentes gera jobs independentes", "job de outro tenant, id inexistente ou malformado: 404; sem escopo: 403", "chave sem data:write: 403; sem chave: 401"), [`ws.e2e.spec.ts`](../apps/api/test/chat/ws.e2e.spec.ts) ("socket do cliente recebe import_progress e import_finished done; outro tenant não recebe nada") |
+| **No máximo 3 especialistas por turno**, na ordem fixa do plano, na heurística e no `normalizePlan`; uma pergunta que casa 5 áreas roda só 3 | [`heuristic.spec.ts`](../apps/api/src/modules/orchestrator/heuristic.spec.ts) ("corta em 3 na ordem fixa: imposto + risco + aposentadoria + projeção + assessor → [risk, predictor, strategist]", "normalizePlan corta em 3 e mantém a ordem do modelo depois de deduplicar"), [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts) ("pergunta que casa 5 áreas roda só 3 especialistas") |
+| **Palavras-chave sem falso positivo**: "IR" sozinho, o verbo "ir" e "impostor" não acionam o `tax`; "imposto de renda", "IRPF" e "declaração de IR" (com espaços múltiplos) acionam; "metade", "cometa", "irmão" e "assessoria" não acionam ninguém | [`heuristic.spec.ts`](../apps/api/src/modules/orchestrator/heuristic.spec.ts) ("'(IR)' sozinho não aciona tax (minúsculas perdem a caixa); 'ir' verbo e 'impostor' também não", "\"imposto de renda\" → tax (frase fixada, além de impostos?)", "declaração de IR tolera espaços múltiplos entre as palavras", "tax: declaração de IR, IRPF, impostos e pós-imposto", "limite de palavra: metade, cometa, irmão, assessoria não acionam ninguém") |
+| **Saída forjada dos novos especialistas é recusada**: alocação que soma 90, `pct` ou `successProbability` fora da faixa, IR negativo, seis perguntas ao assessor e listas ou textos grandes demais viram `AllProvidersFailedError`; os limites exatos passam | [`agents.spec.ts`](../apps/api/src/modules/agents/agents.spec.ts) ("strategist recusa alocação que soma 90 → AllProvidersFailedError", "strategist aceita soma 100 e a tolerância de 0,5", "strategist recusa successProbability fora de 0..1", "tax recusa estimatedTaxBrl negativo", "tax aceita IR zero e o máximo de 16 dígitos", "assessor_liaison recusa 6 perguntas e item com 501 caracteres", "assessor_liaison aceita 5 perguntas de 500 caracteres"); schemas em [`agents.spec.ts`](../packages/shared/src/agents.spec.ts) ("StrategyPlan recusa successProbability 1.5 e byYear 1999", "TaxAdvice exige Money em estimatedTaxBrl e consultAccountant boolean", "AssessorBrief exige de 1 a 5 perguntas") |
+| **Prompts dos novos agentes**: terminam com o aviso de conteúdo não confiável; o researcher diz que não tem acesso à web e o assessor_liaison que só redige e lista o que revela | [`agents.spec.ts`](../apps/api/src/modules/agents/agents.spec.ts) ("todos os prompts novos terminam com o aviso de conteúdo não confiável", "prompt do researcher diz que não tem acesso à web", "prompt do assessor_liaison diz que só redige e lista o que é revelado") |
+| **Pergunta de imposto de ponta a ponta (mock)**: plano com `tax`, `agent_result` válido em `TaxAdviceSchema` e síntese | [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts) ("pergunta de imposto: plano com tax, resultado válido em TaxAdviceSchema e síntese") |
+| **Categorizer**: `kind` vence a descrição; Mercado Livre, Mercado Pago, "mercado financeiro", Uberlândia, "aguardando" e "R$ 199,00" não casam; acento decomposto casa; sem regra → `null` | [`categorize.spec.ts`](../apps/api/src/modules/data-ingestion/categorize.spec.ts) (tabela `categorize`: "kind vence a descrição", "Mercado Livre não é alimentação", "Mercado Pago não é alimentação", "Uberlândia não casa uber", "R$ 199,00 não casa 99", "FARMÁCIA em NFD → saúde", "texto sem regra → null") |
+| **Categoria enviada nunca é sobrescrita**, e sem regra o item não ganha "outros" | [`categorize.spec.ts`](../apps/api/src/modules/data-ingestion/categorize.spec.ts) ("mantém a categoria enviada e não inventa 'outros'"), [`ingestion.int.spec.ts`](../apps/api/test/data-ingestion/ingestion.int.spec.ts) ("transação sem categoria é gravada com a inferida; com categoria enviada, a enviada prevalece") |
+| **Categorização idempotente**; no reenvio da mesma transação vale o último envio | [`ingestion.int.spec.ts`](../apps/api/test/data-ingestion/ingestion.int.spec.ts) ("reenviar o lote sem categoria grava a inferida de novo (idempotente)", "reenvio com e sem categoria: vale a do último envio") |
+| **Importação categorizada**: o OFX importado sai com categorias onde a regra casa | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("OFX importado sai com categorias inferidas onde a regra casa") |
+| **Cartões dos novos agentes**: strategist, tributário (aviso de contador só com `consultAccountant`), assessor (todo o `sharedData` e o aviso de que nada foi enviado) e pesquisa; resultado fora do schema cai no render genérico | [`ChatView.test.tsx`](../apps/web/src/features/chat/ChatView.test.tsx) ("cartão tributário mostra o IR em R$ e o aviso de contador só com consultAccountant", "cartão do assessor numera as perguntas e avisa que nada foi enviado", "cartão do assessor mostra os dados compartilhados além das perguntas", "cartão do assessor avisa quando a pergunta não tem o que revela", "resultado fora do schema cai no render genérico") |
 | **Fluxo completo** pela fiação de produção: 403 sem `inbox:decide`, execução pelo ResumeWorker, R$ 90,00 cobrados, auditoria, inbox vazia e isolamento de um segundo tenant | [`full-flow.e2e.spec.ts`](../apps/api/test/flow/full-flow.e2e.spec.ts) |
 | **Retomada entre tenants impossível**; eventos forjados não executam nada | [`orchestrator.int.spec.ts`](../apps/api/test/orchestrator/orchestrator.int.spec.ts) ("outro tenant não retoma nem lê o thread"), [`resume.int.spec.ts`](../apps/api/test/orchestrator/resume.int.spec.ts) ("eventos forjados ou venenosos…") |
 | **Append-only**: em `usage_record` e `audit_event`, o INSERT do `carina_app` passa e UPDATE, DELETE e TRUNCATE falham com 42501 (permission denied) | [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts); pelo cliente Prisma do serviço (UPDATE e DELETE recusados): [`watchtower.int.spec.ts`](../apps/api/test/watchtower/watchtower.int.spec.ts) |
@@ -173,6 +278,14 @@ Esta é uma demo de portfólio, não um serviço pronto para produção. Pontos 
   em profundidade.
 - **Suspensão de tenant sem API administrativa.** `tenant.suspended_at` funciona (REST → 401;
   sockets abertos fecham no próximo turno ou heartbeat), mas hoje só se altera direto no banco.
+- **Implantação da importação.** (1) O multer recusa o arquivo acima de 10 MB, mas ainda lê e
+  descarta o corpo oversize: ponha um limite de corpo no reverse proxy. O nginx da demo
+  ([`nginx.conf`](../apps/web/nginx.conf)) não define `client_max_body_size`, então vale o padrão
+  dele (1 MB): pelo painel web da demo, arquivos acima de 1 MB recebem 413 do nginx antes de chegar à
+  API. Para a API aceitar até 10 MB atrás dele, defina `client_max_body_size 11m;` em `location /api/`. (2) A migração 0008 foi editada no lugar antes do lançamento: quem
+  aplicou uma versão anterior dela nesta branch precisa de um banco novo. (3) Os bytes ficam no banco
+  por segundos (até 1 h no pior caso, antes da limpeza), então o backup do Postgres pode conter um
+  arquivo em trânsito.
 - **O valor que define a taxa de execução é afirmado pelo modelo só em `transfer` e `rebalance`.**
   Para elas o `valueBrl` vem da saída do LLM: é validado (formato, sinal, limite de
   `numeric(18,2)`) e, quando o payload traz como conferir (valor explícito, ou quantidade × preço
@@ -224,8 +337,9 @@ O que **não** está feito ou tem limite conhecido na fase 1:
   queima da cota mensal, mas não a confere: dimensione-o pela cota do plano.
 - **Modo live sem teste automatizado.** A cadeia de fallback é testada com modelos falsos; os ids
   `:free` do OpenRouter em `models.yaml` têm `TODO confirmar` e podem mudar.
-- **Agentes da fase 1:** navigator, insight, predictor, risk e executor. Os outros seis do Python
-  ficam para a fase 2. Os docs [`AGENTS.md`](AGENTS.md), [`B2B.md`](B2B.md) e
+- **Agentes:** navigator, insight, predictor, risk, strategist, tax, researcher, assessor_liaison
+  e executor no chat, mais o categorizer na ingestão. Falta o monitor (entrega 2); ver
+  [Limitações dos agentes restantes](#limitações-dos-agentes-restantes-e-do-categorizer). Os docs [`AGENTS.md`](AGENTS.md), [`B2B.md`](B2B.md) e
   [`DEPLOYMENT.md`](DEPLOYMENT.md) ainda descrevem a versão Python e a visão de produto.
 - **Conversa guardada no checkpoint.** O schema `langgraph` guarda as mensagens da conversa
   (perguntas e respostas, em texto) sem RLS (são tabelas da biblioteca), sem TTL e sem limpeza em

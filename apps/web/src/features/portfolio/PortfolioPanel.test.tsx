@@ -1,7 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
+import { createEventBus, type PanelSignal } from "../../state/event-bus";
 import { setApiKey } from "../../state/session";
 import { TEST_KEY, use } from "../../test/helpers";
 import { PortfolioPanel } from "./PortfolioPanel";
@@ -99,5 +100,22 @@ describe("PortfolioPanel", () => {
     );
     render(<PortfolioPanel clientId="cliente-moderado" />);
     expect(await screen.findByText(/sem posições/i)).toBeInTheDocument();
+  });
+
+  it("recarrega a carteira quando uma importação termina com sucesso", async () => {
+    setApiKey(TEST_KEY);
+    let calls = 0;
+    use(
+      http.get("*/api/clients/cliente-moderado/positions", () => {
+        calls += 1;
+        return HttpResponse.json({ positions: [], nextCursor: null });
+      }),
+    );
+    const bus = createEventBus<PanelSignal>();
+    render(<PortfolioPanel clientId="cliente-moderado" bus={bus} />);
+    await screen.findByText(/sem posições/i);
+    act(() => bus.publish({ type: "import_finished", importJobId: "j", status: "failed" }));
+    act(() => bus.publish({ type: "import_finished", importJobId: "j", status: "done" }));
+    await waitFor(() => expect(calls).toBe(2));
   });
 });

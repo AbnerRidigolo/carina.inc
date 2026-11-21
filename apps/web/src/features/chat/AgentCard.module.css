@@ -24,7 +24,8 @@
   margin: 8px 0 4px;
 }
 
-.sub ul {
+.sub ul,
+.sub ol {
   margin: 0;
   padding-left: 20px;
 }

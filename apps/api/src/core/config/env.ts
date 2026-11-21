@@ -78,6 +78,12 @@ export const EnvSchema = z
      * recusada como `price_stale`.
      */
     MARKET_QUOTE_MAX_AGE_MS: z.coerce.number().int().min(1).default(300_000),
+    /**
+     * Heap máxima (MB) da thread de parse da importação (`resourceLimits`). Estourar → job
+     * `failed`/`limit_exceeded`. Planilhas de poucos MB podem passar de 512 MB ao expandir; suba
+     * só se o container tiver memória sobrando para isso além do resto do worker.
+     */
+    IMPORT_PARSE_MAX_HEAP_MB: z.coerce.number().int().min(64).max(16_384).default(512),
     /** Idade máxima (dias) de uma cotação com o mercado fechado (fins de semana e feriados). */
     MARKET_CLOSED_MAX_AGE_DAYS: z.coerce.number().int().min(1).default(5),
     EXECUTION_FEE_PCT: z.coerce.number().nonnegative().default(0.5),

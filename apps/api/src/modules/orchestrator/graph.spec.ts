@@ -24,7 +24,7 @@ import { type MockResponder, MockResponderRegistry } from "../llm/mock-models.js
 import { ModelFactory, type LlmEnv } from "../llm/model-factory.js";
 import { MarketPriceError, type MarketPriceErrorCode } from "../market/market-price-error.js";
 import type { OrchestratorGraph } from "./graph.js";
-import { heuristicPlan } from "./heuristic.js";
+import { heuristicPlan, MAX_SPECIALISTS } from "./heuristic.js";
 import { registerOrchestratorMockResponders } from "./orchestrator.module.js";
 import { OrchestratorService } from "./orchestrator.service.js";
 import { MAX_HISTORY_MESSAGES } from "./state.js";
@@ -297,6 +297,32 @@ describe("OrchestratorService (grafo, mock + MemorySaver)", () => {
     expect(Object.keys(state.results).sort()).toEqual(["insight", "predictor", "risk"]);
     expect(state.answer).toMatch(/^Resumo: /);
     expect(s.knowledge.search).toHaveBeenCalledTimes(1);
+  });
+
+  it("route corta em MAX_SPECIALISTS mesmo com um plano de 5 agentes no estado", async () => {
+    const threadId = newThread();
+    const graph = (svc as unknown as { graph: OrchestratorGraph }).graph;
+    const config = { configurable: { thread_id: threadId } };
+    const state = await asClient(async () => {
+      await graph.updateState(
+        config,
+        {
+          question: "qualquer pergunta",
+          plan: {
+            complexity: "complexa",
+            agents: ["insight", "risk", "predictor", "strategist", "tax"],
+            wantsExecution: false,
+            rationale: "plano fora do normalizePlan",
+          },
+          knowledge: KNOWLEDGE,
+        },
+        "retrieve",
+      );
+      for await (const chunk of await graph.stream(null, config)) void chunk;
+      return graph.getState(config);
+    });
+    expect(MAX_SPECIALISTS).toBe(3);
+    expect(Object.keys(state.values.results).sort()).toEqual(["insight", "predictor", "risk"]);
   });
 
   it("especialista risk falhando: errors.risk, agentFailure em results e síntese que avisa", async () => {

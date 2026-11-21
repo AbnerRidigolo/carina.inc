@@ -15,6 +15,7 @@ function baseHandlers() {
     http.get("*/api/clients/:id/positions", () =>
       HttpResponse.json({ positions: [], nextCursor: null }),
     ),
+    http.get("*/api/clients/:id/imports", () => HttpResponse.json({ items: [], nextCursor: null })),
     http.get("*/api/usage", () =>
       HttpResponse.json({ month: "2026-11", resolutions: 0, totalBrl: "0.00", byWorkType: {} }),
     ),

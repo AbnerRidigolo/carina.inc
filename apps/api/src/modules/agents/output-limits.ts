@@ -1,7 +1,8 @@
 /**
- * Limites das saídas estruturadas do Predictor e do Risk (a saída do modelo é não confiável).
- * Aplicados como `refine` depois do schema Zod, no mesmo estilo do Executor. Violação =
- * `AllProvidersFailedError` (mesmo contrato das demais saídas ruins do modelo).
+ * Limites das saídas estruturadas do Predictor, Risk, Strategist, Tax e Assessor Liaison (a saída
+ * do modelo é não confiável). Aplicados como `refine` depois do schema Zod, no mesmo estilo do
+ * Executor. Violação = `AllProvidersFailedError` (mesmo contrato das demais saídas ruins do
+ * modelo).
  *
  * Limites escolhidos (generosos para uso real, baratos para quem abusa):
  * - texto de item (nome, premissa, achado, sugestão, correlação): até 500 caracteres;
@@ -12,7 +13,13 @@
  *   ou seja < 1e16 = MAX_MONEY_BRL); aqui exigimos também valor finito, e não negativo no VaR e no
  *   `valueBrl` do Executor (fluxo líquido projetado pode ser negativo).
  */
-import type { CashFlowForecast, RiskAssessment } from "@carina/shared";
+import type {
+  AssessorBrief,
+  CashFlowForecast,
+  RiskAssessment,
+  StrategyPlan,
+  TaxAdvice,
+} from "@carina/shared";
 import { AllProvidersFailedError } from "../../core/errors/domain-errors.js";
 
 export const MAX_ITEM_CHARS = 500;
@@ -56,4 +63,50 @@ export function refineRisk(r: RiskAssessment): RiskAssessment {
   checkTexts(r.stressFindings);
   checkTexts(r.rebalanceSuggestions);
   return r;
+}
+
+const ALLOCATION_TOLERANCE = 0.5;
+
+export function refineStrategy(p: StrategyPlan): StrategyPlan {
+  if (p.narrative.length > MAX_NARRATIVE_CHARS) throw bad();
+  if (p.targetAllocation.length > MAX_LIST_ITEMS || p.milestones.length > MAX_LIST_ITEMS) {
+    throw bad();
+  }
+  let sum = 0;
+  for (const a of p.targetAllocation) {
+    // O schema não limita pct: finito e em 0..100 é conferido aqui.
+    if (!Number.isFinite(a.pct) || a.pct < 0 || a.pct > 100) throw bad();
+    checkTexts([a.assetClass]);
+    sum += a.pct;
+  }
+  if (Math.abs(sum - 100) > ALLOCATION_TOLERANCE) throw bad();
+  for (const m of p.milestones) {
+    if (
+      !Number.isFinite(m.successProbability) ||
+      m.successProbability < 0 ||
+      m.successProbability > 1
+    ) {
+      throw bad();
+    }
+    checkTexts([m.goal]);
+  }
+  checkTexts(p.assumptions);
+  return p;
+}
+
+export function refineTax(t: TaxAdvice): TaxAdvice {
+  checkMoney(t.estimatedTaxBrl, { nonNegative: true });
+  if (t.narrative.length > MAX_NARRATIVE_CHARS || t.offshoreVsBr.length > MAX_NARRATIVE_CHARS) {
+    throw bad();
+  }
+  checkTexts(t.harvestingOpportunities);
+  checkTexts(t.actions);
+  return t;
+}
+
+export function refineAssessorBrief(b: AssessorBrief): AssessorBrief {
+  if (b.narrative.length > MAX_NARRATIVE_CHARS) throw bad();
+  checkTexts(b.questions, 5);
+  checkTexts(b.sharedData);
+  return b;
 }

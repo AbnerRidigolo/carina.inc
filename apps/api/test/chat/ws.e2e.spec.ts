@@ -14,6 +14,7 @@ import WebSocket from "ws";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { ChatModule } from "../../src/modules/chat/chat.module.js";
 import { CHAT_GATEWAY_OPTIONS } from "../../src/modules/chat/chat.gateway.js";
+import { ImportsModule } from "../../src/modules/imports/imports.module.js";
 import { monthKey } from "../../src/modules/limits/month.js";
 import { MockResponderRegistry } from "../../src/modules/llm/mock-models.js";
 import { OrchestratorService } from "../../src/modules/orchestrator/orchestrator.service.js";
@@ -717,5 +718,85 @@ describe("Chat WebSocket: revogação com o socket ocioso (sem mandar mensagem)"
     buyer2.send({ clientId: "cli-1", message: "compre 10 ações de VALE3" });
     await buyer2.waitFor((e) => e.type === "approval_required", "2ª compra");
     expect(idle.of("approval_required")).toHaveLength(before);
+  });
+});
+
+describe("Chat WebSocket: progresso da importação de arquivos", () => {
+  let t: TestApp;
+  let A: SeededTenant;
+  let B: SeededTenant;
+  const sockets: TestSocket[] = [];
+
+  const ofx = Buffer.from(
+    `OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\nCHARSET:1252\n\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS>` +
+      `<BANKACCTFROM><BANKID>001<ACCTID>1</BANKACCTFROM><BANKTRANLIST>` +
+      `<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20261001<TRNAMT>-10.00<FITID>1<MEMO>x</STMTTRN>` +
+      `</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`,
+    "latin1",
+  );
+
+  const connect = async (key: string, clientId: string): Promise<TestSocket> => {
+    const res = await request(t.app.getHttpServer() as http.Server)
+      .post("/api/ws/ticket")
+      .set("Authorization", `Bearer ${key}`)
+      .send({ clientId });
+    expect(res.status).toBe(201);
+    const { ticket } = WsTicketSchema.parse(res.body);
+    const s = new TestSocket(
+      new WebSocket(`ws://127.0.0.1:${portOf(t)}/ws/chat?ticket=${ticket}`, { autoPong: true }),
+    );
+    sockets.push(s);
+    await s.opened;
+    return s;
+  };
+
+  beforeAll(async () => {
+    // Worker de importação no mesmo processo: os eventos passam pelo stream `inbox.events` real e
+    // pelo InboxBroadcast real.
+    // Limpa o DB antes de subir o app: o flush depois apagaria o grupo de consumo do worker.
+    const cleaner = new Redis(redisDbUrl(REDIS_DB));
+    await cleaner.flushdb();
+    await cleaner.quit();
+    t = await createTestApp({
+      imports: [ChatModule, ImportsModule],
+      redisDb: REDIS_DB,
+      workersEnabled: true,
+    });
+    A = await t.seedTenant({ name: "WS Imp A", monthlyQuota: 1000 });
+    B = await t.seedTenant({ name: "WS Imp B", monthlyQuota: 1000 });
+  });
+
+  afterAll(async () => {
+    for (const s of sockets) s.close();
+    await t?.close();
+  });
+
+  afterEach(async () => {
+    for (const s of sockets.splice(0)) {
+      s.close();
+      await s.waitClose().catch(() => undefined);
+    }
+  });
+
+  it("socket do cliente recebe import_progress e import_finished done; outro tenant não recebe nada", async () => {
+    const a = await connect(A.keys.chat, "cli-1");
+    const b = await connect(B.keys.chat, "cli-1");
+    const res = await request(t.app.getHttpServer() as http.Server)
+      .post("/api/clients/cli-1/imports")
+      .set("X-API-Key", A.keys.ingest)
+      .attach("file", ofx, "extrato.ofx");
+    expect(res.status).toBe(202);
+    const jobId = (res.body as { id: string }).id;
+
+    const fin = await a.waitFor((e) => e.type === "import_finished", "import_finished");
+    expect(fin).toEqual({ type: "import_finished", importJobId: jobId, status: "done" });
+    const progress = a.of("import_progress");
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress.every((e) => e.importJobId === jobId)).toBe(true);
+    // progresso nunca depois do término
+    expect(a.events.at(-1)?.type).toBe("import_finished");
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(b.events).toEqual([]);
   });
 });

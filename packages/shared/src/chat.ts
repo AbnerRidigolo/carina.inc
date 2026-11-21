@@ -3,6 +3,7 @@ import { AgentNameSchema, PlanSchema } from "./agents.js";
 import { ComplianceFlagSchema } from "./audit.js";
 import { WorkTypeSchema } from "./billing.js";
 import { ApprovalViewSchema } from "./inbox.js";
+import { ImportFinishedStatusSchema, ImportProgressStageSchema } from "./imports.js";
 import { MoneySchema } from "./money.js";
 
 export const ChatClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
@@ -45,6 +46,18 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
     compliance: z.object({ auditId: z.string(), flags: z.array(ComplianceFlagSchema) }),
   }),
   z.object({ type: z.literal("error"), code: z.string(), traceId: z.string() }),
+  z.object({
+    type: z.literal("import_progress"),
+    importJobId: z.string(),
+    stage: ImportProgressStageSchema,
+    processed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("import_finished"),
+    importJobId: z.string(),
+    status: ImportFinishedStatusSchema,
+  }),
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
 

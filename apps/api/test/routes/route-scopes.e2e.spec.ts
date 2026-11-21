@@ -95,6 +95,8 @@ describe("Escopos das rotas registradas", () => {
       [
         "GET /audit",
         "GET /clients",
+        "GET /clients/:clientId/imports",
+        "GET /clients/:clientId/imports/:id",
         "GET /clients/:clientId/inbox",
         "GET /clients/:clientId/positions",
         "GET /clients/:clientId/transactions",
@@ -105,6 +107,7 @@ describe("Escopos das rotas registradas", () => {
         "GET /ready",
         "GET /usage",
         "POST /chat",
+        "POST /clients/:clientId/imports",
         "POST /clients/:clientId/positions",
         "POST /inbox/:id/decision",
         "POST /clients/:clientId/transactions",

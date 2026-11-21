@@ -6,7 +6,7 @@
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { ChatResponseSchema, ProblemSchema, WsTicketSchema } from "@carina/shared";
+import { ChatResponseSchema, ProblemSchema, TaxAdviceSchema, WsTicketSchema } from "@carina/shared";
 import { Redis } from "ioredis";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -147,6 +147,31 @@ describe("Chat REST", () => {
     expect(body.usage).toEqual({ workType: "multi_agent_analysis", priceBrl: "15.00" });
     expect(body.plan.agents).toEqual(expect.arrayContaining(["predictor", "risk"]));
     expect(Object.keys(body.results).sort()).toEqual([...body.plan.agents].sort());
+  });
+
+  it("pergunta de imposto: plano com tax, resultado válido em TaxAdviceSchema e síntese", async () => {
+    const res = await post(A.keys.chat, {
+      clientId: "cli-1",
+      message: "quanto de imposto eu pago?",
+    });
+    expect(res.status).toBe(200);
+    const body = ChatResponseSchema.parse(res.body);
+    expect(body.plan.agents).toEqual(["tax"]);
+    expect(TaxAdviceSchema.safeParse(body.results["tax"]).success).toBe(true);
+    // Como no Python: turno com tax é `optimization`, não `analysis` (pricing.ts, OPTIMIZATION_AGENTS).
+    expect(body.usage).toEqual({ workType: "optimization", priceBrl: "30.00" });
+    expect(body.answer.length).toBeGreaterThan(0);
+  });
+
+  it("pergunta que casa 5 áreas roda só 3 especialistas", async () => {
+    const res = await post(A.keys.chat, {
+      clientId: "cli-1",
+      message: "imposto, risco, aposentadoria, projeção e pergunte ao assessor",
+    });
+    expect(res.status).toBe(200);
+    const body = ChatResponseSchema.parse(res.body);
+    expect(body.plan.agents).toEqual(["risk", "predictor", "strategist"]);
+    expect(Object.keys(body.results).sort()).toEqual(["predictor", "risk", "strategist"]);
   });
 
   it("compra: awaiting_approval com a ApprovalView (R$ 3.000,00) pendente no banco", async () => {

@@ -1,0 +1,52 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.formats {
+  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+}
+
+.formats legend {
+  padding: 0;
+}
+
+.formats label {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.row {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.job {
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.jobHead {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.fileName {
+  overflow-wrap: anywhere;
+}
+
+.errors {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}

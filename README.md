@@ -14,6 +14,7 @@ Redis (limites atômicos, Streams) · LangGraph.js / LangChain.js · Zod compart
 · Vitest contra Postgres e Redis reais.
 
 - [Demo local](#demo-local)
+- [Importação de arquivos](#importação-de-arquivos)
 - [Arquitetura](#arquitetura)
 - [Garantias provadas por testes](#garantias-provadas-por-testes)
 - [Como rodar os testes](#como-rodar-os-testes)
@@ -99,6 +100,41 @@ Com `LLM_MODE=live` e `OPENROUTER_API_KEY` os agentes usam os modelos de
 [`apps/api/config/models.yaml`](apps/api/config/models.yaml). Os modos live de LLM e de mercado
 **não são exercitados pelo CI**; leia [Limitações e segurança](#limitações-e-segurança) antes de ligá-lo.
 
+## Importação de arquivos
+
+O tenant (ou o investidor, pelo painel "Importar arquivo" da web) sobe um arquivo que já tem e os
+dados entram na carteira sem custo de agregador: **OFX** (extrato bancário e de cartão), **CSV**
+(com mapeamento de colunas ou preset) e **XLSX da Área do Investidor B3**. Escopo `data:write`
+para enviar e `chat` para consultar. O upload responde 202 com um job; um worker faz o parse numa
+thread isolada (limites de 30 s e 512 MB de heap, ajustável por `IMPORT_PARSE_MAX_HEAP_MB`), grava pelo mesmo caminho da ingestão (upsert idempotente,
+`source: "import"`, cada lote de até 1.000 itens cobrado como `data_ingestion` de R$ 0,05) e o
+progresso chega pelo WebSocket. Os bytes do arquivo saem do banco na mesma transação que fecha o
+job.
+
+```bash
+APP="Authorization: Bearer sk-live-demoapp0000000000000000000000000"   # a chave da demo tem data:write
+curl -s -X POST localhost:3000/api/clients/cliente-moderado/imports -H "$APP" \
+  -F file=@extrato.ofx -F format=ofx                                    # → 202 {"id":…,"status":"queued"}
+curl -s -X POST localhost:3000/api/clients/cliente-moderado/imports -H "$APP" \
+  -F file=@extrato.csv -F format=csv -F csvPreset=nubank_conta \
+  -F institution=Nubank -F account=conta-corrente
+curl -s -X POST localhost:3000/api/clients/cliente-moderado/imports -H "$APP" \
+  -F file=@posicao-b3.xlsx -F format=b3_xlsx -F asOf=2026-11-10         # data da fotografia
+curl -s localhost:3000/api/clients/cliente-moderado/imports/<job.id> -H "$APP"   # status, contagens e erros por linha
+```
+
+`format` é opcional (detectado pelo conteúdo, nunca pela extensão; `format=csv` vale mesmo quando a
+detecção não reconhece o CSV, que precisa usar `;` ou `,`). No CSV, `csvPreset`
+(`nubank_conta` ou `generico_br`) ou `csvMapping` (JSON) é obrigatório, e `account` também. Limites:
+10 MB por arquivo (413) e 5 importações ativas por cliente (429 com `Retry-After`). O mesmo arquivo
+enviado de novo devolve o job existente (200, sem cobrar); um job `failed` é reenfileirado.
+
+Limitações: os formatos foram **reconstruídos da documentação pública**, sem nenhum arquivo real
+(as fixtures são sintéticas); a nota de corretagem em PDF (SINACOR) fica para a entrega 2; o extrato
+de investimentos do OFX (`INVSTMTRS`) não é suportado; reenviar um job falho reprocessa o arquivo
+(e cobra de novo os lotes regravados). Decisões, garantias e o restante das limitações estão em
+[Importação de arquivos](docs/DECISOES-E-GARANTIAS.md#importação-de-arquivos-fase-2-entrega-1).
+
 ## Arquitetura
 
 ```mermaid
@@ -172,6 +208,14 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   chamadas ao provedor (cache negativo, 503 sem cobrança):
   [`market.e2e.spec.ts`](apps/api/test/market/market.e2e.spec.ts),
   [`market.service.spec.ts`](apps/api/src/modules/market/market.service.spec.ts).
+- **Importação de arquivos**: os bytes saem do banco ao fechar o job (e a limpeza apaga os que
+  sobrarem), `import_file` é isolada por RLS, nenhum conteúdo de linha chega a log, erro, auditoria
+  ou evento, e reenviar o mesmo arquivo não duplica nem cobra de novo:
+  [`imports.int.spec.ts`](apps/api/test/imports/imports.int.spec.ts) ("OFX de ponta a ponta…",
+  "nenhum log, erro de linha, auditoria ou evento contém a descrição de uma transação da fixture"),
+  [`imports.e2e.spec.ts`](apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo de novo…"),
+  [`rls-isolation.int.spec.ts`](apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não
+  enxerga import_file de A…").
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -224,6 +268,9 @@ limite conhecido:
   sem RLS, sem TTL e sem caminho de eliminação (LGPD). A auditoria guarda a pergunta mascarada
   por padrões e a resposta só como digest.
 - **Sem API administrativa** para suspender tenant ou revogar chave; a revogação vale em até 60 s.
+- **Importação sem arquivo real.** OFX, CSV e a planilha da B3 foram reconstruídos da documentação
+  pública; PDF SINACOR, `INVSTMTRS` e o resto estão em
+  [Importação de arquivos](docs/DECISOES-E-GARANTIAS.md#importação-de-arquivos-fase-2-entrega-1).
 - **Modo live sem teste automatizado**, Redis Streams sem `MAXLEN` e uma instância só exercitada.
 - As chaves de demo são públicas, e o ticket do WebSocket vai na query string (vale 30 s e uma
   vez).
@@ -234,9 +281,12 @@ A lista completa, com os próximos passos de engenharia em ordem de prioridade, 
 
 ## Roadmap
 
-**Fase 2 — produtos B2B:** importação de arquivos (OFX, CSV, planilhas da Área do Investidor B3,
-notas de corretagem), AOPs, `evaluation`, `builder` e os seis agentes restantes
-(strategist, researcher, assessor_liaison, monitor, categorizer e tax).
+**Fase 2 — produtos B2B:** importação de arquivos (OFX, CSV e planilhas da Área do Investidor B3
+já feitos; notas de corretagem em PDF na entrega 2), AOPs, `evaluation`, `builder` e os agentes restantes.
+Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
+categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
+base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor fica para a
+entrega 2, porque depende de um canal de alerta.
 
 **Fase 3 — integrações e remoção do Python:** notificações (WhatsApp e SMTP), monitor de carteiras
 e remoção de `legacy/python` e do job `legacy-python` do CI.

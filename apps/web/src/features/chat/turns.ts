@@ -91,6 +91,8 @@ function applyEvent(turn: Turn, event: ChatEvent): Turn {
       return { ...turn, error: { code: event.code, traceId: event.traceId } };
     case "approval_required":
     case "approval_executed":
+    case "import_progress":
+    case "import_finished":
       return turn;
   }
 }

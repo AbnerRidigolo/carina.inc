@@ -13,8 +13,8 @@ antiga está em `legacy/python`.
 | Processo | Entrada | O que roda |
 | --- | --- | --- |
 | `api` | `apps/api/src/main.ts` → `createApiApp()` | REST (`/api/*`), WebSocket do chat (`/ws/chat`, mesma porta), `InboxBroadcast`. Com `WORKERS_ENABLED !== "false"`, também os workers (útil em desenvolvimento, um processo só) |
-| `worker` | `apps/api/src/main.worker.ts` → `createWorkerContext()` | `SyncWorker` (grupo `sync` em `jobs`), `ResumeWorker` (grupo `resumers` em `jobs`), `ReconciliationJob` (timer de 60 s com lock Redis). Força `WORKERS_ENABLED=true` e não abre porta |
-| `migrate` | `prisma migrate deploy` (imagem `migrate`) | Migrações 0001–0006, escritas à mão, como `carina_migrator`. Roda uma vez |
+| `worker` | `apps/api/src/main.worker.ts` → `createWorkerContext()` | `SyncWorker` (grupo `sync` em `jobs`), `ResumeWorker` (grupo `resumers` em `jobs`), `ImportWorker` (grupo `imports` em `jobs`), `ReconciliationJob` (timer de 60 s com lock Redis) e `ImportCleanupJob` (timer de 5 min com lock Redis). Força `WORKERS_ENABLED=true` e não abre porta |
+| `migrate` | `prisma migrate deploy` (imagem `migrate`) | Migrações 0001–0008, escritas à mão, como `carina_migrator`. Roda uma vez |
 | `seed` | `node dist/seed/seed.js` | Tenant `demo` (id fixo), duas chaves e três clientes sintéticos já sincronizados. Idempotente |
 | `web` | nginx (`apps/web/nginx.conf`) | SPA do Vite, proxy de `/api` e `/ws` para `api:3000`, cabeçalhos de segurança e CSP |
 
@@ -48,7 +48,8 @@ apps/api/src/modules
   limits          RateLimitGuard (janela deslizante) e QuotaService (cota mensal), em Lua
   llm             ModelFactory por papel, withFallbacks, limitador por provedor, embeddings, mock
   knowledge       ingestão de documentos (chunks, entidades, relações, embeddings) e busca híbrida
-  agents          navigator, insight, predictor, risk, executor (prompt + schema + limites)
+  agents          navigator, insight, predictor, risk, strategist, tax, researcher,
+                  assessor_liaison, executor (prompt + schema + limites)
   orchestrator    grafo LangGraph, checkpointer Postgres, ResumeWorker
   inbox           risco, solicitações, decisão com trava, executores simulados, execução única,
                   reconciliação
@@ -56,7 +57,8 @@ apps/api/src/modules
   watchtower      flags de compliance e trilha de auditoria append-only (pergunta com PII
                   mascarada e truncada; resposta só como digest)
   chat            POST /chat, ticket do WS, ChatGateway, InboxBroadcast
-  data-ingestion  API de ingestão em lote, gerador sintético, SyncWorker
+  data-ingestion  API de ingestão em lote, gerador sintético, categorizer, SyncWorker
+  imports         upload de OFX/CSV/XLSX B3, parsers, ImportWorker e ImportCleanupJob
   market          cotações, histórico e indicadores macro (brapi.dev + BCB SGS ou mock), cache no
                   Redis, rotas `/api/market/*` e `MarketService.priceFor` (preço de servidor)
   health          /health e /ready (single-flight + cache curto)
@@ -101,7 +103,7 @@ runtime: `NOSUPERUSER NOBYPASSRLS`, sem acesso a `api_key`.
 | Tabelas | Política |
 | --- | --- |
 | `usage_record`, `audit_event` | `tenant_id = app.tenant_id`; `carina_app` só tem `SELECT, INSERT` (append-only) |
-| `client`, `approval_request`, `executed_action`, `position`, `transaction`, `import_job` | tenant igual; se `app.client_id` estiver fixado, o cliente também |
+| `client`, `approval_request`, `executed_action`, `position`, `transaction`, `import_job`, `import_file` | tenant igual; se `app.client_id` estiver fixado, o cliente também |
 | `kg_document`, `kg_chunk`, `kg_entity`, `kg_relation`, `kg_mention` | **tenant E cliente obrigatórios**: sem `app.client_id`, nenhuma linha |
 | `tenant` | leitura só do próprio tenant |
 | `api_key` | sem acesso para `carina_app`; só via `resolve_api_key` / `resolve_api_key_by_id` |
@@ -133,6 +135,15 @@ Dinheiro é `numeric(18,2)` e trafega como string decimal (`MoneySchema`). Quant
   instituições, categorias) e relações. Um lock Redis por `(tenant, cliente)` serializa as
   sincronizações. Quem não pega o lock relança `SyncBusyError` e a entrega é repetida pelo
   reclaim.
+- **Categorizer** (`data-ingestion/categorize.ts`, sem LLM): `IngestionService` chama
+  `withInferredCategories` nos dois caminhos de upsert de transações, o que cobre a API de
+  ingestão, a importação de arquivos e o seed. Ordem: (1) `kind` decide (`buy`, `sell`,
+  `dividend`, `jcp` → `investimento`; `tax` → `impostos`; `fee` → `tarifas`); (2) regra de
+  `impostos` (imposto, darf, iof); (3) as regras do Python (investimento, moradia, alimentação,
+  transporte, saúde, lazer), com listas de palavra inteira e de trecho, sem acento e sem
+  distinção de caixa; "mercado" solto ficou de fora (Mercado Livre e Mercado Pago não são
+  alimentação). Sem regra, a categoria fica nula. Uma categoria enviada no item nunca é
+  sobrescrita. Não detecta parcelas.
 
 ## 6. Modelos (`llm`)
 
@@ -169,10 +180,32 @@ flowchart LR
 - **`classify`** usa o papel `reasoning` com saída estruturada (`Plan`). A saída do modelo é
   revalidada (`normalizePlan`): ele pode desligar a execução, mas só liga `wantsExecution` se a
   própria pergunta tiver um verbo de execução. Se todos os modelos falharem, cai na heurística
-  por palavras-chave do Python.
+  por palavras-chave (`heuristic.ts`).
+- **Limite de custo na classificação**: no máximo **3 especialistas por turno**
+  (`MAX_SPECIALISTS`), tanto na heurística quanto em `normalizePlan`, na ordem fixa do plano:
+  insight, risk, predictor, strategist, tax, researcher, assessor_liaison (não é a ordem do enum).
+  Termos curtos ou ambíguos casam só como palavra inteira. A palavra solta "ir" ficou de fora de
+  propósito (é também o verbo): "IRPF", "imposto de renda" e "declaração de IR" acionam o `tax`,
+  um "IR" sozinho não.
 - **`retrieve`** faz a busca híbrida no conhecimento do cliente.
-- **Especialistas** (insight, predictor, risk) rodam em paralelo via `Send`. A falha de um vira
-  `{agent, error}` no estado, e a síntese menciona a análise que faltou.
+- **Especialistas** (insight, predictor, risk, strategist, tax, researcher, assessor_liaison)
+  rodam em paralelo via `Send`, no máximo 3 por turno. A falha de um vira `{agent, error}` no
+  estado, e a síntese menciona a análise que faltou. Todos têm prompt com o aviso de conteúdo não
+  confiável. A saída dos que têm schema (predictor, risk, strategist, tax e assessor_liaison) é
+  limitada por `refine` (`output-limits.ts`); o researcher (como o insight, ambos em texto) não tem `refine` e só
+  é cortado por `MAX_OUTPUT_CHARS`/`MAX_RESULT_CHARS`:
+  - **strategist** (`reasoning`, `StrategyPlan`: alocação alvo que soma 100 ± 0,5, marcos com
+    probabilidade 0..1) e **tax** (`reasoning`, `TaxAdvice`: IR estimado ≥ 0 e `consultAccountant`)
+    estimam e recomendam; não executam (propostas vão ao Executor);
+  - **researcher** (`conversational`, texto) responde **só com a base de conhecimento**, cita as
+    fontes pelo título e diz quando a base não tem a resposta. Não há busca web nem gravação na base;
+  - **assessor_liaison** (`conversational`, `AssessorBrief`: 1 a 5 perguntas e o que cada uma
+    revela do cliente em `sharedData`) **só redige**; nada é enviado (canais são da fase 3).
+  O filtro do `agent_result` aceita qualquer `SpecialistName`. Na cobrança, um turno com `tax` no
+  plano é `optimization` (R$ 30,00), como no Python; os demais turnos seguem pelo número de agentes.
+  Na web, `AgentCard` tem um cartão por
+  schema; o do assessor mostra todo `sharedData` (extras em "Outros dados compartilhados" e o que
+  falta é sinalizado com "Não informado o que esta pergunta revela.").
 - **`respond` / `synthesize`**: o Navigator produz a resposta final (em streaming de `token`).
 - **`executor`** gera uma `ActionProposal` validada. `classifyRisk`: `READ` executa direto,
   `REVERSIBLE` executa, e **qualquer outra ação é `IRREVERSIBLE`**. Para uma ação irreversível o
@@ -230,7 +263,8 @@ flowchart LR
 
 **Cobrança** ([`pricing.ts`](../apps/api/src/modules/billing/pricing.ts)):
 
-- o tipo de trabalho do chat vem dos agentes do plano: nenhum → `query` R$ 1,50; um →
+- o tipo de trabalho do chat vem dos agentes do plano: com `tax` (ou `tax_optimizer`,
+  `rebalancer`) → `optimization` R$ 30,00, como no Python; senão nenhum → `query` R$ 1,50; um →
   `analysis` R$ 7,50; dois ou mais → `multi_agent_analysis` R$ 15,00;
 - `execution` custa R$ 75,00 + `round_half_up(valor × EXECUTION_FEE_PCT / 100, 2)`, com taxa
   padrão de 0,5%;
@@ -277,12 +311,69 @@ existe no `WorkerModule`; só o `MarketModule` da API monta o controller.
 - **Taxa.** A taxa de execução é calculada sobre o `valueBrl` gravado (o que o aprovador viu);
   não há nova cotação na execução.
 
-## 10. Redis Streams
+## 10. Importação de arquivos (`imports`)
+
+O tenant sobe OFX, CSV ou a planilha da Área do Investidor B3 em
+`POST /api/clients/:clientId/imports` (multipart, escopo `data:write`; `GET` com escopo `chat`).
+O parse é assíncrono e o arquivo não fica guardado depois dele. Desenho completo e decisões no
+[spec da importação](superpowers/specs/2026-11-16-importacao-arquivos-design.md).
+
+```
+web/tenant ── POST /imports (multipart) ──► api
+   api: limite 10 MB → detecta/valida formato → SHA-256 → INSERT import_job (queued)
+        + INSERT import_file (bytes)  [mesma transação, RLS]
+        → XADD jobs import.requested  → 202 {job}
+worker: consome import.requested → UPDATE status queued→parsing (claim atômico, claim_token novo)
+        → lê bytes → parser (worker_threads, 30 s, 512 MB) → itens normalizados + erros por linha
+        → IngestionService em lotes de 1000 (source "import") → stats/errors
+        → status done|failed + DELETE import_file  [mesma transação, com o claim_token]
+        → publica import.progress / import.finished em inbox.events → WebSocket do tenant+cliente
+```
+
+- **API** (`ImportsService`). Recusas síncronas, sem gravar nem cobrar: arquivo vazio ou formato não
+  reconhecido/incoerente com `format` (422), maior que 10 MB (413), mais de 5 jobs `queued`/`parsing`
+  do cliente (429, `Retry-After: 30`). A unicidade `(tenant_id, client_id, file_sha256)` faz o mesmo
+  arquivo devolver o job existente (200) se ele está `queued`, `parsing` ou `done`; se está
+  `failed`, o MESMO job é reenfileirado (202, opções novas, `errors`/`stats` zerados, bytes
+  regravados), sujeito ao teto de 5 ativos. O `fileName` guarda só o nome-base, até 120 caracteres.
+  Auditoria `import.created`, sem nome de arquivo nem conteúdo.
+- **`import_job`** (0007): `status` (`queued`, `parsing`, `done`, `failed`), `format`, `options`
+  (JSONB, campos do upload), `stats`, `errors` (até 100 `{ row, field?, code, message }` com
+  mensagem fixa por código), `failure_code`, `progress_at` (último avanço do parse) e
+  `claim_token` (0008). O job nunca é apagado.
+- **`import_file`** (0007): `(import_job_id, tenant_id, client_id, bytes bytea, created_at)`, com
+  `CHECK (octet_length(bytes) <= 10 MB)`, FK composta com cascata e RLS por tenant e cliente (as
+  mesmas políticas de `import_job`). Fica separada para manter `import_job` leve e para "não sobrou
+  byte" ser verificável com uma consulta.
+- **Worker** (`ImportWorker`, processo `worker`). Consome `import.requested` no grupo `imports` do
+  stream `jobs`. O claim (`queued` → `parsing`) é um `UPDATE` atômico que grava um `claim_token`
+  novo; reentrega ou segundo consumidor não tomam o job. O parse roda numa `worker_threads` que é
+  encerrada aos 30 s e tem a heap limitada a 512 MB por padrão, ajustável por `IMPORT_PARSE_MAX_HEAP_MB` (os dois viram `limit_exceeded`). Posições da B3 substituem as `source = "import"` das
+  instituições do arquivo (por instituição, sob advisory lock por cliente; fotografia mais antiga
+  que a gravada não substitui nada e as linhas viram `stale_snapshot`; instituição com linha de
+  posição recusada só recebe o upsert, sem apagar nada); as transações vão em lotes
+  de 1000 pelo `IngestionService` (cada lote é um `data_ingestion` de R$ 0,05 e dispara o
+  `data.ingested` do Sync). `touchProgress` e `finish` só valem com o `claim_token` do claim.
+- **Eventos**. `import.requested { importJobId }` em `jobs`; `import.progress { importJobId, stage,
+  processed, total }` e `import.finished { importJobId, status }` em `inbox.events`, que o
+  `InboxBroadcast` repassa como `import_progress` / `import_finished` só aos sockets do mesmo tenant
+  e cliente, sem ler o banco. Nenhum evento leva nome de arquivo nem conteúdo.
+- **Limpeza** (`ImportCleanupJob`, timer de 5 min, lock Redis `imports:cleanup`). `import_file` com
+  mais de 1 h é apagada e o job vira `failed` (`expired`); job `parsing` sem progresso há mais de
+  15 min vira `failed` (`stuck`) e a `import_file` é apagada. Os tenants com trabalho vêm de
+  `import_cleanup_tenant_ids()` (`SECURITY DEFINER`, migração 0008, devolve só ids, como
+  `active_tenant_ids`); cada tenant é processado sob RLS como `carina_app`. Cada job fechado ganha
+  auditoria `import.finished:failed` e um `import.finished` para a web.
+- **Defesa contra arquivo hostil**: XLSX com soma descompactada ≤ 50 MB, ≤ 50 entradas, razão de
+  compressão limitada e recusa de DTD/entidades; OFX/CSV com ≤ 100 000 linhas, ≤ 64 colunas e linha
+  ≤ 64 KB. Estourar um limite vira `failed` com código fixo.
+
+## 11. Redis Streams
 
 | Stream | Produtores | Consumidores |
 | --- | --- | --- |
-| `jobs` | decisão e reconciliação (`resume`), ingestão (`data.ingested`) | grupos `resumers` (ResumeWorker) e `sync` (SyncWorker) |
-| `inbox.events` | inbox (`approval.created`, `approval.executed`) | `InboxBroadcast` (tail, sem grupo) |
+| `jobs` | decisão e reconciliação (`resume`), ingestão (`data.ingested`), upload de importação (`import.requested`) | grupos `resumers` (ResumeWorker), `sync` (SyncWorker) e `imports` (ImportWorker) |
+| `inbox.events` | inbox (`approval.created`, `approval.executed`), importação (`import.progress`, `import.finished`) | `InboxBroadcast` (tail, sem grupo) |
 | `notifications` | — (contrato pronto para a fase 3) | — |
 
 - O consumo usa `XREADGROUP BLOCK 5000`, com `XACK` só depois do sucesso.
@@ -294,7 +385,7 @@ existe no `WorkerModule`; só o `MarketModule` da API monta o controller.
 - O tail resolve o id inicial uma vez (`XREVRANGE`) e avança o cursor. Assim não perde evento
   entre dois `BLOCK`s.
 
-## 11. WebSocket do chat
+## 12. WebSocket do chat
 
 1. `POST /api/ws/ticket` (escopo `chat`, corpo `{ clientId }`) devolve um ticket de 30 s, preso
    ao tenant, à chave e ao cliente.
@@ -306,14 +397,14 @@ existe no `WorkerModule`; só o `MarketModule` da API monta o controller.
    heartbeat: um socket ocioso cuja chave foi revogada (ou o tenant suspenso) deixa de receber o
    push da inbox, recebe `error unauthenticated` e fecha com 4401.
 4. Eventos: `plan`, `agent_started`, `token`, `agent_result`, `approval_required`,
-   `approval_executed`, `done` (com `usage` e `compliance`) e `error` (`code` + `traceId`).
+   `approval_executed`, `import_progress`, `import_finished`, `done` (com `usage` e `compliance`) e `error` (`code` + `traceId`).
 5. Códigos de fechamento: 4401 (não autorizado ou vida máxima `WS_MAX_CONNECTION_MS`
    vencida), 4408 (ocioso, 10 min), 1009 (mensagem grande demais) e 1001 (desligamento). Há
    heartbeat por ping.
 6. Se o cliente desconectar no meio de um turno, o turno termina em segundo plano, para a
    aprovação não ficar órfã, e o lock é liberado.
 
-## 12. Configuração
+## 13. Configuração
 
 Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e validadas por
 [`env.ts`](../apps/api/src/core/config/env.ts). As principais:
@@ -328,7 +419,7 @@ Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e v
   tenant);
 - `WS_MAX_CONNECTION_MS` e `API_KEY_REVALIDATE_TTL_MS`.
 
-## 13. Testes
+## 14. Testes
 
 | Projeto | Onde | Infra |
 | --- | --- | --- |

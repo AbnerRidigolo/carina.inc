@@ -39,6 +39,30 @@ const quote = (symbol: string, changePct: string | null = "0", price = "31.4"): 
 const symbols = (n: number) =>
   Array.from({ length: n }, (_, i) => `S${i.toString().padStart(2, "0")}`);
 
+/**
+ * `monitorQuotes` falso com a semântica do real: cache não gasta orçamento; cada símbolo fora do
+ * cache gasta uma tentativa (1 símbolo por chamada); desconhecido tentado volta ausente; o que não
+ * coube no orçamento fica em `pending`.
+ */
+function budgetMarket(opts: { budget: number; unknown?: string[]; cached?: string[] }) {
+  return (list: string[]) => {
+    let left = opts.budget;
+    const quotes: Quote[] = [];
+    const pending: string[] = [];
+    for (const sym of list) {
+      if (opts.cached?.includes(sym)) {
+        quotes.push(quote(sym));
+      } else if (pending.length === 0 && left > 0) {
+        left--;
+        if (!opts.unknown?.includes(sym)) quotes.push(quote(sym));
+      } else {
+        pending.push(sym);
+      }
+    }
+    return Promise.resolve({ quotes, exhausted: pending.length > 0, pending });
+  };
+}
+
 interface SetupOpts {
   now?: number;
   lock?: boolean;
@@ -115,6 +139,7 @@ function setup(opts: SetupOpts = {}) {
       return Promise.resolve({
         quotes: list.map((s) => quote(s, moves[s] ?? "0")),
         exhausted: false,
+        pending: [] as string[],
       });
     }),
   };
@@ -129,7 +154,7 @@ function setup(opts: SetupOpts = {}) {
       WORKERS_ENABLED: opts.workers ?? "false",
       MARKET_MODE: "mock",
       MONITOR_INTERVAL_MS: INTERVAL,
-      MONITOR_MAX_SYMBOLS_PER_TICK: opts.maxSymbols ?? 20,
+      MONITOR_MAX_SYMBOLS_PER_TICK: opts.maxSymbols ?? 10,
       MONITOR_MOVE_THRESHOLD_PCT: 5,
     },
     db as never,
@@ -214,7 +239,10 @@ describe("MonitorJob.runOnce", () => {
 
   it("rodízio: 45 símbolos, limite 20 → três ciclos cobrem todos, na ordem, e o quarto recomeça", async () => {
     const all = symbols(45);
-    const s = setup({ watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) } });
+    const s = setup({
+      watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) },
+      maxSymbols: 20,
+    });
     const runs = [];
     for (let i = 0; i < 4; i++) runs.push(await s.job.runOnce());
     const calls = s.market.monitorQuotes.mock.calls.map(([list]) => list);
@@ -241,11 +269,13 @@ describe("MonitorJob.runOnce", () => {
     const s = setup({
       watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) },
       moves: { S03: "-6" },
+      maxSymbols: 20,
     });
     s.market.monitorQuotes.mockImplementationOnce((list: string[]) =>
       Promise.resolve({
         quotes: list.slice(0, 7).map((sym) => quote(sym, sym === "S03" ? "-6" : "0")),
         exhausted: true,
+        pending: list.slice(7),
       }),
     );
     const first = await s.job.runOnce();
@@ -259,9 +289,53 @@ describe("MonitorJob.runOnce", () => {
   it("orçamento esgotado antes de qualquer cotação: cursor não anda", async () => {
     const s = setup();
     s.store.set(MONITOR_CURSOR_KEY, "AAAA1");
-    s.market.monitorQuotes.mockResolvedValueOnce({ quotes: [], exhausted: true });
+    s.market.monitorQuotes.mockImplementationOnce((list: string[]) =>
+      Promise.resolve({ quotes: [], exhausted: true, pending: list }),
+    );
     expect(await s.job.runOnce()).toMatchObject({ exhausted: true, alerts: 0 });
     expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("AAAA1");
+  });
+
+  it("símbolo desconhecido do provedor no começo do lote não trava o rodízio (orçamento esgotado)", async () => {
+    const all = symbols(30);
+    const s = setup({ watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) } });
+    // S00 não existe no provedor; sem cache (o negativo expira entre ciclos); 3 tentativas por ciclo
+    s.market.monitorQuotes.mockImplementation(budgetMarket({ budget: 3, unknown: ["S00"] }));
+    for (let i = 0; i < 3; i++) await s.job.runOnce();
+    const calls = s.market.monitorQuotes.mock.calls.map(([list]) => list);
+    expect(calls).toEqual([all.slice(0, 10), all.slice(3, 13), all.slice(6, 16)]);
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S08");
+  });
+
+  it("símbolo desconhecido no meio do lote: o cursor passa por ele", async () => {
+    const all = symbols(30);
+    const s = setup({ watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) } });
+    // sem esgotar: o lote inteiro foi tentado
+    s.market.monitorQuotes.mockImplementationOnce(budgetMarket({ budget: 99, unknown: ["S05"] }));
+    expect(await s.job.runOnce()).toMatchObject({ exhausted: false, symbols: 10 });
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S09");
+    // esgotando depois dele: para no último tentado, não antes do desconhecido
+    s.market.monitorQuotes.mockImplementationOnce(budgetMarket({ budget: 5, unknown: ["S12"] }));
+    expect(await s.job.runOnce()).toMatchObject({ exhausted: true });
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S14");
+  });
+
+  it("cache expirado entre ciclos não faz o rodízio repetir a mesma janela", async () => {
+    const all = symbols(30);
+    const s = setup({ watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) } });
+    // 1º ciclo: S05..S09 já no cache (vindos das rotas), S00 desconhecido, 2 tentativas
+    s.market.monitorQuotes.mockImplementationOnce(
+      budgetMarket({ budget: 2, unknown: ["S00"], cached: all.slice(5, 10) }),
+    );
+    expect(await s.job.runOnce()).toMatchObject({ exhausted: true });
+    // nada pulado: S02..S04 não foram tentados, apesar de S05..S09 terem voltado do cache
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S01");
+    // 2º ciclo: o cache expirou (inclusive o negativo de S00), 2 tentativas de novo
+    s.market.monitorQuotes.mockImplementationOnce(budgetMarket({ budget: 2, unknown: ["S00"] }));
+    await s.job.runOnce();
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S03");
+    const calls = s.market.monitorQuotes.mock.calls.map(([list]) => list);
+    expect(calls).toEqual([all.slice(0, 10), all.slice(2, 12)]);
   });
 
   it("variação de −6% grava o alerta de cada cliente com o ativo, sob o tenant certo, e publica depois do COMMIT", async () => {
@@ -339,8 +413,19 @@ describe("MonitorJob.runOnce", () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(Object.assign(new Error("perdido"), { name: "LockLostError" }));
     await expect(s.job.runOnce()).rejects.toThrow("perdido");
+    // a segunda conferência é antes de gravar o cursor: nem cursor nem alerta
+    expect(s.store.has(MONITOR_CURSOR_KEY)).toBe(false);
     expect(s.repo.insertIfNew).not.toHaveBeenCalled();
     expect(s.lock.release).toHaveBeenCalled();
+  });
+
+  it("carteira sem símbolo válido: ciclo sem cotar, e o resumo também é logado", async () => {
+    const s = setup({ watch: { [T1]: [{ clientId: C1, assetCode: "TESOURO-IPCA" }] } });
+    expect(await s.job.runOnce()).toMatchObject({ tenants: 1, symbols: 0, alerts: 0 });
+    expect(s.market.monitorQuotes).not.toHaveBeenCalled();
+    expect(s.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ tenants: 1, symbols: 0, alerts: 0, exhausted: false }),
+    );
   });
 
   it("nenhum log contém valor de posição", async () => {

@@ -57,8 +57,10 @@ Consideradas:
   que devolve os tenants com posição `kind = 'investment'` e `asset_code` não nulo, sem tenant
   suspenso. Cada tenant sob `TenantContext.run` (RLS): lê `(client_id, asset_code)` distintos.
 - Símbolos: união de todos os tenants, ordenada, limitada a `MONITOR_MAX_SYMBOLS_PER_TICK` (env,
-  padrão 20) por ciclo, em rodízio: um cursor no Redis (`monitor:cursor`) guarda onde parou, para
-  que carteiras grandes sejam cobertas ao longo dos ciclos.
+  padrão 10) por ciclo, em rodízio: um cursor no Redis (`monitor:cursor`) guarda onde parou, para
+  que carteiras grandes sejam cobertas ao longo dos ciclos. O limite por ciclo não deve passar do
+  orçamento do monitor × símbolos por chamada (`MARKET_MONITOR_MAX_CALLS_PER_MIN` ×
+  `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`), senão o ciclo termina esgotado.
 - Cotações por `MarketService.monitorQuotes(symbols)`: usa o cache de 60 s e um **terceiro
   orçamento** `market:<modo>:budget:monitor:<minuto>` com `MARKET_MONITOR_MAX_CALLS_PER_MIN` (env,
   padrão 10), separado das rotas e do preço. Orçamento esgotado → para de cotar neste ciclo, sem

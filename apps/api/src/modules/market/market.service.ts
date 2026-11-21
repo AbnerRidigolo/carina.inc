@@ -38,8 +38,10 @@
  * - monitor (`monitorQuotes`, o job de alertas da carteira): `market:<modo>:budget:monitor:<minuto>`,
  *   `MARKET_MONITOR_MAX_CALLS_PER_MIN`, separado das rotas e do preço para o monitor nunca
  *   esgotá-los. Uma unidade por lote, cobrada ANTES de cada lote; esgotado → para de buscar e devolve
- *   o que já tem (cache + lotes já buscados) com `exhausted: true`, sem lançar `MarketDataBusyError`
- *   (o rodízio do job retoma no próximo ciclo). Redis fora do ar → LANÇA
+ *   o que já tem (cache + lotes já buscados) com `exhausted: true`, sem lançar `MarketDataBusyError`,
+ *   e `pending` = os símbolos pedidos que NÃO foram tentados (nem cache nem provedor), na ordem
+ *   pedida; ausente do provedor (ou do cache negativo) conta como tentado. O rodízio do job avança
+ *   o cursor só até antes do primeiro pendente e retoma dali no próximo ciclo. Redis fora do ar → LANÇA
  *   (`MarketDataUnavailableError`, falha fechada): o job pula o ciclo, como já faz sem o lock.
  *   Sem busca única por símbolo: o job roda sob lock global, um ciclo por vez.
  * `macro` não consome: uma chave só, cache de 1 h (no máximo uma busca por hora por processo).
@@ -209,9 +211,11 @@ export class MarketService implements OnModuleInit {
   /**
    * Cotações para o monitor de carteira, no orçamento próprio (ver o cabeçalho). Repetidos viram
    * um; ausentes do provedor são omitidos. Orçamento esgotado → devolve o que já tem com
-   * `exhausted: true`; Redis fora → lança.
+   * `exhausted: true` e os não tentados em `pending` (na ordem pedida); Redis fora → lança.
    */
-  async monitorQuotes(symbols: string[]): Promise<{ quotes: Quote[]; exhausted: boolean }> {
+  async monitorQuotes(
+    symbols: string[],
+  ): Promise<{ quotes: Quote[]; exhausted: boolean; pending: string[] }> {
     if (!Array.isArray(symbols)) throw new ValidationError("Símbolos inválidos");
     for (const s of symbols) {
       if (typeof s !== "string" || !SYMBOL_RE.test(s))
@@ -220,6 +224,7 @@ export class MarketService implements OnModuleInit {
     const list = [...new Set(symbols)];
     const { found, toFetch } = await this.readQuoteCache(list);
     let exhausted = false;
+    let untried: ReadonlySet<string> = new Set();
     const perCall = this.env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL;
     for (let i = 0; i < toFetch.length; i += perCall) {
       try {
@@ -227,6 +232,7 @@ export class MarketService implements OnModuleInit {
       } catch (err) {
         if (!(err instanceof MarketDataBusyError)) throw err;
         exhausted = true;
+        untried = new Set(toFetch.slice(i));
         break;
       }
       for (const [symbol, quote] of await this.fetchAndStore(toFetch.slice(i, i + perCall))) {
@@ -238,7 +244,7 @@ export class MarketService implements OnModuleInit {
       const e = found.get(s);
       return e ? [{ ...e.quote, marketState: state }] : [];
     });
-    return { quotes, exhausted };
+    return { quotes, exhausted, pending: list.filter((s) => untried.has(s)) };
   }
 
   async history(symbol: string, range: HistoryRange): Promise<HistoricalBar[]> {

@@ -79,8 +79,11 @@ export const EnvSchema = z
     MARKET_MONITOR_MAX_CALLS_PER_MIN: z.coerce.number().int().min(1).max(10_000).default(10),
     /** Intervalo (ms) entre ciclos do monitor de carteira. Padrão 10 min; mínimo 1 min. */
     MONITOR_INTERVAL_MS: z.coerce.number().int().min(60_000).default(600_000),
-    /** Símbolos cotados por ciclo do monitor (rodízio sobre a carteira de todos os tenants). */
-    MONITOR_MAX_SYMBOLS_PER_TICK: z.coerce.number().int().min(1).max(200).default(20),
+    /**
+     * Símbolos cotados por ciclo do monitor (rodízio sobre a carteira de todos os tenants). Padrão
+     * 10 = MARKET_MONITOR_MAX_CALLS_PER_MIN (10) × MARKET_BRAPI_MAX_SYMBOLS_PER_CALL (1).
+     */
+    MONITOR_MAX_SYMBOLS_PER_TICK: z.coerce.number().int().min(1).max(200).default(10),
     /** Variação diária (%, em módulo) a partir da qual o monitor gera alerta. */
     MONITOR_MOVE_THRESHOLD_PCT: z.coerce.number().int().min(1).max(50).default(5),
     /**

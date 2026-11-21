@@ -8,8 +8,9 @@
  *   4. rodízio: a união ordenada dos símbolos; o cursor (`monitor:cursor`) guarda o último cotado e
  *      o ciclo pega os próximos `MONITOR_MAX_SYMBOLS_PER_TICK` depois dele, até o fim da lista; o
  *      ciclo seguinte ao fim recomeça do início. Orçamento do monitor esgotado no meio → o cursor
- *      avança só até o último símbolo da sequência inicial do lote que voltou cotado (nada fica
- *      pulado), sem erro;
+ *      avança até o símbolo anterior ao primeiro que o `monitorQuotes` não chegou a tentar
+ *      (`pending`), sem erro: nada fica pulado, e um símbolo tentado que o provedor não conhece
+ *      conta como feito (não trava o rodízio, mesmo com o cache negativo já expirado);
  *   5. regra `detectMove`; cada alerta numa transação própria (`insertIfNew`, idempotente por
  *      cliente, ativo, dia de São Paulo e sentido): um insert que falha é logado (só ids) e os
  *      demais seguem; o que entrou é publicado como `monitor.alert` em `inbox.events` DEPOIS do
@@ -122,6 +123,22 @@ export function nextBatch(sorted: readonly string[], cursor: string | null, max:
   return sorted.slice(from, from + max);
 }
 
+/**
+ * Novo cursor do rodízio: o símbolo anterior ao primeiro não tentado (`pending`, por falta de
+ * orçamento); sem pendentes, o fim do lote. `undefined` = não anda (nada do lote foi tentado).
+ * Tentado e ausente do provedor conta como feito.
+ */
+export function advanceCursor(
+  batch: readonly string[],
+  pending: readonly string[],
+): string | undefined {
+  const first = pending[0];
+  if (first === undefined) return batch.at(-1);
+  const idx = batch.indexOf(first);
+  if (idx === -1) return batch.at(-1);
+  return idx === 0 ? undefined : batch[idx - 1];
+}
+
 @Injectable()
 export class MonitorJob
   implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown
@@ -220,7 +237,7 @@ export class MonitorJob
       const all = [...new Set([...watch.values()].flat().map((i) => i.assetCode))]
         .filter((s) => SYMBOL_RE.test(s))
         .sort();
-      if (all.length === 0) return { ...EMPTY_RUN, tenants: tenantIds.length };
+      if (all.length === 0) return this.summary({ ...EMPTY_RUN, tenants: tenantIds.length });
 
       const batch = nextBatch(
         all,
@@ -228,10 +245,13 @@ export class MonitorJob
         this.env.MONITOR_MAX_SYMBOLS_PER_TICK,
       );
       await lock.assertHeld();
-      const { quotes, exhausted } = await this.market.monitorQuotes(batch);
+      const { quotes, exhausted, pending } = await this.market.monitorQuotes(batch);
 
-      const cursor = this.advanceCursor(batch, new Set(quotes.map((q) => q.symbol)), exhausted);
-      if (cursor !== undefined) await this.redis.set(MONITOR_CURSOR_KEY, cursor);
+      const cursor = advanceCursor(batch, pending);
+      if (cursor !== undefined) {
+        await lock.assertHeld();
+        await this.redis.set(MONITOR_CURSOR_KEY, cursor);
+      }
 
       const moves = new Map<string, DetectedMove>();
       for (const quote of quotes) {
@@ -258,42 +278,28 @@ export class MonitorJob
         }
       }
 
-      const run = {
+      return this.summary({
         ...EMPTY_RUN,
         tenants: tenantIds.length,
         symbols: batch.length,
         alerts,
         exhausted,
-      };
-      this.logger.info({
-        msg: "Ciclo do monitor de carteira",
-        tenants: run.tenants,
-        symbols: run.symbols,
-        alerts: run.alerts,
-        exhausted: run.exhausted,
       });
-      return run;
     } finally {
       await lock.release().catch(() => undefined);
     }
   }
 
-  /**
-   * Novo cursor: o fim do lote; com o orçamento esgotado, o último da sequência inicial do lote que
-   * voltou cotada (`undefined` = não anda).
-   */
-  private advanceCursor(
-    batch: readonly string[],
-    quoted: ReadonlySet<string>,
-    exhausted: boolean,
-  ): string | undefined {
-    if (!exhausted) return batch.at(-1);
-    let last: string | undefined;
-    for (const symbol of batch) {
-      if (!quoted.has(symbol)) break;
-      last = symbol;
-    }
-    return last;
+  /** Log do ciclo (só contagens) e o próprio resultado. */
+  private summary(run: MonitorRun): MonitorRun {
+    this.logger.info({
+      msg: "Ciclo do monitor de carteira",
+      tenants: run.tenants,
+      symbols: run.symbols,
+      alerts: run.alerts,
+      exhausted: run.exhausted,
+    });
+    return run;
   }
 
   /** Grava os alertas do tenant (sob o contexto dele), cada um na sua transação; devolve quantos. */

@@ -705,6 +705,7 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
     const first = await service.monitorQuotes(["PETR4", "VALE3"]);
     expect(first.exhausted).toBe(true);
     expect(first.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    expect(first.pending).toEqual(["VALE3"]);
     const minute = String(minuteOf(FRIDAY_OPEN));
     expect((redis as FakeRedis).store.get(`market:live:budget:monitor:${minute}`)).toBe("2");
     expect((redis as FakeRedis).ttls.get(`market:live:budget:monitor:${minute}`)).toBe(2 * MIN);
@@ -722,6 +723,7 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
     const r = await service.monitorQuotes(["PETR4"]);
     expect(r.exhausted).toBe(false);
     expect(r.quotes).toHaveLength(1);
+    expect(r.pending).toEqual([]);
   });
 
   it("monitorQuotes com orçamento esgotado devolve o cache e exhausted=true, sem lançar", async () => {
@@ -730,10 +732,20 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
     const r = await service.monitorQuotes(["PETR4", "VALE3", "ITUB4"]);
     expect(r.exhausted).toBe(true);
     expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    // não tentados por falta de orçamento, na ordem pedida (o do cache não entra)
+    expect(r.pending).toEqual(["VALE3", "ITUB4"]);
     expect(provider.fetchQuotes).not.toHaveBeenCalled();
     // Janela seguinte: o orçamento volta.
     const next = setup({ monitorBudget: 0, now: FRIDAY_OPEN + MIN });
     await expect(next.service.monitorQuotes(["VALE3"])).resolves.toMatchObject({ exhausted: true });
+  });
+
+  it("monitorQuotes: ausente do provedor tentado não fica pendente; o que não coube no orçamento fica", async () => {
+    const { service } = setup({ monitorBudget: 2 });
+    const r = await service.monitorQuotes(["XXXX3", "PETR4", "VALE3", "ITUB4"]);
+    expect(r.exhausted).toBe(true);
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    expect(r.pending).toEqual(["VALE3", "ITUB4"]);
   });
 
   it("monitorQuotes: acerto de cache não consome o orçamento do monitor", async () => {
@@ -758,6 +770,8 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
     const r = await service.monitorQuotes(["PETR4", "XXXX3", "VALE3", "PETR4"]);
     expect(r.exhausted).toBe(false);
     expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4", "VALE3"]);
+    // ausente do provedor foi tentado: não fica pendente
+    expect(r.pending).toEqual([]);
     expect(provider.fetchQuotes).toHaveBeenCalledTimes(3);
   });
 

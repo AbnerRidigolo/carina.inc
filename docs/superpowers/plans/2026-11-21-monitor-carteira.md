@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Env (validadas em `apps/api/src/core/config/env.ts`, documentadas em `.env.example`): `MONITOR_INTERVAL_MS` padrão **600000**, mínimo **60000**; `MONITOR_MAX_SYMBOLS_PER_TICK` padrão **20** (1..200); `MONITOR_MOVE_THRESHOLD_PCT` padrão **5** (1..50); `MARKET_MONITOR_MAX_CALLS_PER_MIN` padrão **10** (1..10000).
+- Env (validadas em `apps/api/src/core/config/env.ts`, documentadas em `.env.example`): `MONITOR_INTERVAL_MS` padrão **600000**, mínimo **60000**; `MONITOR_MAX_SYMBOLS_PER_TICK` padrão **10** (1..200); `MONITOR_MOVE_THRESHOLD_PCT` padrão **5** (1..50); `MARKET_MONITOR_MAX_CALLS_PER_MIN` padrão **10** (1..10000).
 - Chaves Redis: lock `monitor:tick`; cursor `monitor:cursor`; orçamento `market:<modo>:budget:monitor:<minuto>`.
 - Só roda com `marketStateAt(now) === "open"`; alerta só de cotação `marketState === "open"`, `source` do modo e `changePct` não nulo.
 - Um alerta por `(tenant_id, client_id, asset_code, trading_day, direction)`; `trading_day` é a data em `America/Sao_Paulo`.

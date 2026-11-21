@@ -103,7 +103,7 @@ describe("loadEnv", () => {
     const env = loadEnv(min);
     expect(env.MARKET_MONITOR_MAX_CALLS_PER_MIN).toBe(10);
     expect(env.MONITOR_INTERVAL_MS).toBe(600_000);
-    expect(env.MONITOR_MAX_SYMBOLS_PER_TICK).toBe(20);
+    expect(env.MONITOR_MAX_SYMBOLS_PER_TICK).toBe(10);
     expect(env.MONITOR_MOVE_THRESHOLD_PCT).toBe(5);
     const limits: [string, string[], string[]][] = [
       ["MARKET_MONITOR_MAX_CALLS_PER_MIN", ["1", "10000"], ["0", "10001", "2.5", "x"]],

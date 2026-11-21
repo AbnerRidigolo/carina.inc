@@ -4,16 +4,43 @@
  * (NOBYPASSRLS). Os dados são preparados como carina_migrator com o contexto de RLS fixado.
  * O banco é compartilhado com os outros arquivos int: as asserções sobre `tenantIds` olham só os
  * tenants deste arquivo.
+ *
+ * O MonitorJob roda de verdade (MonitorCoreModule + MarketService + Redis), com o provedor de
+ * cotações trocado por um falso (variações forjadas) e o CLOCK fixado no pregão. Redis: o DB é
+ * DIVIDIDO com app/app-graph.int.spec.ts (test/setup/redis-dbs.ts, SHARED_REDIS_DBS), que não lê
+ * nem esvazia nada: aqui também nada é esvaziado, só as chaves do monitor e do mercado são apagadas,
+ * e os eventos de `inbox.events` são filtrados pelos tenants deste arquivo.
  */
 import { randomUUID } from "node:crypto";
-import { PortfolioAlertSchema, type PortfolioAlert } from "@carina/shared";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  PortfolioAlertSchema,
+  type PortfolioAlert,
+  type StreamEvent,
+  StreamEventSchema,
+} from "@carina/shared";
+import type { Redis } from "ioredis";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
+import { REDIS } from "../../src/core/redis/redis.tokens.js";
+import { CLOCK } from "../../src/modules/limits/clock.js";
+import { MARKET_DATA_PROVIDER } from "../../src/modules/market/market.service.js";
+import type { MarketDataProvider, RawQuote } from "../../src/modules/market/providers/types.js";
+import { MonitorCoreModule } from "../../src/modules/monitor/monitor-core.module.js";
+import {
+  MONITOR_CURSOR_KEY,
+  MONITOR_LOCK_KEY,
+  MONITOR_LOGGER,
+  MonitorJob,
+} from "../../src/modules/monitor/monitor.job.js";
 import { PrismaService } from "../../src/core/database/prisma.service.js";
 import { TenantPrismaService } from "../../src/core/database/tenant-prisma.service.js";
 import { ValidationError } from "../../src/core/errors/domain-errors.js";
 import { MonitorRepository, type NewAlert } from "../../src/modules/monitor/monitor.repository.js";
+import { createTestApp, type TestApp } from "../setup/app.js";
 import { appUrl, inRlsTransaction, migratorSql, must, withPgClient } from "../setup/db.js";
+import { redisDbOf } from "../setup/redis-dbs.js";
+
+const REDIS_DB = redisDbOf("monitor/monitor.int.spec.ts");
 
 describe("Monitor de carteira: portfolio_alert e MonitorRepository (carina_app, sob RLS)", () => {
   const tenantA = randomUUID();
@@ -323,5 +350,221 @@ describe("Monitor de carteira: portfolio_alert e MonitorRepository (carina_app, 
     for (const bad of ["xyz", "", Buffer.from("nada|aqui").toString("base64url")]) {
       await expect(list(tenantA, clientA1, bad, 10)).rejects.toBeInstanceOf(ValidationError);
     }
+  });
+});
+
+describe("MonitorJob: ciclo completo (Postgres + Redis, provedor forjado)", () => {
+  const tenantM1: string = randomUUID();
+  const tenantM2: string = randomUUID();
+  const clientM1 = randomUUID();
+  const clientM2 = randomUUID();
+  // segunda-feira 2026-11-16, 15:00 em São Paulo (pregão aberto)
+  const MONDAY = Date.parse("2026-11-16T18:00:00.000Z");
+  // terça-feira 2026-11-17, 11:00 em São Paulo
+  const TUESDAY = Date.parse("2026-11-17T14:00:00.000Z");
+
+  let now = MONDAY;
+  /** Variação forjada por símbolo; o que não está aqui vem com 0%. */
+  const forged: Record<string, string> = {};
+  const fetched: string[][] = [];
+  const logged: unknown[] = [];
+  const provider: MarketDataProvider = {
+    fetchQuotes: (symbols) => {
+      fetched.push(symbols);
+      return Promise.resolve(
+        symbols.map((symbol): RawQuote => ({
+          symbol,
+          name: symbol,
+          assetClass: "stock",
+          price: "31.4",
+          changePct: forged[symbol] ?? "0",
+          previousClose: "33.4",
+          volume: "1000",
+          currency: "BRL",
+          updatedAt: new Date(now).toISOString(),
+          source: "mock",
+        })),
+      );
+    },
+    fetchHistory: () => Promise.resolve([]),
+  };
+
+  let t: TestApp;
+  let redis: Redis;
+  let job: MonitorJob;
+
+  const run = () => job.runOnce({ onlyTenants: [tenantM1, tenantM2] });
+
+  const alertEvents = async (): Promise<Extract<StreamEvent, { type: "monitor.alert" }>[]> =>
+    (await redis.xrange("inbox.events", "-", "+"))
+      .map(([, f]) => StreamEventSchema.parse(JSON.parse(f[1] as string)))
+      .flatMap((e) =>
+        e.type === "monitor.alert" && [tenantM1, tenantM2].includes(e.tenantId) ? [e] : [],
+      );
+
+  const alertsOf = (tenantId: string) =>
+    migratorSql<{
+      id: string;
+      tenant_id: string;
+      client_id: string;
+      asset_code: string;
+      direction: string;
+      change_pct: string;
+      trading_day: string;
+    }>(
+      `SELECT id::text, tenant_id::text, client_id::text, asset_code, direction,
+              change_pct::text, to_char(trading_day, 'YYYY-MM-DD') AS trading_day
+         FROM portfolio_alert ORDER BY trading_day, asset_code`,
+      [],
+      { tenantId },
+    );
+
+  /** Só as chaves do monitor e do mercado: o DB é dividido (ver o topo do arquivo). */
+  const clearKeys = async () => {
+    const keys = [MONITOR_LOCK_KEY, MONITOR_CURSOR_KEY, ...(await redis.keys("market:*"))];
+    await redis.del(...keys);
+  };
+
+  beforeAll(async () => {
+    t = await createTestApp({
+      imports: [MonitorCoreModule],
+      redisDb: REDIS_DB,
+      env: { MARKET_MODE: "mock" },
+      overrides: [
+        { token: CLOCK, useValue: () => now },
+        { token: MARKET_DATA_PROVIDER, useValue: provider },
+        {
+          token: MONITOR_LOGGER,
+          useValue: {
+            info: (f: unknown) => logged.push(f),
+            warn: (f: unknown) => logged.push(f),
+            error: (f: unknown) => logged.push(f),
+          },
+        },
+      ],
+    });
+    redis = t.app.get<Redis>(REDIS);
+    job = t.app.get(MonitorJob);
+
+    await migratorSql(
+      `INSERT INTO tenant (id, name, plan) VALUES ($1, 'Monitor job 1', 'pro'),
+                                                 ($2, 'Monitor job 2', 'pro')`,
+      [tenantM1, tenantM2],
+    );
+    const seed = async (tenantId: string, clientId: string, codes: string[]) => {
+      await migratorSql(
+        `INSERT INTO client (id, tenant_id, external_id) VALUES ($1, $2, 'm')`,
+        [clientId, tenantId],
+        { tenantId },
+      );
+      for (const [i, code] of codes.entries()) {
+        await migratorSql(
+          `INSERT INTO position (tenant_id, client_id, source, external_id, institution, kind,
+                                 asset_class, asset_code, name, quantity, value_brl, as_of)
+           VALUES ($1, $2, 'synthetic', $3, 'XP', 'investment', 'stock', $4, 'Ativo', 10,
+                   987654.32, current_date)`,
+          [tenantId, clientId, `p${i.toString()}`, code],
+          { tenantId },
+        );
+      }
+    };
+    await seed(tenantM1, clientM1, ["PETR4", "VALE3"]);
+    await seed(tenantM2, clientM2, ["petr4", "WEGE3"]);
+  });
+
+  afterAll(async () => {
+    await clearKeys();
+    await t.close();
+  });
+
+  beforeEach(async () => {
+    await clearKeys();
+  });
+
+  it("ciclo com dois tenants e cotação forjada de −6% grava alertas sob o tenant certo e publica monitor.alert", async () => {
+    now = MONDAY;
+    forged["PETR4"] = "-6";
+    forged["VALE3"] = "-1.5";
+    forged["WEGE3"] = "4.99";
+    const calls = fetched.length;
+
+    const result = await run();
+    expect(result).toEqual({
+      skipped: false,
+      closed: false,
+      tenants: 2,
+      symbols: 3,
+      alerts: 2,
+      exhausted: false,
+    });
+    // em lotes de MARKET_BRAPI_MAX_SYMBOLS_PER_CALL, na ordem do rodízio
+    expect(fetched.slice(calls).flat()).toEqual(["PETR4", "VALE3", "WEGE3"]);
+
+    const m1 = await alertsOf(tenantM1);
+    const m2 = await alertsOf(tenantM2);
+    expect(m1).toEqual([
+      expect.objectContaining({
+        tenant_id: tenantM1,
+        client_id: clientM1,
+        asset_code: "PETR4",
+        direction: "down",
+        change_pct: "-6.0000",
+        trading_day: "2026-11-16",
+      }),
+    ]);
+    expect(m2).toEqual([
+      expect.objectContaining({ tenant_id: tenantM2, client_id: clientM2, asset_code: "PETR4" }),
+    ]);
+
+    const events = await alertEvents();
+    expect(events).toHaveLength(2);
+    const byTenant = new Map(events.map((e) => [e.tenantId, e]));
+    expect(byTenant.get(tenantM1)).toMatchObject({
+      clientId: clientM1,
+      alert: { id: must(m1[0]).id, assetCode: "PETR4", direction: "down", changePct: "-6" },
+    });
+    expect(byTenant.get(tenantM2)).toMatchObject({
+      clientId: clientM2,
+      alert: { id: must(m2[0]).id, tradingDay: "2026-11-16" },
+    });
+
+    // lock liberado, cursor no último cotado, e nenhum valor de posição nos logs
+    expect(await redis.get(MONITOR_LOCK_KEY)).toBeNull();
+    expect(await redis.get(MONITOR_CURSOR_KEY)).toBe("WEGE3");
+    expect(JSON.stringify(logged)).not.toContain("987654");
+  });
+
+  it("segundo ciclo no mesmo dia não duplica nem publica de novo", async () => {
+    now = MONDAY + 15 * 60_000;
+    forged["PETR4"] = "-7.25";
+    const before = (await alertEvents()).length;
+
+    expect(await run()).toMatchObject({ skipped: false, alerts: 0 });
+    expect(await alertsOf(tenantM1)).toHaveLength(1);
+    expect(await alertsOf(tenantM2)).toHaveLength(1);
+    expect((await alertEvents()).length).toBe(before);
+  });
+
+  it("virada do dia em São Paulo alerta de novo", async () => {
+    now = TUESDAY;
+    forged["PETR4"] = "-6.5";
+    const before = (await alertEvents()).length;
+
+    expect(await run()).toMatchObject({ alerts: 2 });
+    const m1 = await alertsOf(tenantM1);
+    expect(m1.map((a) => a.trading_day)).toEqual(["2026-11-16", "2026-11-17"]);
+    const fresh = (await alertEvents()).slice(before);
+    expect(fresh.map((e) => e.alert.tradingDay)).toEqual(["2026-11-17", "2026-11-17"]);
+  });
+
+  it("fora do pregão o ciclo é vazio e outra réplica com o lock pula o ciclo", async () => {
+    now = Date.parse("2026-11-17T22:00:00.000Z"); // terça 19:00 em São Paulo
+    const calls = fetched.length;
+    expect(await run()).toMatchObject({ closed: true, alerts: 0 });
+
+    now = TUESDAY + 60 * 60_000;
+    await redis.set(MONITOR_LOCK_KEY, "outra-replica", "PX", 60_000);
+    expect(await run()).toMatchObject({ skipped: true, alerts: 0 });
+    expect(fetched.length).toBe(calls);
   });
 });

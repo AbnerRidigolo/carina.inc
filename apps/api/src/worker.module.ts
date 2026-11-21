@@ -6,6 +6,7 @@ import { DataIngestionCoreModule } from "./modules/data-ingestion/data-ingestion
 import { ImportsCoreModule } from "./modules/imports/imports-core.module.js";
 import { InboxCoreModule } from "./modules/inbox/inbox-core.module.js";
 import { MarketCoreModule } from "./modules/market/market-core.module.js";
+import { MonitorCoreModule } from "./modules/monitor/monitor-core.module.js";
 import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.js";
 
 /**
@@ -17,7 +18,9 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
  * - MarketCoreModule → MarketService e provedores (por MARKET_MODE), sem rotas;
  * - InboxCoreModule → ReconciliationJob (timer; um lock Redis global por tick evita ticks simultâneos);
  * - ImportsCoreModule → ImportWorker (grupo `imports` do stream `jobs`) e ImportCleanupJob (timer
- *   de 5 min com lock global `imports:cleanup`).
+ *   de 5 min com lock global `imports:cleanup`);
+ * - MonitorCoreModule → MonitorJob (timer de MONITOR_INTERVAL_MS, só no pregão, com lock global
+ *   `monitor:tick`; grava portfolio_alert e publica `monitor.alert` em `inbox.events`).
  */
 @Module({
   imports: [
@@ -28,6 +31,7 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
     ImportsCoreModule,
     InboxCoreModule,
     MarketCoreModule,
+    MonitorCoreModule,
     OrchestratorModule,
   ],
 })

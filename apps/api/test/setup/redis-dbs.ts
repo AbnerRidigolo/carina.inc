@@ -11,6 +11,11 @@
  * arquivo que usa um DB do Redis o pega daqui pelo próprio caminho.
  *
  * Chave: caminho do arquivo relativo a `apps/api/test/`.
+ *
+ * Os 16 DBs do projeto `int` já estão tomados. Um arquivo novo pode DIVIDIR o DB de outro do
+ * mesmo projeto (SHARED_REDIS_DBS, abaixo) só quando nenhum dos dois esvazia o DB (`flushdb`/
+ * `flushall`) nem consome grupos do stream `jobs`, e cada um só apaga as chaves que são suas.
+ * Fixado pelo mesmo redis-dbs.int.spec.ts.
  */
 export const REDIS_DBS = {
   int: {
@@ -47,13 +52,35 @@ export const REDIS_DBS = {
   },
 } as const satisfies Record<"int" | "e2e", Record<string, number>>;
 
-type AllocatedFile = keyof (typeof REDIS_DBS)["int"] | keyof (typeof REDIS_DBS)["e2e"];
+/**
+ * Arquivo → arquivo dono do DB que ele divide (mesmo projeto). Regras no topo do arquivo.
+ * - monitor/monitor.int.spec.ts divide com app/app-graph.int.spec.ts, que não lê nem grava
+ *   chaves (o `consume` dele é um no-op); o monitor só apaga `monitor:*` e `market:*` e filtra
+ *   `inbox.events` pelos próprios tenants.
+ */
+export const SHARED_REDIS_DBS = {
+  int: {
+    "monitor/monitor.int.spec.ts": "app/app-graph.int.spec.ts",
+  },
+  e2e: {},
+} as const satisfies {
+  int: Record<string, keyof (typeof REDIS_DBS)["int"]>;
+  e2e: Record<string, keyof (typeof REDIS_DBS)["e2e"]>;
+};
+
+type AllocatedFile =
+  | keyof (typeof REDIS_DBS)["int"]
+  | keyof (typeof REDIS_DBS)["e2e"]
+  | keyof (typeof SHARED_REDIS_DBS)["int"]
+  | keyof (typeof SHARED_REDIS_DBS)["e2e"];
 
 /** DB lógico do Redis reservado para o arquivo de teste (caminho relativo a `apps/api/test/`). */
 export function redisDbOf(file: AllocatedFile): number {
+  const shared: Record<string, string> = { ...SHARED_REDIS_DBS.int, ...SHARED_REDIS_DBS.e2e };
+  const owner = shared[file] ?? file;
   const db =
-    (REDIS_DBS.int as Record<string, number>)[file] ??
-    (REDIS_DBS.e2e as Record<string, number>)[file];
+    (REDIS_DBS.int as Record<string, number>)[owner] ??
+    (REDIS_DBS.e2e as Record<string, number>)[owner];
   if (db === undefined) throw new Error(`Arquivo sem DB do Redis alocado: ${file}`);
   return db;
 }

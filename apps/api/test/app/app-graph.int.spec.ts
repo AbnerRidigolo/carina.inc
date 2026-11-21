@@ -93,6 +93,7 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(true);
     expect(ref.get(ImportWorker).running).toBe(true);
     expect(ref.get(ImportCleanupJob).running).toBe(true);
+    expect(ref.get(MonitorJob).running).toBe(true);
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(ref.get(ChatGateway)).toBeInstanceOf(ChatGateway);
     expect(ref.get(HealthController)).toBeInstanceOf(HealthController);
@@ -108,6 +109,7 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(false);
     expect(ref.get(ImportWorker).running).toBe(false);
     expect(ref.get(ImportCleanupJob).running).toBe(false);
+    expect(ref.get(MonitorJob).running).toBe(false);
     // O broadcast da inbox é por processo HTTP (repassa aos sockets dele), não é worker.
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(groups).toEqual([]);
@@ -121,6 +123,7 @@ describe("grafo de módulos de produção", () => {
         "InboxController",
         "IngestionController",
         "MarketController",
+        "MonitorController",
         "WatchtowerController",
       ].sort(),
     );

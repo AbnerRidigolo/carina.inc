@@ -98,3 +98,54 @@ describe("InboxBroadcast: eventos de importação", () => {
     expect(ay).toEqual([]);
   });
 });
+
+describe("InboxBroadcast: alertas da carteira", () => {
+  const alert = {
+    id: "44444444-4444-4444-8444-444444444444",
+    assetCode: "PETR4",
+    direction: "up" as const,
+    changePct: "5.2",
+    price: "38.1",
+    tradingDay: "2026-11-20",
+    createdAt: "2026-11-20T15:00:00.000Z",
+  };
+  const monitorAlert = (tenantId: string, clientId: string): StreamEvent => ({
+    eventId: crypto.randomUUID(),
+    tenantId,
+    clientId,
+    type: "monitor.alert",
+    alert,
+  });
+
+  it("monitor.alert vira portfolio_alert só para a chave do evento, sem ler o banco", async () => {
+    const { broadcast, inbox, emit, sub } = setup();
+    const ax = sub(TA, CX);
+    const ay = sub(TA, CY);
+    const bx = sub(TB, CX);
+
+    emit(monitorAlert(TA, CX));
+    await broadcast.onModuleDestroy();
+
+    expect(ax).toEqual([{ type: "portfolio_alert", alert }]);
+    expect(ay).toEqual([]);
+    expect(bx).toEqual([]);
+    expect(inbox.get).not.toHaveBeenCalled();
+  });
+
+  it("falha de envio a um socket não impede os demais", async () => {
+    const { broadcast, emit, sub, logger } = setup();
+    broadcast.subscribe({
+      tenantId: TA,
+      clientId: CX,
+      clientExternalId: "ext",
+      send: () => {
+        throw new Error("socket fechado");
+      },
+    });
+    const ok = sub(TA, CX);
+    emit(monitorAlert(TA, CX));
+    await broadcast.onModuleDestroy();
+    expect(ok).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+});

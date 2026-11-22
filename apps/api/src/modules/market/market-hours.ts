@@ -1,5 +1,7 @@
+const SAO_PAULO = "America/Sao_Paulo";
+
 const formatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/Sao_Paulo",
+  timeZone: SAO_PAULO,
   weekday: "short",
   hour: "numeric",
   minute: "numeric",
@@ -17,4 +19,27 @@ export function marketStateAt(ms: number): "open" | "closed" {
   if (weekday === "Sat" || weekday === "Sun") return "closed";
   const minute = Number(get("hour")) * 60 + Number(get("minute"));
   return minute >= OPEN_MINUTE && minute < CLOSE_MINUTE ? "open" : "closed";
+}
+
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: SAO_PAULO,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** Data de São Paulo (`YYYY-MM-DD`) no instante `ms`: o dia de pregão do monitor de carteira. */
+export function saoPauloDate(ms: number): string {
+  const parts = dateFormatter.formatToParts(new Date(ms));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/**
+ * Idade da cotação (`nowMs − updatedAt`) dentro de `maxAgeMs`; hora futura ou ilegível não vale.
+ * A mesma regra do frescor do `priceFor` e do monitor de carteira.
+ */
+export function quoteAgeWithin(updatedAt: string, nowMs: number, maxAgeMs: number): boolean {
+  const age = nowMs - Date.parse(updatedAt);
+  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
 }

@@ -13,8 +13,8 @@ antiga está em `legacy/python`.
 | Processo | Entrada | O que roda |
 | --- | --- | --- |
 | `api` | `apps/api/src/main.ts` → `createApiApp()` | REST (`/api/*`), WebSocket do chat (`/ws/chat`, mesma porta), `InboxBroadcast`. Com `WORKERS_ENABLED !== "false"`, também os workers (útil em desenvolvimento, um processo só) |
-| `worker` | `apps/api/src/main.worker.ts` → `createWorkerContext()` | `SyncWorker` (grupo `sync` em `jobs`), `ResumeWorker` (grupo `resumers` em `jobs`), `ImportWorker` (grupo `imports` em `jobs`), `ReconciliationJob` (timer de 60 s com lock Redis) e `ImportCleanupJob` (timer de 5 min com lock Redis). Força `WORKERS_ENABLED=true` e não abre porta |
-| `migrate` | `prisma migrate deploy` (imagem `migrate`) | Migrações 0001–0008, escritas à mão, como `carina_migrator`. Roda uma vez |
+| `worker` | `apps/api/src/main.worker.ts` → `createWorkerContext()` | `SyncWorker` (grupo `sync` em `jobs`), `ResumeWorker` (grupo `resumers` em `jobs`), `ImportWorker` (grupo `imports` em `jobs`), `ReconciliationJob` (timer de 60 s com lock Redis), `ImportCleanupJob` (timer de 5 min com lock Redis) e `MonitorJob` (timer de 10 min, só no pregão, com lock Redis; ver [§15](#15-monitor-de-carteira-monitor)). Força `WORKERS_ENABLED=true` e não abre porta |
+| `migrate` | `prisma migrate deploy` (imagem `migrate`) | Migrações 0001–0009, escritas à mão, como `carina_migrator`. Roda uma vez |
 | `seed` | `node dist/seed/seed.js` | Tenant `demo` (id fixo), duas chaves e três clientes sintéticos já sincronizados. Idempotente |
 | `web` | nginx (`apps/web/nginx.conf`) | SPA do Vite, proxy de `/api` e `/ws` para `api:3000`, cabeçalhos de segurança e CSP |
 
@@ -103,7 +103,7 @@ runtime: `NOSUPERUSER NOBYPASSRLS`, sem acesso a `api_key`.
 | Tabelas | Política |
 | --- | --- |
 | `usage_record`, `audit_event` | `tenant_id = app.tenant_id`; `carina_app` só tem `SELECT, INSERT` (append-only) |
-| `client`, `approval_request`, `executed_action`, `position`, `transaction`, `import_job`, `import_file` | tenant igual; se `app.client_id` estiver fixado, o cliente também |
+| `client`, `approval_request`, `executed_action`, `position`, `transaction`, `import_job`, `import_file`, `portfolio_alert` | tenant igual; se `app.client_id` estiver fixado, o cliente também |
 | `kg_document`, `kg_chunk`, `kg_entity`, `kg_relation`, `kg_mention` | **tenant E cliente obrigatórios**: sem `app.client_id`, nenhuma linha |
 | `tenant` | leitura só do próprio tenant |
 | `api_key` | sem acesso para `carina_app`; só via `resolve_api_key` / `resolve_api_key_by_id` |
@@ -299,7 +299,9 @@ existe no `WorkerModule`; só o `MarketModule` da API monta o controller.
   consomem `MARKET_PROVIDER_MAX_CALLS_PER_MIN` (esgotado → 503 `market_data_busy` com
   `Retry-After`, sem cobrança; Redis fora → 502) e o `priceFor` tem um orçamento separado,
   `MARKET_PRICE_MAX_CALLS_PER_MIN` (esgotado → `price_unavailable`; Redis fora → segue sem
-  orçamento). Acerto de cache e `macro` não consomem.
+  orçamento). Acerto de cache e `macro` não consomem. Um terceiro orçamento, o do monitor de
+  carteira (`MARKET_MONITOR_MAX_CALLS_PER_MIN`, padrão 10, chave `market:<modo>:budget:monitor:<minuto>`),
+  é usado só por `monitorQuotes` e nunca esgota o das rotas nem o do `priceFor` (ver [§15](#15-monitor-de-carteira-monitor)).
 - **Frescor de `priceFor`.** Mercado aberto (pregão de B3 de segunda a sexta, 10h–18h em
   America/Sao_Paulo, sem calendário de feriados): cotação de até `MARKET_QUOTE_MAX_AGE_MS`
   (5 min; no live, ajuste para pelo menos o atraso do plano da brapi). Fechado: até
@@ -373,7 +375,7 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
 | Stream | Produtores | Consumidores |
 | --- | --- | --- |
 | `jobs` | decisão e reconciliação (`resume`), ingestão (`data.ingested`), upload de importação (`import.requested`) | grupos `resumers` (ResumeWorker), `sync` (SyncWorker) e `imports` (ImportWorker) |
-| `inbox.events` | inbox (`approval.created`, `approval.executed`), importação (`import.progress`, `import.finished`) | `InboxBroadcast` (tail, sem grupo) |
+| `inbox.events` | inbox (`approval.created`, `approval.executed`), importação (`import.progress`, `import.finished`), monitor (`monitor.alert`) | `InboxBroadcast` (tail, sem grupo) |
 | `notifications` | — (contrato pronto para a fase 3) | — |
 
 - O consumo usa `XREADGROUP BLOCK 5000`, com `XACK` só depois do sucesso.
@@ -397,7 +399,7 @@ worker: consome import.requested → UPDATE status queued→parsing (claim atôm
    heartbeat: um socket ocioso cuja chave foi revogada (ou o tenant suspenso) deixa de receber o
    push da inbox, recebe `error unauthenticated` e fecha com 4401.
 4. Eventos: `plan`, `agent_started`, `token`, `agent_result`, `approval_required`,
-   `approval_executed`, `import_progress`, `import_finished`, `done` (com `usage` e `compliance`) e `error` (`code` + `traceId`).
+   `approval_executed`, `import_progress`, `import_finished`, `portfolio_alert`, `done` (com `usage` e `compliance`) e `error` (`code` + `traceId`).
 5. Códigos de fechamento: 4401 (não autorizado ou vida máxima `WS_MAX_CONNECTION_MS`
    vencida), 4408 (ocioso, 10 min), 1009 (mensagem grande demais) e 1001 (desligamento). Há
    heartbeat por ping.
@@ -414,7 +416,9 @@ Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e v
 - `MARKET_MODE` (obrigatória em produção), `BRAPI_TOKEN`, `BRAPI_BASE_URL`, `BCB_SGS_BASE_URL`,
   `MARKET_FETCH_TIMEOUT_MS`, `MARKET_MAX_RESPONSE_BYTES`, `MARKET_QUOTE_MAX_AGE_MS`,
   `MARKET_CLOSED_MAX_AGE_DAYS`, `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`, `MARKET_PROVIDER_CONCURRENCY`,
-  `MARKET_PROVIDER_MAX_CALLS_PER_MIN` e `MARKET_PRICE_MAX_CALLS_PER_MIN`;
+  `MARKET_PROVIDER_MAX_CALLS_PER_MIN`, `MARKET_PRICE_MAX_CALLS_PER_MIN` e
+  `MARKET_MONITOR_MAX_CALLS_PER_MIN`;
+- `MONITOR_INTERVAL_MS`, `MONITOR_MAX_SYMBOLS_PER_TICK` e `MONITOR_MOVE_THRESHOLD_PCT` (monitor de carteira);
 - `WORKERS_ENABLED`, `WEB_ORIGIN`, `EXECUTION_FEE_PCT` e `APPROVAL_TTL_HOURS` (o rpm vem do
   tenant);
 - `WS_MAX_CONNECTION_MS` e `API_KEY_REVALIDATE_TTL_MS`.
@@ -433,3 +437,67 @@ Todas as variáveis estão documentadas em [`.env.example`](../.env.example) e v
 - A cobertura (`test:cov`) mede `src/modules/**` com limite de 80% de linhas.
 - O CI roda tudo com PG17 (`en_US.utf8`). Localmente, `TEST_DB_ICU_LOCALE=en-US` reproduz a
   ordenação de texto do CI.
+
+## 15. Monitor de carteira (`monitor`)
+
+Avisa quando um ativo da carteira de um cliente tem um movimento forte no dia, sem depender de
+alguém perguntar no chat. É determinístico: sem LLM, sem texto gerado, sem cobrança e sem
+auditoria. Desenho no [spec](superpowers/specs/2026-11-21-monitor-carteira-design.md).
+
+```text
+MonitorJob (worker; na api só com WORKERS_ENABLED) a cada MONITOR_INTERVAL_MS
+  → pregão aberto? (marketStateAt)  não → ciclo vazio
+  → lock Redis monitor:tick (com heartbeat)  já tomado → ciclo pulado
+  → monitor_tenant_ids() (SECURITY DEFINER) → watch list de cada tenant, sob RLS
+  → união ordenada dos símbolos, em rodízio (cursor monitor:<modo>:cursor), até MONITOR_MAX_SYMBOLS_PER_TICK
+  → MarketService.monitorQuotes (cache de 60 s + orçamento próprio)
+  → detectMove → INSERT em portfolio_alert (uma transação por alerta, ON CONFLICT DO NOTHING)
+  → depois do commit, monitor.alert em inbox.events → InboxBroadcast → portfolio_alert no WebSocket
+```
+
+- **Ciclo.** `setInterval` com `unref` de `MONITOR_INTERVAL_MS` (padrão 600 000, mínimo 60 000), só
+  com `WORKERS_ENABLED !== "false"`; o `stop` espera o ciclo em andamento. Lock Redis `monitor:tick`
+  com heartbeat: outra réplica com o lock → ciclo pulado; lock perdido → ciclo abortado. Redis fora
+  → ciclo pulado. Uma falha num tenant é logada (só ids) e não impede os demais.
+- **Tenants e carteiras.** `monitor_tenant_ids()` (migração 0009, mesmo desenho de
+  `import_cleanup_tenant_ids`) devolve só ids de tenants não suspensos com posição de investimento
+  com código de ativo; cada tenant é lido sob `TenantContext.run`, como `carina_app`.
+- **Rodízio.** Até `MONITOR_MAX_SYMBOLS_PER_TICK` símbolos por ciclo (padrão 10, igual ao
+  orçamento do monitor × símbolos por chamada do plano padrão). O cursor `monitor:<modo>:cursor` para
+  logo antes do primeiro símbolo que ficou sem tentativa por falta de orçamento; símbolo que o
+  provedor não conhece conta como feito e não trava o rodízio. O cursor leva o modo na chave: um
+  Redis compartilhado entre mock e live não faz um modo retomar do ponto do outro.
+- **Cotações.** `MarketService.monitorQuotes`, pelo cache de 60 s e pelo terceiro orçamento
+  (`MARKET_MONITOR_MAX_CALLS_PER_MIN`). Orçamento esgotado → o ciclo para sem erro e o rodízio
+  retoma no próximo. Erro do provedor num lote (`MarketDataUnavailableError`: 401/403/5xx,
+  formato inválido, rede) → o lote conta como tentado: os lotes já buscados ficam, os seguintes
+  seguem e o rodízio passa por ele (log `warn` só com a contagem e o nome do erro); um símbolo
+  ruim não trava o monitor de todos os tenants. Redis fora → ciclo pulado (o orçamento falha
+  fechado).
+- **Cota real.** Toda chamada do monitor conta na mesma cota do token da brapi que as rotas e o
+  preço usam: com os padrões (10 símbolos a cada 10 min, ~8 h de pregão) são cerca de 480 chamadas
+  por dia e ~10 mil por mês, e cada ciclo dispara até 10 requisições em sequência, que sem token
+  disputam o limite por IP com as rotas e o preço. Dimensione `MONITOR_MAX_SYMBOLS_PER_TICK`,
+  `MONITOR_INTERVAL_MS` e `MARKET_MONITOR_MAX_CALLS_PER_MIN` pelo plano.
+- **Regra** (`detectMove`, função pura). Alerta quando `|changePct| ≥ MONITOR_MOVE_THRESHOLD_PCT`
+  (inteiro de 1 a 50, padrão 5; limite inclusivo, comparado exatamente em BigInt). Só vale cotação
+  do mesmo dia de São Paulo que o pregão do ciclo (`updatedAt`) e com idade de até
+  `MARKET_QUOTE_MAX_AGE_MS` (a regra de frescor do `priceFor` em pregão), com `source` do modo
+  atual; o `marketState` da cotação não entra, porque o `monitorQuotes` o preenche pelo relógio.
+  Assim o fechamento de ontem (feriado, ativo sem negócio hoje, atraso do provedor) não vira
+  alerta "de hoje". `|changePct| ≥ 100000` é descartado (não cabe em `numeric(9,4)`).
+- **Dado** (`portfolio_alert`, migração 0009). RLS com `FORCE`; FK composta `(tenant, cliente)` com
+  cascade; único `(tenant, cliente, ativo, dia de São Paulo, sentido)`, então no máximo um alerta
+  por dia e sentido. `carina_app` só tem `SELECT` e `INSERT`. Cada alerta é inserido numa
+  transação própria: um insert que falha não aborta os outros.
+- **Entrega.** Depois do commit, o job publica `monitor.alert` em `inbox.events` (melhor
+  esforço; só o que foi inserido). O `InboxBroadcast` não lê o banco e envia o evento
+  `portfolio_alert` só aos sockets da chave `(tenant, cliente)`.
+- **Rota** `GET /api/clients/:clientId/alerts` (escopo `chat`, sem cobrança). `limit` de 1 a 50
+  (padrão 20), cursor por keyset (cursor inválido → 422), mais novo primeiro. Cliente de outro
+  tenant → 404.
+- **Web.** Painel "Alertas da carteira" ([`apps/web/src/features/alerts/`](../apps/web/src/features/alerts)):
+  busca a lista ao abrir, recebe os novos pelo WebSocket no topo (anunciados numa região
+  `aria-live="polite"`) e mostra um texto fixo e neutro ("hoje" só quando o dia do alerta é hoje
+  em São Paulo, senão "em DD/MM"), com o aviso de que não é recomendação de investimento.
+- **LGPD.** Os logs levam só ids e contagens. O alerta guarda só ativo, variação e preço público.

@@ -95,6 +95,7 @@ describe("Escopos das rotas registradas", () => {
       [
         "GET /audit",
         "GET /clients",
+        "GET /clients/:clientId/alerts",
         "GET /clients/:clientId/imports",
         "GET /clients/:clientId/imports/:id",
         "GET /clients/:clientId/inbox",

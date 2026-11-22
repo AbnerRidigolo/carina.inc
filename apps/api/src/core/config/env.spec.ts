@@ -99,6 +99,28 @@ describe("loadEnv", () => {
     }
   });
 
+  it("MONITOR_*: padrões e limites", () => {
+    const env = loadEnv(min);
+    expect(env.MARKET_MONITOR_MAX_CALLS_PER_MIN).toBe(10);
+    expect(env.MONITOR_INTERVAL_MS).toBe(600_000);
+    expect(env.MONITOR_MAX_SYMBOLS_PER_TICK).toBe(10);
+    expect(env.MONITOR_MOVE_THRESHOLD_PCT).toBe(5);
+    const limits: [string, string[], string[]][] = [
+      ["MARKET_MONITOR_MAX_CALLS_PER_MIN", ["1", "10000"], ["0", "10001", "2.5", "x"]],
+      ["MONITOR_INTERVAL_MS", ["60000"], ["59999", "0", "1.5", "x"]],
+      ["MONITOR_MAX_SYMBOLS_PER_TICK", ["1", "200"], ["0", "201", "2.5", "x"]],
+      ["MONITOR_MOVE_THRESHOLD_PCT", ["1", "50"], ["0", "51", "2.5", "x"]],
+    ];
+    for (const [name, good, bad] of limits) {
+      for (const v of good) {
+        expect((loadEnv({ ...min, [name]: v }) as Record<string, unknown>)[name]).toBe(Number(v));
+      }
+      for (const v of bad) {
+        expect(() => loadEnv({ ...min, [name]: v })).toThrow(new RegExp(name));
+      }
+    }
+  });
+
   it("BRAPI_TOKEN definido exige BRAPI_BASE_URL https (o token não vai em claro)", () => {
     for (const url of ["http://brapi.dev/api", "http://localhost:8080/api"]) {
       expect(() => loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: url })).toThrow(

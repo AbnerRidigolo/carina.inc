@@ -7,8 +7,9 @@
 //   tsv, índices HNSW e as FKs compostas com coluna opcional (usage_record.client_id,
 //   audit_event.client_id, kg_relation.chunk_id), que aqui aparecem como relações simples.
 //   RLS, grants e funções ficam em migrations/0002_rls; a FK composta de decided_by_key_id está em
-//   0003_inbox_integrity, a função active_tenant_ids em 0004_reconciliation e
-//   import_cleanup_tenant_ids em 0008_import_cleanup.
+//   0003_inbox_integrity, a função active_tenant_ids em 0004_reconciliation,
+//   import_cleanup_tenant_ids em 0008_import_cleanup e monitor_tenant_ids (com o CHECK de
+//   portfolio_alert.direction) em 0009_portfolio_alert.
 // - FKs compostas (tenant_id, client_id, …) impedem que uma linha aponte para o cliente
 //   ou a entidade de outro tenant/cliente, mesmo que a aplicação erre o id.
 //
@@ -93,6 +94,7 @@ model Client {
   kgEntities       KgEntity[]
   kgRelations      KgRelation[]
   kgMentions       KgMention[]
+  portfolioAlerts  PortfolioAlert[]
 
   @@unique([tenantId, externalId])
   /// alvo das FKs compostas (tenant_id, client_id)
@@ -300,6 +302,34 @@ model ImportFile {
 
   @@index([createdAt])
   @@map("import_file")
+}
+
+// ─── Monitor de carteira ────────────────────────────────────────────────────
+
+/// Alerta de variação forte de um ativo da carteira: um por cliente, ativo, dia de pregão e
+/// sentido (insert com ON CONFLICT DO NOTHING). No banco: CHECK direction IN ('up', 'down').
+model PortfolioAlert {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  clientId   String   @map("client_id") @db.Uuid
+  /// código do ativo normalizado (maiúsculas, sem espaços)
+  assetCode  String   @map("asset_code")
+  /// up, down
+  direction  String
+  /// variação do dia em %, com sinal
+  changePct  Decimal  @map("change_pct") @db.Decimal(9, 4)
+  price      Decimal  @db.Decimal(18, 6)
+  /// data do pregão em America/Sao_Paulo
+  tradingDay DateTime @map("trading_day") @db.Date
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  /// um alerta por dia e sentido
+  @@unique([tenantId, clientId, assetCode, tradingDay, direction], map: "portfolio_alert_once_per_day_key")
+  /// lista do cliente, mais novo primeiro
+  @@index([tenantId, clientId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("portfolio_alert")
 }
 
 // ─── Conhecimento (grafo + busca híbrida) ───────────────────────────────────

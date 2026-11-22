@@ -5,6 +5,7 @@ import { WorkTypeSchema } from "./billing.js";
 import { ApprovalViewSchema } from "./inbox.js";
 import { ImportFinishedStatusSchema, ImportProgressStageSchema } from "./imports.js";
 import { MoneySchema } from "./money.js";
+import { PortfolioAlertSchema } from "./monitor.js";
 
 export const ChatClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 export const MAX_CHAT_MESSAGE_CHARS = 8000;
@@ -58,6 +59,7 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
     importJobId: z.string(),
     status: ImportFinishedStatusSchema,
   }),
+  z.object({ type: z.literal("portfolio_alert"), alert: PortfolioAlertSchema }),
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
 

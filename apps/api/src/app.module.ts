@@ -13,6 +13,7 @@ import { KnowledgeModule } from "./modules/knowledge/knowledge.module.js";
 import { LimitsModule } from "./modules/limits/limits.module.js";
 import { LlmModule } from "./modules/llm/llm.module.js";
 import { MarketModule } from "./modules/market/market.module.js";
+import { MonitorModule } from "./modules/monitor/monitor.module.js";
 import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.js";
 import { TenancyModule } from "./modules/tenancy/tenancy.module.js";
 import { WatchtowerModule } from "./modules/watchtower/watchtower.module.js";
@@ -49,6 +50,7 @@ export class AppModule {
         DataIngestionModule,
         ImportsModule,
         MarketModule,
+        MonitorModule,
         KnowledgeModule,
         LlmModule,
         AgentsModule,

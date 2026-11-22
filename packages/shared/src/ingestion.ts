@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ImportFinishedStatusSchema, ImportProgressStageSchema } from "./imports.js";
 import { MoneySchema, QuantitySchema } from "./money.js";
+import { PortfolioAlertSchema } from "./monitor.js";
 
 /**
  * Identificador do item no sistema do tenant (e do cliente final): 1 a 128 caracteres (pontos de
@@ -97,5 +98,6 @@ export const StreamEventSchema = z.discriminatedUnion("type", [
     importJobId: z.string(),
     status: ImportFinishedStatusSchema,
   }),
+  z.object({ ...streamBase, type: z.literal("monitor.alert"), alert: PortfolioAlertSchema }),
 ]);
 export type StreamEvent = z.infer<typeof StreamEventSchema>;

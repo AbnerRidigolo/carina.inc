@@ -6,6 +6,7 @@
  * O `consume` do StreamsService é trocado por um no-op que espera o abort: o teste prova que cada
  * worker pediu o seu grupo de consumo sem roubar eventos do stream `jobs` de outros testes.
  * Redis: DB lógico próprio (test/setup/redis-dbs.ts), sem depender do conteúdo (nada é lido nem esvaziado aqui).
+ * O DB é dividido com monitor/monitor.int.spec.ts (SHARED_REDIS_DBS): nunca esvazie o DB aqui.
  */
 import { ModulesContainer } from "@nestjs/core";
 import { Test, type TestingModule } from "@nestjs/testing";
@@ -23,6 +24,7 @@ import { HealthController } from "../../src/modules/health/health.controller.js"
 import { ImportCleanupJob } from "../../src/modules/imports/import-cleanup.job.js";
 import { ImportWorker } from "../../src/modules/imports/import.worker.js";
 import { ReconciliationJob } from "../../src/modules/inbox/reconciliation.job.js";
+import { MonitorJob } from "../../src/modules/monitor/monitor.job.js";
 import { ResumeWorker } from "../../src/modules/orchestrator/resume.worker.js";
 import { WorkerModule } from "../../src/worker.module.js";
 import { appUrl, migratorUrl, redisDbUrl } from "../setup/db.js";
@@ -91,6 +93,7 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(true);
     expect(ref.get(ImportWorker).running).toBe(true);
     expect(ref.get(ImportCleanupJob).running).toBe(true);
+    expect(ref.get(MonitorJob).running).toBe(true);
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(ref.get(ChatGateway)).toBeInstanceOf(ChatGateway);
     expect(ref.get(HealthController)).toBeInstanceOf(HealthController);
@@ -106,6 +109,7 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(false);
     expect(ref.get(ImportWorker).running).toBe(false);
     expect(ref.get(ImportCleanupJob).running).toBe(false);
+    expect(ref.get(MonitorJob).running).toBe(false);
     // O broadcast da inbox é por processo HTTP (repassa aos sockets dele), não é worker.
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(groups).toEqual([]);
@@ -119,6 +123,7 @@ describe("grafo de módulos de produção", () => {
         "InboxController",
         "IngestionController",
         "MarketController",
+        "MonitorController",
         "WatchtowerController",
       ].sort(),
     );
@@ -133,6 +138,7 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ReconciliationJob).running).toBe(true);
     expect(ref.get(ImportWorker).running).toBe(true);
     expect(ref.get(ImportCleanupJob).running).toBe(true);
+    expect(ref.get(MonitorJob).running).toBe(true);
     expect(groups.sort()).toEqual(["jobs:imports", "jobs:resumers", "jobs:sync"]);
     expect(controllersOf(ref)).toEqual([]);
     expect(ref.get(MarketService)).toBeInstanceOf(MarketService);

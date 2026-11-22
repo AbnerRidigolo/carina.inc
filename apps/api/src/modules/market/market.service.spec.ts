@@ -68,6 +68,7 @@ class FakeRedis {
 interface SetupOptions {
   routeBudget?: number;
   priceBudget?: number;
+  monitorBudget?: number;
   mode?: "live" | "mock";
   nodeEnv?: "development" | "test" | "production";
   now?: number;
@@ -126,6 +127,7 @@ function setup(opts: SetupOptions = {}) {
     MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: 1,
     MARKET_PROVIDER_MAX_CALLS_PER_MIN: opts.routeBudget ?? 30,
     MARKET_PRICE_MAX_CALLS_PER_MIN: opts.priceBudget ?? 30,
+    MARKET_MONITOR_MAX_CALLS_PER_MIN: opts.monitorBudget ?? 10,
   };
   const service = new MarketService(
     provider,
@@ -696,6 +698,124 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
 
     advance(45_000); // janela seguinte
     await expect(service.quotes(["BBAS3"])).resolves.toHaveLength(1);
+  });
+
+  it("monitorQuotes usa orçamento próprio: esgotá-lo não afeta quotes nem priceFor", async () => {
+    const { service, provider, redis } = setup({ monitorBudget: 1 });
+    const first = await service.monitorQuotes(["PETR4", "VALE3"]);
+    expect(first.exhausted).toBe(true);
+    expect(first.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    expect(first.pending).toEqual(["VALE3"]);
+    const minute = String(minuteOf(FRIDAY_OPEN));
+    expect((redis as FakeRedis).store.get(`market:live:budget:monitor:${minute}`)).toBe("2");
+    expect((redis as FakeRedis).ttls.get(`market:live:budget:monitor:${minute}`)).toBe(2 * MIN);
+    // Rotas e preço têm cota própria e seguem.
+    expect(await service.quotes(["ITUB4"])).toHaveLength(1);
+    await expect(service.priceFor("BBAS3")).resolves.toMatchObject({ symbol: "BBAS3" });
+    expect((redis as FakeRedis).store.get(`market:live:budget:${minute}`)).toBe("1");
+    expect((redis as FakeRedis).store.get(`market:live:budget:price:${minute}`)).toBe("1");
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(3);
+  });
+
+  it("esgotar rotas e preço não afeta o monitor", async () => {
+    const { service } = setup({ routeBudget: 0, priceBudget: 0 });
+    await expect(service.quotes(["PETR4"])).rejects.toBeInstanceOf(MarketDataBusyError);
+    const r = await service.monitorQuotes(["PETR4"]);
+    expect(r.exhausted).toBe(false);
+    expect(r.quotes).toHaveLength(1);
+    expect(r.pending).toEqual([]);
+  });
+
+  it("monitorQuotes com orçamento esgotado devolve o cache e exhausted=true, sem lançar", async () => {
+    const { service, provider, redis } = setup({ monitorBudget: 0 });
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 1000));
+    const r = await service.monitorQuotes(["PETR4", "VALE3", "ITUB4"]);
+    expect(r.exhausted).toBe(true);
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    // não tentados por falta de orçamento, na ordem pedida (o do cache não entra)
+    expect(r.pending).toEqual(["VALE3", "ITUB4"]);
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+    // Janela seguinte: o orçamento volta.
+    const next = setup({ monitorBudget: 0, now: FRIDAY_OPEN + MIN });
+    await expect(next.service.monitorQuotes(["VALE3"])).resolves.toMatchObject({ exhausted: true });
+  });
+
+  it("monitorQuotes: ausente do provedor tentado não fica pendente; o que não coube no orçamento fica", async () => {
+    const { service } = setup({ monitorBudget: 2 });
+    const r = await service.monitorQuotes(["XXXX3", "PETR4", "VALE3", "ITUB4"]);
+    expect(r.exhausted).toBe(true);
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4"]);
+    expect(r.pending).toEqual(["VALE3", "ITUB4"]);
+  });
+
+  it("monitorQuotes: acerto de cache não consome o orçamento do monitor", async () => {
+    const { service, provider, redis } = setup({ monitorBudget: 1 });
+    seedCache(redis, rawQuote("PETR4", FRIDAY_OPEN - 1000));
+    seedCache(redis, rawQuote("VALE3", FRIDAY_OPEN - 1000));
+    const r = await service.monitorQuotes(["PETR4", "VALE3"]);
+    expect(r).toMatchObject({ exhausted: false });
+    expect(r.quotes).toHaveLength(2);
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+    expect(
+      (redis as FakeRedis).store.get(`market:live:budget:monitor:${String(minuteOf(FRIDAY_OPEN))}`),
+    ).toBeUndefined();
+    // Buscado entra no cache: a segunda chamada não consome mais.
+    await service.monitorQuotes(["ITUB4"]);
+    await service.monitorQuotes(["ITUB4"]);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("monitorQuotes: lotes consomem uma unidade cada e ausente do provedor é omitido", async () => {
+    const { service, provider } = setup({ monitorBudget: 5 });
+    const r = await service.monitorQuotes(["PETR4", "XXXX3", "VALE3", "PETR4"]);
+    expect(r.exhausted).toBe(false);
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4", "VALE3"]);
+    // ausente do provedor foi tentado: não fica pendente
+    expect(r.pending).toEqual([]);
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(3);
+  });
+
+  it("monitorQuotes com Redis fora do ar lança (falha fechada, sem provedor) e nunca MarketDataBusyError", async () => {
+    const down = {
+      get: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+      set: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+      eval: vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+    };
+    const { service, provider } = setup({ redis: down });
+    const err = await service.monitorQuotes(["PETR4"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MarketDataUnavailableError);
+    expect(err).not.toBeInstanceOf(MarketDataBusyError);
+    expect(provider.fetchQuotes).not.toHaveBeenCalled();
+  });
+
+  it("erro do provedor num lote não descarta os lotes anteriores e marca o lote como tentado", async () => {
+    const { service, provider, logger } = setup({
+      monitorBudget: 10,
+      quotes: (symbols) =>
+        symbols.includes("VALE3")
+          ? Promise.reject(new MarketDataUnavailableError())
+          : Promise.resolve(symbols.map((s) => rawQuote(s, FRIDAY_OPEN - 1000))),
+    });
+    const r = await service.monitorQuotes(["PETR4", "VALE3", "ITUB4"]);
+    // o lote de PETR4 (antes) e o de ITUB4 (depois) voltam; o de VALE3 falhou
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4", "ITUB4"]);
+    // o lote que falhou conta como tentado: não fica pendente e o rodízio passa por ele
+    expect(r).toMatchObject({ exhausted: false, pending: [] });
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(3);
+    // log só com a contagem e o nome do erro, sem o código do ativo
+    const logs = JSON.stringify(vi.mocked(logger.warn).mock.calls);
+    expect(logs).toContain("MarketDataUnavailableError");
+    expect(logs).not.toContain("VALE3");
+  });
+
+  it("monitorQuotes: erro que não é do provedor ainda lança", async () => {
+    const { service } = setup({ quotes: () => Promise.reject(new TypeError("bug")) });
+    await expect(service.monitorQuotes(["PETR4"])).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("monitorQuotes valida os símbolos", async () => {
+    const { service } = setup();
+    await expect(service.monitorQuotes(["petr4"])).rejects.toBeInstanceOf(ValidationError);
   });
 
   it("macro não consome o orçamento (uma chave só, cache de 1 h)", async () => {

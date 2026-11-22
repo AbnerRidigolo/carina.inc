@@ -5,6 +5,7 @@ import { type ClientSummary, ClientListSchema } from "./api/schemas";
 import styles from "./App.module.css";
 import { ChatView } from "./features/chat/ChatView";
 import { ConnectScreen } from "./features/connect/ConnectScreen";
+import { AlertsPanel } from "./features/alerts/AlertsPanel";
 import { ImportPanel } from "./features/imports/ImportPanel";
 import { InboxPanel } from "./features/inbox/InboxPanel";
 import { PortfolioPanel } from "./features/portfolio/PortfolioPanel";
@@ -120,6 +121,7 @@ export function App() {
             <InboxPanel key={`inbox-${clientId}`} clientId={clientId} bus={bus} />
             <ImportPanel key={`imports-${clientId}`} clientId={clientId} bus={bus} />
             <PortfolioPanel key={`portfolio-${clientId}`} clientId={clientId} bus={bus} />
+            <AlertsPanel key={`alerts-${clientId}`} clientId={clientId} bus={bus} />
             <UsagePanel bus={bus} />
           </div>
         </div>

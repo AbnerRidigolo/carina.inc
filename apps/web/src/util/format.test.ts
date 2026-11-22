@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBrl, formatDateTime, sumMoney } from "./format";
+import { formatBrl, formatDateTime, formatPrice, formatVariationPct, sumMoney } from "./format";
 
 describe("formatBrl", () => {
   it("formata em pt-BR com R$", () => {
@@ -28,5 +28,29 @@ describe("sumMoney", () => {
 describe("formatDateTime", () => {
   it("data inválida vira travessão", () => {
     expect(formatDateTime("nope")).toBe("—");
+  });
+});
+
+describe("formatPrice", () => {
+  it("formata cotação em R$ arredondando para centavos", () => {
+    expect(formatPrice("31.40")).toBe("R$ 31,40");
+    expect(formatPrice("31.4567")).toBe("R$ 31,46");
+    expect(formatPrice("0.000001")).toBe("R$ 0,00");
+  });
+  it("valor inválido vira travessão", () => {
+    expect(formatPrice("-1")).toBe("—");
+    expect(formatPrice("abc")).toBe("—");
+  });
+});
+
+describe("formatVariationPct", () => {
+  it("mostra o valor absoluto com uma casa e vírgula", () => {
+    expect(formatVariationPct("-6.2")).toBe("6,2");
+    expect(formatVariationPct("6.24")).toBe("6,2");
+    expect(formatVariationPct("-5")).toBe("5,0");
+    expect(formatVariationPct("12.345678")).toBe("12,3");
+  });
+  it("valor inválido vira travessão", () => {
+    expect(formatVariationPct("x")).toBe("—");
   });
 });

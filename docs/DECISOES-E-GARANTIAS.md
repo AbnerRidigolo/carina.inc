@@ -92,6 +92,48 @@ implementação mudou em relação a ele:
 - **Palavras-chave são heurística.** Só valem quando o classificador (LLM) falha e no modo mock;
   uma pergunta fora das listas pode não acionar o especialista certo nesse caminho.
 
+### Monitor de carteira (fase 2, entrega 2)
+
+Desenho no [spec](superpowers/specs/2026-11-21-monitor-carteira-design.md); fluxo em
+[ARCHITECTURE.md](ARCHITECTURE.md#15-monitor-de-carteira-monitor).
+
+| Tema | Decisão | Alternativas descartadas (motivo) |
+| --- | --- | --- |
+| Quem vigia | `MonitorJob` determinístico no worker, com alerta guardado e publicado | Agente LLM (custo por ciclo, texto não determinístico, risco de soar como recomendação e nada a acrescentar a uma regra de variação); cálculo sob demanda (não avisa ninguém) |
+| Regra | `\|changePct\| ≥ MONITOR_MOVE_THRESHOLD_PCT` (inteiro de 1 a 50, padrão 5), inclusivo e comparado em BigInt; só cotação do mesmo dia de São Paulo que o pregão do ciclo e com idade até `MARKET_QUOTE_MAX_AGE_MS`, com `source` do modo atual; `\|changePct\| ≥ 100000` ignorado | Comparar em ponto flutuante (o limite exato erraria); conferir o `marketState` da cotação (o `monitorQuotes` o preenche pelo relógio, então o fechamento de ontem passaria como alerta de hoje); aceitar cotação de outro modo |
+| Orçamento de cotas | Terceiro orçamento, `MARKET_MONITOR_MAX_CALLS_PER_MIN` (padrão 10), separado das rotas e do `priceFor`; esgotado → o ciclo para sem erro | Dividir o orçamento das rotas (o monitor tiraria cota do preço das ordens) |
+| Rodízio | Cursor `monitor:<modo>:cursor`, até `MONITOR_MAX_SYMBOLS_PER_TICK` símbolos por ciclo (padrão 10, alinhado ao orçamento do monitor); o cursor para antes do primeiro símbolo sem tentativa; símbolo desconhecido e lote com erro do provedor contam como feitos | Padrão de 20 (passava do orçamento e o ciclo terminava esgotado); contar o desconhecido como pendente (travava o rodízio); deixar o erro do provedor derrubar o ciclo (o cursor não andava e o mesmo lote falhava para sempre, para todos os tenants); cursor sem o modo na chave (mock e live retomavam um do ponto do outro) |
+| Sem spam | Único `(tenant, cliente, ativo, dia de São Paulo, sentido)`; `ON CONFLICT DO NOTHING` e só o inserido é publicado | Alertar a cada ciclo |
+| Insert | Uma transação por alerta; a publicação vem depois do commit, em melhor esforço | Um lote por tenant (uma falha derrubaria os outros alertas) |
+| Enumerar tenants | `monitor_tenant_ids()` (migração 0009), `SECURITY DEFINER`, devolve só ids; cada tenant é lido sob RLS | Papel com `BYPASSRLS` (o `carina_app` não tem); ler `position` de todos (a RLS proíbe) |
+| Entrega | `monitor.alert` em `inbox.events`; o `InboxBroadcast` envia `portfolio_alert` só à chave `(tenant, cliente)`, sem ler o banco; rota `GET /api/clients/:clientId/alerts` (escopo `chat`, sem cobrança) | Canal externo (Fase 3) |
+| Custo e auditoria | Sem LLM, sem cobrança e sem auditoria; logs só com ids e contagens | Cobrar por alerta (o monitor roda sem ninguém pedir) |
+| Limite | Um só por instância, em `MONITOR_MOVE_THRESHOLD_PCT` | Limite por cliente (exigiria configuração e tabela) |
+
+### Limitações do monitor de carteira
+
+- **Sem notícias.** O provedor de cotações não tem esse dado.
+- **Sem volume anômalo.** Exigiria média histórica, o que custa cota do provedor.
+- **Sem canal externo.** O alerta chega pela API e pelo WebSocket; WhatsApp, e-mail e webhook ficam
+  para a Fase 3 (notificações).
+- **Limite único por instância.** `MONITOR_MOVE_THRESHOLD_PCT` vale para todos os clientes e ativos.
+- **Dado de até 60 s.** As cotações vêm do cache de 60 s, e no plano gratuito da brapi o dado do
+  provedor já tem cerca de 30 min de atraso.
+- **Plano gratuito e o frescor.** Só alerta cotação do mesmo dia de São Paulo e com idade até
+  `MARKET_QUOTE_MAX_AGE_MS` (5 min por padrão). Com o atraso de ~30 min do plano gratuito, o
+  padrão faz o monitor não alertar nada; subindo o limite para cobrir o atraso (como o `priceFor`
+  já exige), os primeiros ciclos depois da abertura ainda não alertam, porque a última cotação é
+  do pregão anterior.
+- **Cota real do provedor.** O orçamento próprio do monitor só separa as filas; toda chamada conta
+  na mesma cota do token da brapi. Com os padrões (10 símbolos a cada 10 min, por ~8 h de pregão)
+  são cerca de 480 chamadas por dia e ~10 mil por mês, e cada ciclo dispara até 10 requisições
+  seguidas, que sem token disputam o limite por IP com as rotas e o preço. Dimensione
+  `MONITOR_MAX_SYMBOLS_PER_TICK`, `MONITOR_INTERVAL_MS` e `MARKET_MONITOR_MAX_CALLS_PER_MIN` pelo
+  plano.
+- **Carteira grande leva vários ciclos.** O rodízio cota cerca de 10 símbolos por ciclo (padrão),
+  a cada 10 minutos por padrão; uma carteira de 100 ativos leva 10 ciclos para ser coberta.
+- **Só no pregão.** Fora do horário (sem calendário de feriados) o ciclo é vazio.
+
 ## Defeitos do Python corrigidos
 
 | # | Defeito no Python | Correção na versão TypeScript | Onde ver |
@@ -214,6 +256,18 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Limites atômicos**: 50 `reserve` concorrentes com cota 10 → exatamente 10; 429 sempre com `Retry-After` | [`limits.int.spec.ts`](../apps/api/test/limits/limits.int.spec.ts) |
 | **Watchtower sem ReDoS**: tempo linear em entradas adversariais de 1 MB; paridade com o Python | [`inspect-text.perf.spec.ts`](../apps/api/src/modules/watchtower/inspect-text.perf.spec.ts), [`inspect-text.parity.spec.ts`](../apps/api/src/modules/watchtower/inspect-text.parity.spec.ts) |
 | Logs **sem chave, ticket nem query string**; requisições levam `tenantId`/`keyId` | [`health.e2e.spec.ts`](../apps/api/test/health/health.e2e.spec.ts) ("logs de requisição") |
+| **Regra do alerta**: 5,00% e −5,00% alertam (limite inclusivo), 4,99% não; nulo, mercado fechado e `source` de outro modo → nada; variação que não cabe em `numeric(9,4)` → nada; limite diferente do padrão vale nos dois sentidos | [`detect-move.spec.ts`](../apps/api/src/modules/monitor/detect-move.spec.ts) ("5,00% e −5,00% alertam (limite inclusivo)", "4,99% não alerta", "changePct nulo, mercado fechado ou source de outro modo → null", "variação absurda (\|changePct\| que não cabe em numeric(9,4)) → null", "limite diferente do padrão vale nos dois sentidos") |
+| **Monitor: fora do pregão não cota, lock impede ciclo duplo**: fora do pregão o ciclo não lê posições nem cota; lock tomado por outra réplica → ciclo pulado; o lock `monitor:tick` é tomado antes de cotar e liberado no fim; lock perdido aborta o ciclo | [`monitor.job.spec.ts`](../apps/api/src/modules/monitor/monitor.job.spec.ts) ("fora do pregão não cota nem lê posições (closed=true)", "lock tomado por outra réplica → skipped", "toma o lock monitor:tick antes de cotar e o libera no fim", "lock perdido antes de gravar aborta o ciclo"); [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("fora do pregão o ciclo é vazio e outra réplica com o lock pula o ciclo") |
+| **Rodízio sem travar**: 45 símbolos em três ciclos, o quarto recomeça; cursor que saiu da carteira segue do próximo maior; orçamento esgotado para o cursor no último cotado (ou o mantém, sem erro); símbolo desconhecido do provedor não trava o rodízio; cache expirado entre ciclos não repete a janela | [`monitor.job.spec.ts`](../apps/api/src/modules/monitor/monitor.job.spec.ts) ("rodízio: 45 símbolos, limite 20 → três ciclos cobrem todos, na ordem, e o quarto recomeça", "rodízio: símbolo do cursor que saiu da carteira não trava; segue do próximo maior", "orçamento esgotado no meio: cursor para no último cotado, sem erro", "orçamento esgotado antes de qualquer cotação: cursor não anda", "símbolo desconhecido do provedor no começo do lote não trava o rodízio (orçamento esgotado)", "símbolo desconhecido no meio do lote: o cursor passa por ele", "cache expirado entre ciclos não faz o rodízio repetir a mesma janela") |
+| **Orçamento do monitor é separado**: esgotá-lo não afeta rotas nem `priceFor` e vice-versa; esgotado, devolve o cache com `exhausted` e sem lançar; acerto de cache não consome; Redis fora lança sem chamar o provedor | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("monitorQuotes usa orçamento próprio: esgotá-lo não afeta quotes nem priceFor", "esgotar rotas e preço não afeta o monitor", "monitorQuotes com orçamento esgotado devolve o cache e exhausted=true, sem lançar", "monitorQuotes: acerto de cache não consome o orçamento do monitor", "monitorQuotes com Redis fora do ar lança (falha fechada, sem provedor) e nunca MarketDataBusyError") |
+| **Alerta gravado sob o tenant certo e publicado só depois do commit**; um alerta já existente não é publicado; falha num tenant ou num insert não impede os demais; falha ao publicar só é logada; nenhum log contém valor de posição | [`monitor.job.spec.ts`](../apps/api/src/modules/monitor/monitor.job.spec.ts) ("variação de −6% grava o alerta de cada cliente com o ativo, sob o tenant certo, e publica depois do COMMIT", "alerta que já existia (insertIfNew → null) não é publicado", "falha num tenant é logada (só ids) e os demais seguem", "falha num insert é logada (só ids) e os demais alertas do tenant seguem", "falha ao publicar só é logada", "nenhum log contém valor de posição") |
+| **Um alerta por dia e sentido, sem spam**: o segundo ciclo no mesmo dia não duplica nem publica de novo; a virada do dia em São Paulo alerta de novo; o sentido oposto no mesmo dia grava | [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("segundo ciclo no mesmo dia não duplica nem publica de novo", "virada do dia em São Paulo alerta de novo", "insertIfNew grava uma vez por dia e sentido; segundo insert devolve null", "mesmo ativo, sentido oposto no mesmo dia grava") |
+| **Ciclo completo contra Postgres e Redis reais**: dois tenants e cotação forjada de −6% gravam os alertas sob o tenant certo e publicam `monitor.alert` | [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("ciclo com dois tenants e cotação forjada de −6% grava alertas sob o tenant certo e publica monitor.alert") |
+| **RLS em `portfolio_alert`**: o tenant B não lê nem insere alerta de cliente de A; o banco recusa direção fora de up/down; apagar o cliente apaga os alertas (cascade) | [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("RLS: tenant B não lê nem insere alerta de cliente de A", "direction fora de up/down é recusada pelo banco (CHECK)", "apagar o cliente apaga os alertas (cascade)") |
+| **`monitor_tenant_ids()`**: `SECURITY DEFINER` do `carina_migrator`, `EXECUTE` só para `carina_app`; ignora tenant suspenso e tenant sem posição de investimento | [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("monitor_tenant_ids: SECURITY DEFINER do carina_migrator, EXECUTE só para carina_app", "tenantIds ignora tenant suspenso e tenant sem posição de investimento", "watchList só traz investment com asset_code") |
+| **Rota `GET /alerts`**: lista do mais novo e pagina com cursor; cliente de outro tenant → 404; sem escopo `chat` → 403; `limit` 51 ou 0, não numérico e cursor inválido → 422 | [`monitor.e2e.spec.ts`](../apps/api/test/monitor/monitor.e2e.spec.ts) ("GET /alerts lista do mais novo, pagina com cursor", "cliente de outro tenant → 404", "chave sem escopo chat → 403; sem chave → 401", "limit 51 → 422; limit 0, não numérico e cursor inválido também"); [`monitor.int.spec.ts`](../apps/api/test/monitor/monitor.int.spec.ts) ("list pagina do mais novo para o mais antigo com cursor", "list com cursor inválido lança ValidationError") |
+| **`portfolio_alert` só chega ao socket do mesmo tenant e cliente**, e o `InboxBroadcast` não lê o banco | [`monitor.e2e.spec.ts`](../apps/api/test/monitor/monitor.e2e.spec.ts) ("recebe portfolio_alert do próprio cliente e não o de outro cliente/tenant"); [`inbox-broadcast.spec.ts`](../apps/api/src/modules/chat/inbox-broadcast.spec.ts) ("monitor.alert vira portfolio_alert só para a chave do evento, sem ler o banco") |
+| **Painel "Alertas da carteira"**: lista com o texto fixo, alerta ao vivo no topo sem duplicar, aviso de que não é recomendação, código do ativo como texto (sem interpretar HTML) | [`AlertsPanel.test.tsx`](../apps/web/src/features/alerts/AlertsPanel.test.tsx) ("lista os alertas da API com o texto fixo", "alerta ao vivo entra no topo e não duplica um já listado", "rodapé diz que não é recomendação", "renderiza o código do ativo como texto, sem interpretar HTML") |
 | Provedores fora: REST → 503 com `Retry-After`; WS → evento `error` sem texto interno; nos dois, cota devolvida e nada cobrado | [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts), [`ws.e2e.spec.ts`](../apps/api/test/chat/ws.e2e.spec.ts) |
 
 ## Como rodar os testes
@@ -338,7 +392,8 @@ O que **não** está feito ou tem limite conhecido na fase 1:
 - **Modo live sem teste automatizado.** A cadeia de fallback é testada com modelos falsos; os ids
   `:free` do OpenRouter em `models.yaml` têm `TODO confirmar` e podem mudar.
 - **Agentes:** navigator, insight, predictor, risk, strategist, tax, researcher, assessor_liaison
-  e executor no chat, mais o categorizer na ingestão. Falta o monitor (entrega 2); ver
+  e executor no chat, mais o categorizer na ingestão. O monitor de carteira (alertas, não chat) está em
+  [Limitações do monitor](#limitações-do-monitor-de-carteira); para os demais, ver
   [Limitações dos agentes restantes](#limitações-dos-agentes-restantes-e-do-categorizer). Os docs [`AGENTS.md`](AGENTS.md), [`B2B.md`](B2B.md) e
   [`DEPLOYMENT.md`](DEPLOYMENT.md) ainda descrevem a versão Python e a visão de produto.
 - **Conversa guardada no checkpoint.** O schema `langgraph` guarda as mensagens da conversa

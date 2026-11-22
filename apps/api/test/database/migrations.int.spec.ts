@@ -239,6 +239,7 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
       "kg_entity",
       "kg_mention",
       "kg_relation",
+      "portfolio_alert",
       "position",
       "transaction",
       "usage_record",

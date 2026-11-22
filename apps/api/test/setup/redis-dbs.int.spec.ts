@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { REDIS_DBS } from "./redis-dbs.js";
+import { REDIS_DBS, SHARED_REDIS_DBS, redisDbOf } from "./redis-dbs.js";
 
 const testRoot = resolve(import.meta.dirname, "..");
 
@@ -39,8 +39,32 @@ describe("alocação dos DBs do Redis nos testes", () => {
     }
   });
 
+  it("DB dividido: dono no mesmo projeto, e nenhum dos dois esvazia o DB nem consome `jobs`", () => {
+    const flushes = /flushdb|flushall/i;
+    for (const [project, table] of Object.entries(SHARED_REDIS_DBS)) {
+      const owners = REDIS_DBS[project as keyof typeof REDIS_DBS] as Record<string, number>;
+      for (const [file, owner] of Object.entries(table as Record<string, string>)) {
+        expect(file in owners, `${file} já tem DB próprio`).toBe(false);
+        expect(owners[owner], `${file} → ${owner}`).toBeTypeOf("number");
+        expect(file.endsWith(`.${project}.spec.ts`), file).toBe(true);
+        expect(redisDbOf(file as never)).toBe(owners[owner]);
+        for (const f of [file, owner]) {
+          expect(existsSync(join(testRoot, f)), f).toBe(true);
+          const src = readFileSync(join(testRoot, f), "utf8");
+          expect(flushes.test(src), `${f} esvazia o DB`).toBe(false);
+          expect(/stream:\s*["']jobs["']/.test(src), `${f} consome jobs`).toBe(false);
+        }
+      }
+    }
+  });
+
   it("todo arquivo que usa um DB do Redis o pega da tabela pelo próprio caminho", () => {
-    const allocated = new Set([...Object.keys(REDIS_DBS.int), ...Object.keys(REDIS_DBS.e2e)]);
+    const allocated = new Set([
+      ...Object.keys(REDIS_DBS.int),
+      ...Object.keys(REDIS_DBS.e2e),
+      ...Object.keys(SHARED_REDIS_DBS.int),
+      ...Object.keys(SHARED_REDIS_DBS.e2e),
+    ]);
     const offenders: string[] = [];
     // Este arquivo só cita os padrões (na regex abaixo); não usa Redis.
     for (const file of specFiles(testRoot).filter((f) => f !== "setup/redis-dbs.int.spec.ts")) {

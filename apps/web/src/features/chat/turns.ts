@@ -93,6 +93,7 @@ function applyEvent(turn: Turn, event: ChatEvent): Turn {
     case "approval_executed":
     case "import_progress":
     case "import_finished":
+    case "portfolio_alert":
       return turn;
   }
 }

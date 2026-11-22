@@ -41,7 +41,10 @@
  *   o que já tem (cache + lotes já buscados) com `exhausted: true`, sem lançar `MarketDataBusyError`,
  *   e `pending` = os símbolos pedidos que NÃO foram tentados (nem cache nem provedor), na ordem
  *   pedida; ausente do provedor (ou do cache negativo) conta como tentado. O rodízio do job avança
- *   o cursor só até antes do primeiro pendente e retoma dali no próximo ciclo. Redis fora do ar → LANÇA
+ *   o cursor só até antes do primeiro pendente e retoma dali no próximo ciclo. Lote em que o
+ *   provedor falha (`MarketDataUnavailableError`: 401/403/5xx, formato inválido, rede) também conta
+ *   como tentado: é omitido, os lotes já buscados ficam e os seguintes seguem (log `warn` só com a
+ *   contagem e o nome do erro); um símbolo ruim não trava o monitor. Redis fora do ar → LANÇA
  *   (`MarketDataUnavailableError`, falha fechada): o job pula o ciclo, como já faz sem o lock.
  *   Sem busca única por símbolo: o job roda sob lock global, um ciclo por vez.
  * `macro` não consome: uma chave só, cache de 1 h (no máximo uma busca por hora por processo).
@@ -78,7 +81,7 @@ import { REDIS } from "../../core/redis/redis.tokens.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
 import { SYMBOL_RE } from "./asset-class.js";
 import { MarketPriceError } from "./market-price-error.js";
-import { marketStateAt } from "./market-hours.js";
+import { marketStateAt, quoteAgeWithin } from "./market-hours.js";
 import type { MacroProvider, MarketDataProvider, RawQuote } from "./providers/types.js";
 
 export const MARKET_DATA_PROVIDER = Symbol("MARKET_DATA_PROVIDER");
@@ -212,6 +215,8 @@ export class MarketService implements OnModuleInit {
    * Cotações para o monitor de carteira, no orçamento próprio (ver o cabeçalho). Repetidos viram
    * um; ausentes do provedor são omitidos. Orçamento esgotado → devolve o que já tem com
    * `exhausted: true` e os não tentados em `pending` (na ordem pedida); Redis fora → lança.
+   * Provedor falhando num lote (`MarketDataUnavailableError`) → o lote conta como tentado (omitido,
+   * fora do `pending`) e os demais lotes seguem.
    */
   async monitorQuotes(
     symbols: string[],
@@ -225,6 +230,8 @@ export class MarketService implements OnModuleInit {
     const { found, toFetch } = await this.readQuoteCache(list);
     let exhausted = false;
     let untried: ReadonlySet<string> = new Set();
+    let failed = 0;
+    let errName = "";
     const perCall = this.env.MARKET_BRAPI_MAX_SYMBOLS_PER_CALL;
     for (let i = 0; i < toFetch.length; i += perCall) {
       try {
@@ -235,9 +242,25 @@ export class MarketService implements OnModuleInit {
         untried = new Set(toFetch.slice(i));
         break;
       }
-      for (const [symbol, quote] of await this.fetchAndStore(toFetch.slice(i, i + perCall))) {
+      const chunk = toFetch.slice(i, i + perCall);
+      let fetched: Map<string, RawQuote>;
+      try {
+        fetched = await this.fetchAndStore(chunk);
+      } catch (err) {
+        // Provedor fora do ar ou recusando este lote: o lote conta como tentado (fora do
+        // `pending`, o rodízio passa por ele), o que já veio fica e os próximos lotes seguem.
+        if (!(err instanceof MarketDataUnavailableError)) throw err;
+        failed += chunk.length;
+        errName = err.name;
+        continue;
+      }
+      for (const [symbol, quote] of fetched) {
         found.set(symbol, { quote, fromCache: false });
       }
+    }
+    if (failed > 0) {
+      // Só contagem e nome do erro: nenhum código de ativo.
+      this.logger.warn({ msg: "Lote do monitor falhou no provedor; seguindo", failed, errName });
     }
     const state = this.marketState(this.clock());
     const quotes = list.flatMap((s) => {
@@ -312,12 +335,11 @@ export class MarketService implements OnModuleInit {
   /** Idade = clock − updatedAt dentro do limite do estado do mercado; negativa/ilegível não vale. */
   private isFresh(quote: RawQuote): boolean {
     const now = this.clock();
-    const age = now - Date.parse(quote.updatedAt);
     const maxAge =
       this.marketState(now) === "open"
         ? this.env.MARKET_QUOTE_MAX_AGE_MS
         : this.env.MARKET_CLOSED_MAX_AGE_DAYS * DAY_MS;
-    return Number.isFinite(age) && age >= 0 && age <= maxAge;
+    return quoteAgeWithin(quote.updatedAt, now, maxAge);
   }
 
   /** Busca o símbolo no provedor sem ler o cache; `priceFor` concorrentes dividem a mesma busca. */

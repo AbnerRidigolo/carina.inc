@@ -99,6 +99,9 @@ export class MonitorRepository {
   /**
    * Pares (cliente, ativo) distintos das posições de investimento com código, no tenant fixado
    * (RLS). O código sai normalizado (maiúsculas, sem espaços); código só de espaços fica de fora.
+   * Posição zerada fica de fora: a ingestão aceita quantidade "0" e o upsert grava a posição vendida
+   * por cima da antiga, então quantidade 0 ou `value_brl` ≤ 0 não é vigiada (quantidade nula, de
+   * ativo sem quantidade informada, vale se o valor for positivo).
    * Ordem por byte (COLLATE "C"), a mesma com qualquer locale do banco.
    */
   watchList(tx: Tx): Promise<WatchItem[]> {
@@ -108,6 +111,7 @@ export class MonitorRepository {
           SELECT client_id, upper(regexp_replace(asset_code, '\\s', '', 'g')) AS code
             FROM position
            WHERE kind = 'investment' AND asset_code IS NOT NULL
+             AND value_brl > 0 AND (quantity IS NULL OR quantity <> 0)
         ) p
        WHERE code <> ''
        ORDER BY "clientId", "assetCode"`;

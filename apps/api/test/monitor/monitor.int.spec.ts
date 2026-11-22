@@ -27,7 +27,7 @@ import { MARKET_DATA_PROVIDER } from "../../src/modules/market/market.service.js
 import type { MarketDataProvider, RawQuote } from "../../src/modules/market/providers/types.js";
 import { MonitorCoreModule } from "../../src/modules/monitor/monitor-core.module.js";
 import {
-  MONITOR_CURSOR_KEY,
+  monitorCursorKey,
   MONITOR_LOCK_KEY,
   MONITOR_LOGGER,
   MonitorJob,
@@ -83,12 +83,14 @@ describe("Monitor de carteira: portfolio_alert e MonitorRepository (carina_app, 
     kind: string,
     assetCode: string | null,
     source = "synthetic",
+    amounts: { quantity: string | null; valueBrl: string } = { quantity: "10", valueBrl: "1000" },
   ) =>
     migratorSql(
       `INSERT INTO position (tenant_id, client_id, source, external_id, institution, kind,
                              asset_class, asset_code, name, quantity, value_brl, as_of)
-       VALUES ($1, $2, $3, $4, 'XP', $5, 'stock', $6, 'Ativo', 10, 1000, current_date)`,
-      [tenantId, clientId, source, externalId, kind, assetCode],
+       VALUES ($1, $2, $3, $4, 'XP', $5, 'stock', $6, 'Ativo', $7::numeric, $8::numeric,
+               current_date)`,
+      [tenantId, clientId, source, externalId, kind, assetCode, amounts.quantity, amounts.valueBrl],
       { tenantId },
     );
 
@@ -306,6 +308,32 @@ describe("Monitor de carteira: portfolio_alert e MonitorRepository (carina_app, 
     ]);
   });
 
+  it("watchList ignora posição zerada (quantidade 0 ou valor ≤ 0); quantidade nula com valor vale", async () => {
+    // a ingestão aceita "0" e o upsert grava a posição zerada (vendida) por cima da antiga
+    const zeroed = [
+      { ext: "z1", code: "ZERO3", amounts: { quantity: "0", valueBrl: "1000" } },
+      { ext: "z2", code: "ZERO4", amounts: { quantity: "10", valueBrl: "0" } },
+      { ext: "z3", code: "ZERO5", amounts: { quantity: "0.00000000", valueBrl: "0.00" } },
+      { ext: "z4", code: "ZERO6", amounts: { quantity: null, valueBrl: "-5" } },
+      { ext: "z5", code: "NULO3", amounts: { quantity: null, valueBrl: "250" } },
+    ];
+    for (const z of zeroed) {
+      await position(tenantB, clientB1, z.ext, "investment", z.code, "synthetic", z.amounts);
+    }
+    try {
+      expect(await inTenant(tenantB, () => db.tx((tx) => repo.watchList(tx)))).toEqual([
+        { clientId: clientB1, assetCode: "ITUB4" },
+        { clientId: clientB1, assetCode: "NULO3" },
+      ]);
+    } finally {
+      await migratorSql(
+        "DELETE FROM position WHERE client_id = $1 AND external_id = ANY($2::text[])",
+        [clientB1, zeroed.map((z) => z.ext)],
+        { tenantId: tenantB },
+      );
+    }
+  });
+
   it("list pagina do mais novo para o mais antigo com cursor", async () => {
     const inserted: PortfolioAlert[] = [];
     for (let i = 0; i < 5; i++) {
@@ -421,7 +449,7 @@ describe("MonitorJob: ciclo completo (Postgres + Redis, provedor forjado)", () =
 
   /** Só as chaves do monitor e do mercado: o DB é dividido (ver o topo do arquivo). */
   const clearKeys = async () => {
-    const keys = [MONITOR_LOCK_KEY, MONITOR_CURSOR_KEY, ...(await redis.keys("market:*"))];
+    const keys = [MONITOR_LOCK_KEY, monitorCursorKey("mock"), ...(await redis.keys("market:*"))];
     await redis.del(...keys);
   };
 
@@ -530,7 +558,7 @@ describe("MonitorJob: ciclo completo (Postgres + Redis, provedor forjado)", () =
 
     // lock liberado, cursor no último cotado, e nenhum valor de posição nos logs
     expect(await redis.get(MONITOR_LOCK_KEY)).toBeNull();
-    expect(await redis.get(MONITOR_CURSOR_KEY)).toBe("WEGE3");
+    expect(await redis.get(monitorCursorKey("mock"))).toBe("WEGE3");
     expect(JSON.stringify(logged)).not.toContain("987654");
   });
 

@@ -4,16 +4,26 @@ import { isAbortError, listAlerts } from "../../api/client";
 import { describeApiError } from "../../api/errors";
 import type { SignalBus } from "../../state/event-bus";
 import ui from "../../styles/ui.module.css";
-import { formatDateTime, formatPrice, formatVariationPct } from "../../util/format";
+import {
+  formatDateTime,
+  formatDayMonth,
+  formatPrice,
+  formatVariationPct,
+  saoPauloDate,
+} from "../../util/format";
 import styles from "./AlertsPanel.module.css";
 
 const FOOTER =
   "Variação do dia em relação ao fechamento anterior. Não é recomendação de investimento.";
 
-/** Texto fixo e neutro: sem verbo de ação além de "caiu"/"subiu". Tudo entra como texto, nunca HTML. */
-function alertText(alert: PortfolioAlert): string {
+/**
+ * Texto fixo e neutro: sem verbo de ação além de "caiu"/"subiu". Tudo entra como texto, nunca HTML.
+ * "hoje" só quando o dia do pregão do alerta é hoje em São Paulo; senão, "em DD/MM".
+ */
+function alertText(alert: PortfolioAlert, today: string): string {
   const verb = alert.direction === "down" ? "caiu" : "subiu";
-  return `${alert.assetCode} ${verb} ${formatVariationPct(alert.changePct)}% hoje (${formatPrice(alert.price)}).`;
+  const when = alert.tradingDay === today ? "hoje" : `em ${formatDayMonth(alert.tradingDay)}`;
+  return `${alert.assetCode} ${verb} ${formatVariationPct(alert.changePct)}% ${when} (${formatPrice(alert.price)}).`;
 }
 
 /** Junta sem repetir `id`: o primeiro da lista vence e a ordem se mantém. */
@@ -37,6 +47,9 @@ export function AlertsPanel({ clientId, bus }: Props) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | undefined>();
   const [loadingMore, setLoadingMore] = useState(false);
+  /** Anúncio do último alerta ao vivo (região `aria-live`, como no InboxPanel). */
+  const [announcement, setAnnouncement] = useState("");
+  const known = useRef<ReadonlySet<string>>(new Set());
   const titleId = useId();
   const ctrl = useRef<AbortController | null>(null);
   const moreLock = useRef(false);
@@ -66,11 +79,19 @@ export function AlertsPanel({ clientId, bus }: Props) {
     return () => ctrl.current?.abort();
   }, [load]);
 
+  // Ids já na tela: um alerta ao vivo que já estava listado não é anunciado de novo.
+  useEffect(() => {
+    known.current = new Set(alerts?.map((a) => a.id));
+  }, [alerts]);
+
   useEffect(
     () =>
       bus.subscribe((signal) => {
         if (signal.type === "portfolio_alert") {
           const live = signal.alert;
+          if (!known.current.has(live.id)) {
+            setAnnouncement(`Novo alerta: ${alertText(live, saoPauloDate(Date.now()))}`);
+          }
           // Já listado (ex.: veio na API antes do evento): fica onde está.
           setAlerts((prev) =>
             prev?.some((a) => a.id === live.id) ? prev : mergeUnique([live], prev ?? []),
@@ -95,6 +116,8 @@ export function AlertsPanel({ clientId, bus }: Props) {
     }
   }
 
+  const today = saoPauloDate(Date.now());
+
   return (
     <section className={ui.panel} aria-labelledby={titleId}>
       <div className={ui.panelHeader}>
@@ -105,14 +128,17 @@ export function AlertsPanel({ clientId, bus }: Props) {
           {error}
         </div>
       ) : null}
+      <div role="status" aria-live="polite">
+        {announcement ? <p className={ui.notice}>{announcement}</p> : null}
+      </div>
       {alerts === null && !error ? <p className={ui.muted}>Carregando…</p> : null}
-      {alerts?.length === 0 && !error ? <p className={ui.muted}>Nenhum alerta hoje.</p> : null}
+      {alerts?.length === 0 && !error ? <p className={ui.muted}>Nenhum alerta.</p> : null}
 
       {alerts && alerts.length > 0 ? (
         <ul className={ui.list} aria-label="Alertas da carteira">
           {alerts.map((alert) => (
             <li key={alert.id} className={styles.alert}>
-              {alertText(alert)}
+              {alertText(alert, today)}
               <small className={`${ui.muted} ${styles.time}`}>
                 {formatDateTime(alert.createdAt)}
               </small>

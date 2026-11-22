@@ -449,7 +449,7 @@ MonitorJob (worker; na api só com WORKERS_ENABLED) a cada MONITOR_INTERVAL_MS
   → pregão aberto? (marketStateAt)  não → ciclo vazio
   → lock Redis monitor:tick (com heartbeat)  já tomado → ciclo pulado
   → monitor_tenant_ids() (SECURITY DEFINER) → watch list de cada tenant, sob RLS
-  → união ordenada dos símbolos, em rodízio (cursor monitor:cursor), até MONITOR_MAX_SYMBOLS_PER_TICK
+  → união ordenada dos símbolos, em rodízio (cursor monitor:<modo>:cursor), até MONITOR_MAX_SYMBOLS_PER_TICK
   → MarketService.monitorQuotes (cache de 60 s + orçamento próprio)
   → detectMove → INSERT em portfolio_alert (uma transação por alerta, ON CONFLICT DO NOTHING)
   → depois do commit, monitor.alert em inbox.events → InboxBroadcast → portfolio_alert no WebSocket
@@ -463,16 +463,29 @@ MonitorJob (worker; na api só com WORKERS_ENABLED) a cada MONITOR_INTERVAL_MS
   `import_cleanup_tenant_ids`) devolve só ids de tenants não suspensos com posição de investimento
   com código de ativo; cada tenant é lido sob `TenantContext.run`, como `carina_app`.
 - **Rodízio.** Até `MONITOR_MAX_SYMBOLS_PER_TICK` símbolos por ciclo (padrão 10, igual ao
-  orçamento do monitor × símbolos por chamada do plano padrão). O cursor `monitor:cursor` para
+  orçamento do monitor × símbolos por chamada do plano padrão). O cursor `monitor:<modo>:cursor` para
   logo antes do primeiro símbolo que ficou sem tentativa por falta de orçamento; símbolo que o
-  provedor não conhece conta como feito e não trava o rodízio.
+  provedor não conhece conta como feito e não trava o rodízio. O cursor leva o modo na chave: um
+  Redis compartilhado entre mock e live não faz um modo retomar do ponto do outro.
 - **Cotações.** `MarketService.monitorQuotes`, pelo cache de 60 s e pelo terceiro orçamento
   (`MARKET_MONITOR_MAX_CALLS_PER_MIN`). Orçamento esgotado → o ciclo para sem erro e o rodízio
-  retoma no próximo. Redis fora → ciclo pulado.
+  retoma no próximo. Erro do provedor num lote (`MarketDataUnavailableError`: 401/403/5xx,
+  formato inválido, rede) → o lote conta como tentado: os lotes já buscados ficam, os seguintes
+  seguem e o rodízio passa por ele (log `warn` só com a contagem e o nome do erro); um símbolo
+  ruim não trava o monitor de todos os tenants. Redis fora → ciclo pulado (o orçamento falha
+  fechado).
+- **Cota real.** Toda chamada do monitor conta na mesma cota do token da brapi que as rotas e o
+  preço usam: com os padrões (10 símbolos a cada 10 min, ~8 h de pregão) são cerca de 480 chamadas
+  por dia e ~10 mil por mês, e cada ciclo dispara até 10 requisições em sequência, que sem token
+  disputam o limite por IP com as rotas e o preço. Dimensione `MONITOR_MAX_SYMBOLS_PER_TICK`,
+  `MONITOR_INTERVAL_MS` e `MARKET_MONITOR_MAX_CALLS_PER_MIN` pelo plano.
 - **Regra** (`detectMove`, função pura). Alerta quando `|changePct| ≥ MONITOR_MOVE_THRESHOLD_PCT`
   (inteiro de 1 a 50, padrão 5; limite inclusivo, comparado exatamente em BigInt). Só vale cotação
-  com mercado `open` e `source` do modo atual; `|changePct| ≥ 100000` é descartado (não cabe em
-  `numeric(9,4)`).
+  do mesmo dia de São Paulo que o pregão do ciclo (`updatedAt`) e com idade de até
+  `MARKET_QUOTE_MAX_AGE_MS` (a regra de frescor do `priceFor` em pregão), com `source` do modo
+  atual; o `marketState` da cotação não entra, porque o `monitorQuotes` o preenche pelo relógio.
+  Assim o fechamento de ontem (feriado, ativo sem negócio hoje, atraso do provedor) não vira
+  alerta "de hoje". `|changePct| ≥ 100000` é descartado (não cabe em `numeric(9,4)`).
 - **Dado** (`portfolio_alert`, migração 0009). RLS com `FORCE`; FK composta `(tenant, cliente)` com
   cascade; único `(tenant, cliente, ativo, dia de São Paulo, sentido)`, então no máximo um alerta
   por dia e sentido. `carina_app` só tem `SELECT` e `INSERT`. Cada alerta é inserido numa
@@ -484,6 +497,7 @@ MonitorJob (worker; na api só com WORKERS_ENABLED) a cada MONITOR_INTERVAL_MS
   (padrão 20), cursor por keyset (cursor inválido → 422), mais novo primeiro. Cliente de outro
   tenant → 404.
 - **Web.** Painel "Alertas da carteira" ([`apps/web/src/features/alerts/`](../apps/web/src/features/alerts)):
-  busca a lista ao abrir, recebe os novos pelo WebSocket no topo e mostra um texto fixo e
-  neutro, com o aviso de que não é recomendação de investimento.
+  busca a lista ao abrir, recebe os novos pelo WebSocket no topo (anunciados numa região
+  `aria-live="polite"`) e mostra um texto fixo e neutro ("hoje" só quando o dia do alerta é hoje
+  em São Paulo, senão "em DD/MM"), com o aviso de que não é recomendação de investimento.
 - **LGPD.** Os logs levam só ids e contagens. O alerta guarda só ativo, variação e preço público.

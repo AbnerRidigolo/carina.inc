@@ -2,7 +2,7 @@ import type { PortfolioAlert } from "@carina/shared";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEventBus, type PanelSignal } from "../../state/event-bus";
 import { setApiKey } from "../../state/session";
 import { TEST_KEY, problem, use } from "../../test/helpers";
@@ -11,6 +11,9 @@ import { AlertsPanel } from "./AlertsPanel";
 const ID_1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
 const ID_2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
 const ID_3 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
+/** Relógio dos testes: 20/11/2026 às 22:30 em São Paulo (01:30Z do dia 21 em UTC). */
+const NOW = "2026-11-21T01:30:00.000Z";
+const TODAY = "2026-11-20";
 
 function alert(overrides: Partial<PortfolioAlert> = {}): PortfolioAlert {
   return {
@@ -19,7 +22,7 @@ function alert(overrides: Partial<PortfolioAlert> = {}): PortfolioAlert {
     direction: "down",
     changePct: "-6.2",
     price: "31.40",
-    tradingDay: "2026-11-20",
+    tradingDay: TODAY,
     createdAt: "2026-11-20T15:00:00.000Z",
     ...overrides,
   };
@@ -45,6 +48,15 @@ function mount(pages: { items: unknown[]; nextCursor: string | null }[]) {
 const text = (el: HTMLElement) => (el.textContent ?? "").replace(/\s/g, " ");
 
 describe("AlertsPanel", () => {
+  beforeEach(() => {
+    // Só o Date: o msw e o testing-library seguem com os timers reais.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(NOW));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("lista os alertas da API com o texto fixo", async () => {
     mount([
       {
@@ -98,9 +110,64 @@ describe("AlertsPanel", () => {
     expect(screen.queryByRole("button", { name: "Carregar mais" })).not.toBeInTheDocument();
   });
 
+  it("alerta de hoje diz hoje", async () => {
+    // tradingDay = data de São Paulo, mesmo com o UTC já no dia seguinte
+    mount([{ items: [alert({ tradingDay: TODAY })], nextCursor: null }]);
+    const item = await screen.findByRole("listitem");
+    expect(text(item)).toContain("PETR4 caiu 6,2% hoje (R$ 31,40).");
+  });
+
+  it("alerta de outro dia mostra a data, não 'hoje'", async () => {
+    mount([
+      {
+        items: [
+          alert({ tradingDay: "2026-11-18" }),
+          alert({ id: ID_2, assetCode: "VALE3", direction: "up", tradingDay: "2026-11-21" }),
+        ],
+        nextCursor: null,
+      },
+    ]);
+    const list = await screen.findByRole("list", { name: "Alertas da carteira" });
+    const items = within(list).getAllByRole("listitem").map(text);
+    expect(items[0]).toContain("PETR4 caiu 6,2% em 18/11 (R$ 31,40).");
+    // o dia 21 em UTC ainda não chegou em São Paulo: não é "hoje"
+    expect(items[1]).toContain("VALE3 subiu 6,2% em 21/11 (R$ 31,40).");
+    expect(items.join(" ")).not.toContain("hoje");
+  });
+
+  it("alerta ao vivo é anunciado numa região polida", async () => {
+    const { bus } = mount([{ items: [alert()], nextCursor: null }]);
+    await screen.findByText(/PETR4 caiu/);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("");
+    act(() =>
+      bus.publish({
+        type: "portfolio_alert",
+        alert: alert({ id: ID_2, assetCode: "ITUB4", direction: "up", changePct: "5.1" }),
+      }),
+    );
+    expect(status).toHaveTextContent("Novo alerta: ITUB4 subiu 5,1% hoje (R$ 31,40).");
+    // um já listado não é anunciado de novo
+    act(() => bus.publish({ type: "portfolio_alert", alert: alert() }));
+    expect(status).not.toHaveTextContent("PETR4");
+  });
+
+  it("socket reaberto recarrega a primeira página", async () => {
+    const { bus, cursors } = mount([
+      { items: [alert()], nextCursor: null },
+      { items: [alert({ id: ID_2, assetCode: "WEGE3" }), alert()], nextCursor: null },
+    ]);
+    await screen.findByText(/PETR4 caiu/);
+    act(() => bus.publish({ type: "socket_open" }));
+    await screen.findByText(/WEGE3 caiu/);
+    expect(cursors).toEqual([null, null]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
   it("estado vazio", async () => {
     mount([{ items: [], nextCursor: null }]);
-    expect(await screen.findByText("Nenhum alerta hoje.")).toBeInTheDocument();
+    expect(await screen.findByText("Nenhum alerta.")).toBeInTheDocument();
     expect(screen.queryByRole("list", { name: "Alertas da carteira" })).not.toBeInTheDocument();
   });
 

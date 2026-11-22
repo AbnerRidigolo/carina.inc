@@ -5,13 +5,16 @@
  *      pulado. O `monitorQuotes` não tem busca única por símbolo e conta com este lock;
  *   3. tenants por `monitor_tenant_ids()` (SECURITY DEFINER), cada um sob `TenantContext.run`
  *      (RLS, só o tenant fixado): pares (cliente, ativo) distintos das posições de investimento;
- *   4. rodízio: a união ordenada dos símbolos; o cursor (`monitor:cursor`) guarda o último cotado e
+ *   4. rodízio: a união ordenada dos símbolos; o cursor (`monitor:<modo>:cursor`) guarda o último cotado e
  *      o ciclo pega os próximos `MONITOR_MAX_SYMBOLS_PER_TICK` depois dele, até o fim da lista; o
  *      ciclo seguinte ao fim recomeça do início. Orçamento do monitor esgotado no meio → o cursor
  *      avança até o símbolo anterior ao primeiro que o `monitorQuotes` não chegou a tentar
  *      (`pending`), sem erro: nada fica pulado, e um símbolo tentado que o provedor não conhece
- *      conta como feito (não trava o rodízio, mesmo com o cache negativo já expirado);
- *   5. regra `detectMove`; cada alerta numa transação própria (`insertIfNew`, idempotente por
+ *      conta como feito (não trava o rodízio, mesmo com o cache negativo já expirado). Um lote em
+ *      que o provedor falha também conta como tentado (o `monitorQuotes` não lança por ele): um
+ *      símbolo ruim não trava o monitor de todos os tenants;
+ *   5. regra `detectMove` (só cotação do mesmo dia de São Paulo e com idade até
+ *      `MARKET_QUOTE_MAX_AGE_MS`: nada de alerta "de hoje" com o fechamento de ontem); cada alerta numa transação própria (`insertIfNew`, idempotente por
  *      cliente, ativo, dia de São Paulo e sentido): um insert que falha é logado (só ids) e os
  *      demais seguem; o que entrou é publicado como `monitor.alert` em `inbox.events` DEPOIS do
  *      COMMIT, em melhor esforço.
@@ -19,7 +22,7 @@
  * Como a ImportCleanupJob: relógio pelo CLOCK; `setInterval` unref só com WORKERS_ENABLED !==
  * "false", parado em `onModuleDestroy`/`beforeApplicationShutdown` esperando o ciclo em andamento;
  * um tenant que falha é logado (só ids) e não impede os demais; lock perdido aborta o ciclo.
- * Redis fora: o lock (ou o `monitorQuotes`) lança e o ciclo é logado como falho.
+ * Redis fora: o lock (ou o orçamento do `monitorQuotes`) lança e o ciclo é logado como falho.
  *
  * Logs só com ids e contagens: nenhum código de ativo, variação, preço ou valor de posição.
  */
@@ -46,11 +49,15 @@ import { CLOCK, type Clock } from "../limits/clock.js";
 import { SYMBOL_RE } from "../market/asset-class.js";
 import { marketStateAt, saoPauloDate } from "../market/market-hours.js";
 import { MarketService } from "../market/market.service.js";
-import { type DetectedMove, detectMove } from "./detect-move.js";
+import { type DetectedMove, type MonitorMode, detectMove } from "./detect-move.js";
 import { MonitorRepository, type WatchItem } from "./monitor.repository.js";
 
 export const MONITOR_LOCK_KEY = "monitor:tick";
-export const MONITOR_CURSOR_KEY = "monitor:cursor";
+/**
+ * Cursor do rodízio, por modo (`monitor:<modo>:cursor`): um Redis compartilhado entre mock e live
+ * não faz um modo retomar do ponto do outro (as listas de símbolos diferem).
+ */
+export const monitorCursorKey = (mode: MonitorMode): string => `monitor:${mode}:cursor`;
 /** TTL do lock; o heartbeat do LockService o renova enquanto o ciclo roda. */
 const LOCK_TTL_MS = 2 * 60_000;
 
@@ -85,6 +92,7 @@ export type MonitorEnv = Pick<
   Env,
   | "WORKERS_ENABLED"
   | "MARKET_MODE"
+  | "MARKET_QUOTE_MAX_AGE_MS"
   | "MONITOR_INTERVAL_MS"
   | "MONITOR_MAX_SYMBOLS_PER_TICK"
   | "MONITOR_MOVE_THRESHOLD_PCT"
@@ -241,7 +249,7 @@ export class MonitorJob
 
       const batch = nextBatch(
         all,
-        await this.redis.get(MONITOR_CURSOR_KEY),
+        await this.redis.get(monitorCursorKey(this.env.MARKET_MODE)),
         this.env.MONITOR_MAX_SYMBOLS_PER_TICK,
       );
       await lock.assertHeld();
@@ -250,16 +258,23 @@ export class MonitorJob
       const cursor = advanceCursor(batch, pending);
       if (cursor !== undefined) {
         await lock.assertHeld();
-        await this.redis.set(MONITOR_CURSOR_KEY, cursor);
-      }
-
-      const moves = new Map<string, DetectedMove>();
-      for (const quote of quotes) {
-        const move = detectMove(quote, this.env.MONITOR_MOVE_THRESHOLD_PCT, this.env.MARKET_MODE);
-        if (move) moves.set(quote.symbol, move);
+        await this.redis.set(monitorCursorKey(this.env.MARKET_MODE), cursor);
       }
 
       const tradingDay = saoPauloDate(now);
+      const rule = {
+        thresholdPct: this.env.MONITOR_MOVE_THRESHOLD_PCT,
+        mode: this.env.MARKET_MODE,
+        nowMs: now,
+        tradingDay,
+        maxAgeMs: this.env.MARKET_QUOTE_MAX_AGE_MS,
+      };
+      const moves = new Map<string, DetectedMove>();
+      for (const quote of quotes) {
+        const move = detectMove(quote, rule);
+        if (move) moves.set(quote.symbol, move);
+      }
+
       let alerts = 0;
       for (const [tenantId, items] of watch) {
         const hits = items.filter((i) => moves.has(i.assetCode));

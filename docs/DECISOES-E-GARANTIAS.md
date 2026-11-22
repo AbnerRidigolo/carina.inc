@@ -100,9 +100,9 @@ Desenho no [spec](superpowers/specs/2026-11-21-monitor-carteira-design.md); flux
 | Tema | Decisão | Alternativas descartadas (motivo) |
 | --- | --- | --- |
 | Quem vigia | `MonitorJob` determinístico no worker, com alerta guardado e publicado | Agente LLM (custo por ciclo, texto não determinístico, risco de soar como recomendação e nada a acrescentar a uma regra de variação); cálculo sob demanda (não avisa ninguém) |
-| Regra | `\|changePct\| ≥ MONITOR_MOVE_THRESHOLD_PCT` (inteiro de 1 a 50, padrão 5), inclusivo e comparado em BigInt; só cotação com mercado `open` e `source` do modo atual; `\|changePct\| ≥ 100000` ignorado | Comparar em ponto flutuante (o limite exato erraria); aceitar cotação de mercado fechado ou de outro modo (alerta com dado velho) |
+| Regra | `\|changePct\| ≥ MONITOR_MOVE_THRESHOLD_PCT` (inteiro de 1 a 50, padrão 5), inclusivo e comparado em BigInt; só cotação do mesmo dia de São Paulo que o pregão do ciclo e com idade até `MARKET_QUOTE_MAX_AGE_MS`, com `source` do modo atual; `\|changePct\| ≥ 100000` ignorado | Comparar em ponto flutuante (o limite exato erraria); conferir o `marketState` da cotação (o `monitorQuotes` o preenche pelo relógio, então o fechamento de ontem passaria como alerta de hoje); aceitar cotação de outro modo |
 | Orçamento de cotas | Terceiro orçamento, `MARKET_MONITOR_MAX_CALLS_PER_MIN` (padrão 10), separado das rotas e do `priceFor`; esgotado → o ciclo para sem erro | Dividir o orçamento das rotas (o monitor tiraria cota do preço das ordens) |
-| Rodízio | Cursor `monitor:cursor`, até `MONITOR_MAX_SYMBOLS_PER_TICK` símbolos por ciclo (padrão 10, alinhado ao orçamento do monitor); o cursor para antes do primeiro símbolo sem tentativa; símbolo desconhecido conta como feito | Padrão de 20 (passava do orçamento e o ciclo terminava esgotado); contar o desconhecido como pendente (travava o rodízio) |
+| Rodízio | Cursor `monitor:<modo>:cursor`, até `MONITOR_MAX_SYMBOLS_PER_TICK` símbolos por ciclo (padrão 10, alinhado ao orçamento do monitor); o cursor para antes do primeiro símbolo sem tentativa; símbolo desconhecido e lote com erro do provedor contam como feitos | Padrão de 20 (passava do orçamento e o ciclo terminava esgotado); contar o desconhecido como pendente (travava o rodízio); deixar o erro do provedor derrubar o ciclo (o cursor não andava e o mesmo lote falhava para sempre, para todos os tenants); cursor sem o modo na chave (mock e live retomavam um do ponto do outro) |
 | Sem spam | Único `(tenant, cliente, ativo, dia de São Paulo, sentido)`; `ON CONFLICT DO NOTHING` e só o inserido é publicado | Alertar a cada ciclo |
 | Insert | Uma transação por alerta; a publicação vem depois do commit, em melhor esforço | Um lote por tenant (uma falha derrubaria os outros alertas) |
 | Enumerar tenants | `monitor_tenant_ids()` (migração 0009), `SECURITY DEFINER`, devolve só ids; cada tenant é lido sob RLS | Papel com `BYPASSRLS` (o `carina_app` não tem); ler `position` de todos (a RLS proíbe) |
@@ -119,6 +119,17 @@ Desenho no [spec](superpowers/specs/2026-11-21-monitor-carteira-design.md); flux
 - **Limite único por instância.** `MONITOR_MOVE_THRESHOLD_PCT` vale para todos os clientes e ativos.
 - **Dado de até 60 s.** As cotações vêm do cache de 60 s, e no plano gratuito da brapi o dado do
   provedor já tem cerca de 30 min de atraso.
+- **Plano gratuito e o frescor.** Só alerta cotação do mesmo dia de São Paulo e com idade até
+  `MARKET_QUOTE_MAX_AGE_MS` (5 min por padrão). Com o atraso de ~30 min do plano gratuito, o
+  padrão faz o monitor não alertar nada; subindo o limite para cobrir o atraso (como o `priceFor`
+  já exige), os primeiros ciclos depois da abertura ainda não alertam, porque a última cotação é
+  do pregão anterior.
+- **Cota real do provedor.** O orçamento próprio do monitor só separa as filas; toda chamada conta
+  na mesma cota do token da brapi. Com os padrões (10 símbolos a cada 10 min, por ~8 h de pregão)
+  são cerca de 480 chamadas por dia e ~10 mil por mês, e cada ciclo dispara até 10 requisições
+  seguidas, que sem token disputam o limite por IP com as rotas e o preço. Dimensione
+  `MONITOR_MAX_SYMBOLS_PER_TICK`, `MONITOR_INTERVAL_MS` e `MARKET_MONITOR_MAX_CALLS_PER_MIN` pelo
+  plano.
 - **Carteira grande leva vários ciclos.** O rodízio cota cerca de 10 símbolos por ciclo (padrão),
   a cada 10 minutos por padrão; uma carteira de 100 ativos leva 10 ciclos para ser coberta.
 - **Só no pregão.** Fora do horário (sem calendário de feriados) o ciclo é vazio.

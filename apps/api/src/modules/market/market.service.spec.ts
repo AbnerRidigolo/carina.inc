@@ -788,6 +788,31 @@ describe("MarketService: cache negativo e orçamento de chamadas ao provedor", (
     expect(provider.fetchQuotes).not.toHaveBeenCalled();
   });
 
+  it("erro do provedor num lote não descarta os lotes anteriores e marca o lote como tentado", async () => {
+    const { service, provider, logger } = setup({
+      monitorBudget: 10,
+      quotes: (symbols) =>
+        symbols.includes("VALE3")
+          ? Promise.reject(new MarketDataUnavailableError())
+          : Promise.resolve(symbols.map((s) => rawQuote(s, FRIDAY_OPEN - 1000))),
+    });
+    const r = await service.monitorQuotes(["PETR4", "VALE3", "ITUB4"]);
+    // o lote de PETR4 (antes) e o de ITUB4 (depois) voltam; o de VALE3 falhou
+    expect(r.quotes.map((q) => q.symbol)).toEqual(["PETR4", "ITUB4"]);
+    // o lote que falhou conta como tentado: não fica pendente e o rodízio passa por ele
+    expect(r).toMatchObject({ exhausted: false, pending: [] });
+    expect(provider.fetchQuotes).toHaveBeenCalledTimes(3);
+    // log só com a contagem e o nome do erro, sem o código do ativo
+    const logs = JSON.stringify(vi.mocked(logger.warn).mock.calls);
+    expect(logs).toContain("MarketDataUnavailableError");
+    expect(logs).not.toContain("VALE3");
+  });
+
+  it("monitorQuotes: erro que não é do provedor ainda lança", async () => {
+    const { service } = setup({ quotes: () => Promise.reject(new TypeError("bug")) });
+    await expect(service.monitorQuotes(["PETR4"])).rejects.toBeInstanceOf(TypeError);
+  });
+
   it("monitorQuotes valida os símbolos", async () => {
     const { service } = setup();
     await expect(service.monitorQuotes(["petr4"])).rejects.toBeInstanceOf(ValidationError);

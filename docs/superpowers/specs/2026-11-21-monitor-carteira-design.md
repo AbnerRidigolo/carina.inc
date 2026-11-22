@@ -30,7 +30,8 @@ ação, configuração de limite por cliente, cobrança.
 Anti-objetivos (falha mesmo que "funcione"):
 - estourar a cota do provedor de cotações ou tirar orçamento do preço das ordens e das rotas;
 - repetir o mesmo alerta a cada ciclo (spam);
-- alerta com dado velho (cotação de outro modo, de mercado fechado ou fora do cache válido);
+- alerta com dado velho (cotação de outro modo, de outro dia de São Paulo ou mais velha que
+  `MARKET_QUOTE_MAX_AGE_MS`);
 - vazar posição ou alerta de um tenant/cliente para outro;
 - qualquer texto que soe como recomendação de compra ou venda.
 
@@ -57,21 +58,26 @@ Consideradas:
   que devolve os tenants com posição `kind = 'investment'` e `asset_code` não nulo, sem tenant
   suspenso. Cada tenant sob `TenantContext.run` (RLS): lê `(client_id, asset_code)` distintos.
 - Símbolos: união de todos os tenants, ordenada, limitada a `MONITOR_MAX_SYMBOLS_PER_TICK` (env,
-  padrão 10) por ciclo, em rodízio: um cursor no Redis (`monitor:cursor`) guarda onde parou, para
+  padrão 10) por ciclo, em rodízio: um cursor no Redis (`monitor:<modo>:cursor`) guarda onde parou, para
   que carteiras grandes sejam cobertas ao longo dos ciclos. O limite por ciclo não deve passar do
   orçamento do monitor × símbolos por chamada (`MARKET_MONITOR_MAX_CALLS_PER_MIN` ×
   `MARKET_BRAPI_MAX_SYMBOLS_PER_CALL`), senão o ciclo termina esgotado.
 - Cotações por `MarketService.monitorQuotes(symbols)`: usa o cache de 60 s e um **terceiro
   orçamento** `market:<modo>:budget:monitor:<minuto>` com `MARKET_MONITOR_MAX_CALLS_PER_MIN` (env,
   padrão 10), separado das rotas e do preço. Orçamento esgotado → para de cotar neste ciclo, sem
-  erro (o rodízio retoma no próximo). Redis fora → ciclo pulado (o lock já depende dele).
+  erro (o rodízio retoma no próximo). Erro do provedor num lote (401/403/5xx, formato inválido) →
+  o lote conta como tentado: os outros lotes seguem e o rodízio passa por ele (um símbolo ruim não
+  trava o monitor). Redis fora → ciclo pulado (o lock já depende dele).
 - Uma falha num tenant é logada (só ids) e não impede os demais.
 
 ### 4.2 Regra
 
 Alerta quando `|changePct| ≥ MONITOR_MOVE_THRESHOLD_PCT` (env, padrão 5, entre 1 e 50), com a
-cotação `marketState === "open"`, `source` do modo atual e `changePct` não nulo. Sentido `up` ou
-`down`. Função pura `detectMove(quote, thresholdPct)`, testável sozinha.
+cotação do mesmo dia de São Paulo que o pregão do ciclo (`updatedAt`), com idade de até
+`MARKET_QUOTE_MAX_AGE_MS` (a mesma regra de frescor do `priceFor` em pregão), `source` do modo
+atual e `changePct` não nulo. Sentido `up` ou `down`. Função pura
+`detectMove(quote, { thresholdPct, mode, nowMs, tradingDay, maxAgeMs })`, testável sozinha. O
+`marketState` da cotação não entra: o `monitorQuotes` o preenche pelo relógio, não pela cotação.
 
 ### 4.3 Dado
 
@@ -92,8 +98,10 @@ tenant como as outras tabelas. Índice `(tenant_id, client_id, created_at DESC, 
 - Contrato compartilhado: `PortfolioAlertSchema` `{ id, assetCode, direction, changePct (string
   decimal), price (string decimal), tradingDay, createdAt }`.
 - Web: painel "Alertas da carteira" com a lista (busca na API ao abrir) e os novos alertas chegando
-  pelo WebSocket no topo. Texto fixo e neutro: "PETR4 caiu 6,2% hoje (R$ 31,40)." e, no rodapé,
-  "Variação do dia em relação ao fechamento anterior. Não é recomendação de investimento."
+  pelo WebSocket no topo (anunciados numa região `aria-live="polite"`). Texto fixo e neutro:
+  "PETR4 caiu 6,2% hoje (R$ 31,40)." quando o `tradingDay` do alerta é hoje em São Paulo, senão
+  "PETR4 caiu 6,2% em 18/11 (R$ 31,40)."; estado vazio "Nenhum alerta."; no rodapé, "Variação do
+  dia em relação ao fechamento anterior. Não é recomendação de investimento."
 
 ### 4.5 LGPD e logs
 
@@ -102,7 +110,8 @@ alerta guarda só ativo, variação e preço público.
 
 ## 5. Testes e aceite
 
-- Unitários: `detectMove` (limite exato, negativo, nulo, mercado fechado, source de outro modo);
+- Unitários: `detectMove` (limite exato, negativo, nulo, cotação de outro dia ou velha demais,
+  source de outro modo); erro do provedor num lote não trava o rodízio;
   rodízio do cursor; orçamento do monitor esgotado para o ciclo sem erro; ciclo fora do pregão não
   cota; lock pulado.
 - Integração (Postgres + Redis): ciclo com posições de dois tenants e cotações do mock forjadas →

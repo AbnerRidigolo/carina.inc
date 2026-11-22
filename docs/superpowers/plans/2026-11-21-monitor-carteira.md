@@ -13,11 +13,11 @@
 ## Global Constraints
 
 - Env (validadas em `apps/api/src/core/config/env.ts`, documentadas em `.env.example`): `MONITOR_INTERVAL_MS` padrão **600000**, mínimo **60000**; `MONITOR_MAX_SYMBOLS_PER_TICK` padrão **10** (1..200); `MONITOR_MOVE_THRESHOLD_PCT` padrão **5** (1..50); `MARKET_MONITOR_MAX_CALLS_PER_MIN` padrão **10** (1..10000).
-- Chaves Redis: lock `monitor:tick`; cursor `monitor:cursor`; orçamento `market:<modo>:budget:monitor:<minuto>`.
-- Só roda com `marketStateAt(now) === "open"`; alerta só de cotação `marketState === "open"`, `source` do modo e `changePct` não nulo.
+- Chaves Redis: lock `monitor:tick`; cursor `monitor:<modo>:cursor`; orçamento `market:<modo>:budget:monitor:<minuto>`.
+- Só roda com `marketStateAt(now) === "open"`; alerta só de cotação do mesmo dia de São Paulo que o pregão do ciclo e com idade até `MARKET_QUOTE_MAX_AGE_MS`, `source` do modo e `changePct` não nulo.
 - Um alerta por `(tenant_id, client_id, asset_code, trading_day, direction)`; `trading_day` é a data em `America/Sao_Paulo`.
 - Sem LLM, sem cobrança, sem audit novo. Logs só com ids e contagens.
-- Texto do alerta na web: "<ATIVO> caiu|subiu <X>% hoje (R$ <preço>)." e o rodapé fixo "Variação do dia em relação ao fechamento anterior. Não é recomendação de investimento."
+- Texto do alerta na web: "<ATIVO> caiu|subiu <X>% hoje (R$ <preço>)." quando o `tradingDay` do alerta é hoje em São Paulo, senão "<ATIVO> caiu|subiu <X>% em DD/MM (R$ <preço>)."; estado vazio "Nenhum alerta."; e o rodapé fixo "Variação do dia em relação ao fechamento anterior. Não é recomendação de investimento."
 - Cada tarefa roda, antes do commit: `pnpm lint` (ESLint limpo; sem `!` não-nulo), `pnpm typecheck`, `pnpm test`; tarefas que tocam banco, worker ou API rodam também `test:int` e `test:e2e` da API (Postgres 16 com pgvector e Redis locais, `TEST_DATABASE_URL`/`TEST_REDIS_URL`).
 - Português em textos, comentários, testes e commits.
 - Redis de teste: escolher DBs livres em `apps/api/test/setup/redis-dbs.ts` para os specs novos.
@@ -69,7 +69,7 @@
 
 **Interfaces:**
 - Produces:
-  - `detectMove(quote: Quote, thresholdPct: number, mode: "live" | "mock"): { direction: "up" | "down"; changePct: string; price: string } | null`
+  - `detectMove(quote: Quote, rule: { thresholdPct: number; mode: "live" | "mock"; nowMs: number; tradingDay: string; maxAgeMs: number }): { direction: "up" | "down"; changePct: string; price: string } | null`
   - `MonitorRepository.tenantIds(): Promise<string[]>` (via `monitor_tenant_ids()`, SECURITY DEFINER, dono `carina_migrator`, EXECUTE só para `carina_app`, ignora tenant com `suspended_at`)
   - `MonitorRepository.watchList(tx): Promise<{ clientId: string; assetCode: string }[]>` (sob RLS; `kind = 'investment'`, `asset_code` não nulo, distintos, `asset_code` em maiúsculas sem espaços)
   - `MonitorRepository.insertIfNew(tx, row: { clientId; assetCode; direction; changePct; price; tradingDay }): Promise<PortfolioAlert | null>` (`ON CONFLICT DO NOTHING RETURNING`)
@@ -91,7 +91,7 @@
 
 **Interfaces:**
 - Consumes: Tasks 2–3.
-- Produces: `MonitorJob.runOnce(): Promise<{ skipped: boolean; closed: boolean; tenants: number; symbols: number; alerts: number; exhausted: boolean }>`; constantes `MONITOR_LOCK_KEY = "monitor:tick"`, `MONITOR_CURSOR_KEY = "monitor:cursor"`. Publica `monitor.alert` em `inbox.events` para cada alerta inserido, depois do COMMIT. Logger por token `MONITOR_LOGGER`.
+- Produces: `MonitorJob.runOnce(): Promise<{ skipped: boolean; closed: boolean; tenants: number; symbols: number; alerts: number; exhausted: boolean }>`; constantes `MONITOR_LOCK_KEY = "monitor:tick"`, `monitorCursorKey(modo) = "monitor:<modo>:cursor"`. Publica `monitor.alert` em `inbox.events` para cada alerta inserido, depois do COMMIT. Logger por token `MONITOR_LOGGER`.
 
 Rodízio: símbolos distintos ordenados; o cursor guarda o último símbolo cotado; o ciclo pega os próximos `MONITOR_MAX_SYMBOLS_PER_TICK` depois dele, dando a volta ao fim da lista; se o orçamento esgotar, o cursor avança só até o último cotado.
 
@@ -126,7 +126,7 @@ Rodízio: símbolos distintos ordenados; o cursor guarda o último símbolo cota
 
 **Interfaces:**
 - Consumes: Tasks 1, 5.
-- Produces: painel "Alertas da carteira": busca `GET /alerts` ao abrir, mostra os novos `portfolio_alert` no topo sem duplicar (por `id`), "Carregar mais" com `nextCursor`, estado vazio "Nenhum alerta hoje.", texto e rodapé do Global Constraints, valores com o formatador de R$ e % que a web já usa.
+- Produces: painel "Alertas da carteira": busca `GET /alerts` ao abrir, mostra os novos `portfolio_alert` no topo sem duplicar (por `id`), "Carregar mais" com `nextCursor`, estado vazio "Nenhum alerta.", texto e rodapé do Global Constraints, valores com o formatador de R$ e % que a web já usa.
 
 - [ ] **Step 1: Write the failing tests**: "lista os alertas da API com o texto fixo"; "alerta ao vivo entra no topo e não duplica um já listado"; "carregar mais usa o cursor"; "estado vazio"; "rodapé diz que não é recomendação".
 - [ ] **Step 2: Run** `pnpm --filter @carina/web test` → FAIL.

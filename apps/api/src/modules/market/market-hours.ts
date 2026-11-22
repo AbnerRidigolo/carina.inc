@@ -34,3 +34,12 @@ export function saoPauloDate(ms: number): string {
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
+
+/**
+ * Idade da cotação (`nowMs − updatedAt`) dentro de `maxAgeMs`; hora futura ou ilegível não vale.
+ * A mesma regra do frescor do `priceFor` e do monitor de carteira.
+ */
+export function quoteAgeWithin(updatedAt: string, nowMs: number, maxAgeMs: number): boolean {
+  const age = nowMs - Date.parse(updatedAt);
+  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
+}

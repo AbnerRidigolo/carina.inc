@@ -1,11 +1,14 @@
 import type { PortfolioAlert, Quote } from "@carina/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TenantContext } from "../../core/context/tenant-context.js";
+import { MarketDataUnavailableError } from "../../core/errors/domain-errors.js";
+import { MarketService } from "../market/market.service.js";
+import type { RawQuote } from "../market/providers/types.js";
 import {
-  MONITOR_CURSOR_KEY,
   MONITOR_LOCK_KEY,
   MonitorJob,
   type MonitorLogger,
+  monitorCursorKey,
 } from "./monitor.job.js";
 import type { NewAlert, WatchItem } from "./monitor.repository.js";
 
@@ -14,6 +17,8 @@ const OPEN = Date.parse("2026-11-16T18:00:00.000Z");
 // sábado
 const CLOSED = Date.parse("2026-11-14T15:00:00.000Z");
 const INTERVAL = 600_000;
+/** Cursor do rodízio no modo dos testes (mock). */
+const MONITOR_CURSOR_KEY = monitorCursorKey("mock");
 
 const T1 = "11111111-1111-4111-8111-111111111111";
 const T2 = "22222222-2222-4222-8222-222222222222";
@@ -65,6 +70,7 @@ function budgetMarket(opts: { budget: number; unknown?: string[]; cached?: strin
 
 interface SetupOpts {
   now?: number;
+  mode?: "live" | "mock";
   lock?: boolean;
   workers?: "true" | "false";
   maxSymbols?: number;
@@ -152,7 +158,8 @@ function setup(opts: SetupOpts = {}) {
   const job = new MonitorJob(
     {
       WORKERS_ENABLED: opts.workers ?? "false",
-      MARKET_MODE: "mock",
+      MARKET_MODE: opts.mode ?? "mock",
+      MARKET_QUOTE_MAX_AGE_MS: 300_000,
       MONITOR_INTERVAL_MS: INTERVAL,
       MONITOR_MAX_SYMBOLS_PER_TICK: opts.maxSymbols ?? 10,
       MONITOR_MOVE_THRESHOLD_PCT: 5,
@@ -249,7 +256,18 @@ describe("MonitorJob.runOnce", () => {
     expect(calls).toEqual([all.slice(0, 20), all.slice(20, 40), all.slice(40), all.slice(0, 20)]);
     expect(runs.map((r) => r.symbols)).toEqual([20, 20, 5, 20]);
     expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S19");
-    expect(MONITOR_CURSOR_KEY).toBe("monitor:cursor");
+  });
+
+  it("cursor do rodízio é por modo: monitor:<modo>:cursor", async () => {
+    expect(monitorCursorKey("mock")).toBe("monitor:mock:cursor");
+    expect(monitorCursorKey("live")).toBe("monitor:live:cursor");
+    // o job live não lê nem grava o cursor do mock
+    const s = setup({ mode: "live" });
+    s.store.set("monitor:mock:cursor", "PETR4");
+    await s.job.runOnce();
+    expect(s.market.monitorQuotes).toHaveBeenLastCalledWith(["ITUB4", "PETR4", "VALE3"]);
+    expect(s.store.get("monitor:live:cursor")).toBe("VALE3");
+    expect(s.store.get("monitor:mock:cursor")).toBe("PETR4");
   });
 
   it("rodízio: símbolo do cursor que saiu da carteira não trava; segue do próximo maior", async () => {
@@ -320,6 +338,59 @@ describe("MonitorJob.runOnce", () => {
     expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S14");
   });
 
+  it("erro do provedor num símbolo não trava o rodízio", async () => {
+    const all = symbols(30);
+    const s = setup({
+      watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) },
+      moves: { S02: "-6" },
+    });
+    // MarketService de verdade (1 símbolo por chamada): o provedor falha sempre em S01
+    const fetchQuotes = vi.fn((list: string[]): Promise<RawQuote[]> => {
+      if (list.includes("S01")) return Promise.reject(new MarketDataUnavailableError());
+      return Promise.resolve(
+        list.map((sym): RawQuote => {
+          const raw: Partial<Quote> = quote(sym, sym === "S02" ? "-6" : "0");
+          delete raw.marketState;
+          return raw as RawQuote;
+        }),
+      );
+    });
+    const counters = new Map<string, number>();
+    const service = new MarketService(
+      { fetchQuotes, fetchHistory: vi.fn() },
+      { fetchMacro: vi.fn() },
+      {
+        get: () => Promise.resolve(null), // sem cache: cada ciclo vai ao provedor
+        set: () => Promise.resolve("OK"),
+        eval: (_script: string, _n: number, key: string, units: string) => {
+          const next = (counters.get(key) ?? 0) + Number(units);
+          counters.set(key, next);
+          return Promise.resolve(next);
+        },
+      } as never,
+      () => OPEN,
+      {
+        NODE_ENV: "test",
+        MARKET_MODE: "mock",
+        MARKET_QUOTE_MAX_AGE_MS: 300_000,
+        MARKET_CLOSED_MAX_AGE_DAYS: 5,
+        MARKET_BRAPI_MAX_SYMBOLS_PER_CALL: 1,
+        MARKET_PROVIDER_MAX_CALLS_PER_MIN: 30,
+        MARKET_PRICE_MAX_CALLS_PER_MIN: 30,
+        MARKET_MONITOR_MAX_CALLS_PER_MIN: 99,
+      },
+      { warn: vi.fn() },
+    );
+    s.market.monitorQuotes.mockImplementation((list: string[]) => service.monitorQuotes(list));
+    // o ciclo não falha, o cursor passa por S01 e o alerta de S02 (no mesmo lote) sai
+    expect(await s.job.runOnce()).toMatchObject({ symbols: 10, alerts: 1, exhausted: false });
+    expect(s.store.get(MONITOR_CURSOR_KEY)).toBe("S09");
+    await s.job.runOnce();
+    const calls = s.market.monitorQuotes.mock.calls.map(([list]) => list);
+    expect(calls).toEqual([all.slice(0, 10), all.slice(10, 20)]);
+    expect(s.logger.error).not.toHaveBeenCalled();
+  });
+
   it("cache expirado entre ciclos não faz o rodízio repetir a mesma janela", async () => {
     const all = symbols(30);
     const s = setup({ watch: { [T1]: all.map((assetCode) => ({ clientId: C1, assetCode })) } });
@@ -364,6 +435,26 @@ describe("MonitorJob.runOnce", () => {
         alert: expect.objectContaining({ assetCode: "PETR4", direction: "down" }),
       }),
     ]);
+  });
+
+  it("cotação do pregão anterior ou velha demais não vira alerta de hoje", async () => {
+    const s = setup({ moves: { PETR4: "-6.2", ITUB4: "7" } });
+    s.market.monitorQuotes.mockImplementationOnce((list: string[]) =>
+      Promise.resolve({
+        quotes: list.map((sym) => ({
+          ...quote(sym, sym === "VALE3" ? "0" : "-6.2"),
+          // PETR4: fechamento de sexta; ITUB4: hoje, mas 30 min atrás (atraso do plano gratuito)
+          updatedAt:
+            sym === "PETR4"
+              ? "2026-11-13T20:59:00.000Z"
+              : new Date(OPEN - 30 * 60_000).toISOString(),
+        })),
+        exhausted: false,
+        pending: [] as string[],
+      }),
+    );
+    expect(await s.job.runOnce()).toMatchObject({ alerts: 0 });
+    expect(s.repo.insertIfNew).not.toHaveBeenCalled();
   });
 
   it("alerta que já existia (insertIfNew → null) não é publicado", async () => {

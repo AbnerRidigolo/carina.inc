@@ -68,3 +68,23 @@ export function formatVariationPct(changePct: string): string {
   if (!SignedDecimalSchema.safeParse(changePct).success) return "—";
   return variation.format(changePct.replace(/^-/, "") as `${number}`);
 }
+
+const saoPauloDay = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Sao_Paulo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** Data de São Paulo (`YYYY-MM-DD`) no instante `ms`: o mesmo dia de pregão do monitor. */
+export function saoPauloDate(ms: number): string {
+  const parts = saoPauloDay.formatToParts(new Date(ms));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/** `YYYY-MM-DD` → "DD/MM", direto da string (sem `Date` nem fuso); fora do formato → "—". */
+export function formatDayMonth(day: string): string {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(day);
+  return m ? `${m[2] ?? ""}/${m[1] ?? ""}` : "—";
+}

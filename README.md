@@ -15,6 +15,7 @@ Redis (limites atômicos, Streams) · LangGraph.js / LangChain.js · Zod compart
 
 - [Demo local](#demo-local)
 - [Importação de arquivos](#importação-de-arquivos)
+- [Monitor de carteira](#monitor-de-carteira)
 - [Arquitetura](#arquitetura)
 - [Garantias provadas por testes](#garantias-provadas-por-testes)
 - [Como rodar os testes](#como-rodar-os-testes)
@@ -32,8 +33,8 @@ docker compose up --build
 
 Abra http://localhost:5173 (web). A API responde em http://localhost:3000/api/health e
 `/api/ready`. Todas as portas são publicadas só em `127.0.0.1`. Ordem de subida: `postgres` e
-`redis` → `migrate` → `seed` → `api` → `web`; o `worker` (sync, retomada de aprovações e
-reconciliação) sobe depois do `migrate`.
+`redis` → `migrate` → `seed` → `api` → `web`; o `worker` (sync, retomada de aprovações,
+reconciliação e monitor de carteira) sobe depois do `migrate`.
 
 Se você já tinha subido a demo antes de o tenant de demo ganhar id fixo, apague os volumes antigos
 com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
@@ -135,6 +136,17 @@ de investimentos do OFX (`INVSTMTRS`) não é suportado; reenviar um job falho r
 (e cobra de novo os lotes regravados). Decisões, garantias e o restante das limitações estão em
 [Importação de arquivos](docs/DECISOES-E-GARANTIAS.md#importação-de-arquivos-fase-2-entrega-1).
 
+## Monitor de carteira
+
+Com o pregão aberto, um job do worker cota os ativos das posições de investimento (cache de 60 s e
+orçamento próprio de chamadas) e registra um alerta quando a variação do dia chega a
+`MONITOR_MOVE_THRESHOLD_PCT` (padrão 5%): no máximo um por cliente, ativo, dia e sentido. É
+determinístico, sem LLM e sem cobrança. O alerta é lido em `GET /api/clients/:clientId/alerts`
+(escopo `chat`), chega ao vivo pelo WebSocket (`portfolio_alert`) e aparece no painel "Alertas da
+carteira" da web. Não há notícias, volume anômalo nem canal externo (Fase 3); detalhes em
+[ARQUITETURA](docs/ARCHITECTURE.md#15-monitor-de-carteira-monitor) e
+[limitações](docs/DECISOES-E-GARANTIAS.md#limitações-do-monitor-de-carteira).
+
 ## Arquitetura
 
 ```mermaid
@@ -145,7 +157,7 @@ flowchart LR
     graph["Orquestrador LangGraph.js<br/>classify → retrieve → especialistas → synthesize<br/>executor → approval (interrupt)"]
   end
   subgraph worker["processo worker"]
-    jobs["Sync · ResumeWorker · Reconciliação"]
+    jobs["Sync · ResumeWorker · Reconciliação · Monitor"]
   end
   pg[("PostgreSQL 17 + pgvector<br/>RLS FORCE · checkpoints do grafo")]
   redis[("Redis 7<br/>Streams · limites atômicos · tickets WS")]
@@ -285,8 +297,8 @@ A lista completa, com os próximos passos de engenharia em ordem de prioridade, 
 já feitos; notas de corretagem em PDF na entrega 2), AOPs, `evaluation`, `builder` e os agentes restantes.
 Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
 categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
-base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor fica para a
-entrega 2, porque depende de um canal de alerta.
+base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor de carteira também
+está feito (alerta pela API e pelo WebSocket, sem canal externo).
 
-**Fase 3 — integrações e remoção do Python:** notificações (WhatsApp e SMTP), monitor de carteiras
+**Fase 3 — integrações e remoção do Python:** notificações externas (WhatsApp, SMTP e webhook) para os alertas do monitor
 e remoção de `legacy/python` e do job `legacy-python` do CI.

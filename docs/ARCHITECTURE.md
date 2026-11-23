@@ -512,22 +512,29 @@ determinística, portada de `legacy/python/carina/data_engine/evaluation.py`. S�
 
 ```text
 GET  /api/eval/cases?category=   → catalog(category)           (pergunta, sem gabarito; grátis)
-POST /api/eval/submit            → evaluate(answers) → billing.record(evaluation, clientId nulo)
-                                    → relatório + usage { evaluation, "5.00" }
+POST /api/eval/submit            → evaluate(answers) → quota.reserve(tenant)
+                                    → billing.record(evaluation, clientId nulo)
+                                      (falhou → quota.refund(tenant) e repassa o erro)
+                                    → relatório (só contagens) + usage { evaluation, "5.00" }
 ```
 
 - **Escopo e guards.** As duas rotas exigem `eval:run`; passam pelos guards globais na mesma ordem
-  das demais rotas (ApiKeyGuard, depois RateLimitGuard). Não reservam a cota mensal, como as rotas
-  de mercado.
+  das demais rotas (ApiKeyGuard, depois RateLimitGuard). O submit também reserva 1 unidade da cota
+  mensal (`QuotaService`, como o chat), DEPOIS de corrigir: 422 não reserva; cota esgotada → 429
+  com `Retry-After`, sem cobrança; se a cobrança falha, a reserva é devolvida (`refund`, e uma falha
+  do refund só vai para o log, com ids). O catálogo não reserva cota.
 - **Dataset e gabarito.** [`dataset.ts`](../apps/api/src/modules/evaluation/dataset.ts) fica só na
   API: `packages/shared` tem apenas a visão pública (`EvalCaseView`: id, categoria, dificuldade e
-  pergunta), porque ele vai para o bundle da web.
+  pergunta), porque ele vai para o bundle da web. O relatório também não leva texto do gabarito:
+  cada caso traz `factsTotal`, `factsMatched` e `forbiddenHits` (contagens), score, `passed` e as
+  flags de compliance. O Python devolvia as descrições dos fatos; aqui elas não saem da API.
 - **Correção.** [`grading.ts`](../apps/api/src/modules/evaluation/grading.ts): `normalize`
   (minúsculas, `,` → `.`, NFKD sem marcas, espaços colapsados), fatos por substring de alternativas,
   afirmações proibidas, `inspectText` do Watchtower como `complianceFlags` e média de 4 casas com o
   mesmo desempate do `round` do Python. Execução parcial é permitida (1 a 42 respostas, até 20 000
-  caracteres cada); caso inexistente é 422 com a lista de ids.
+  caracteres cada, id no formato `^[a-z0-9-]{1,64}$`, conferido no objeto cru para recusar
+  `__proto__` e não repetir o id no erro); caso inexistente é 422 com até 10 ids e "e mais K".
 - **Cobrança.** `evaluation` a R$ 5,00 por submissão, registrada DEPOIS de corrigir, com
-  `clientId` nulo (o benchmark é do tenant, não de um cliente). 403 e 422 não cobram.
+  `clientId` nulo (o benchmark é do tenant, não de um cliente). 403, 422 e 429 não cobram.
 - **LGPD.** Respostas e gabarito nunca vão para log, erro ou auditoria: o corpo só é lido pelo
   motor, e os erros e logs levam ids e contagens.

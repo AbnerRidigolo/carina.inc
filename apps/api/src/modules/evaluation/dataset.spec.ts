@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EVAL_CATEGORIES } from "@carina/shared";
+import { EVAL_CASE_ID_PATTERN, EVAL_CATEGORIES } from "@carina/shared";
 import { EVAL_DATASET } from "./dataset.js";
 
 describe("dataset do SEAL BR", () => {
@@ -7,6 +7,10 @@ describe("dataset do SEAL BR", () => {
     const ids = EVAL_DATASET.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(EVAL_DATASET).toHaveLength(42);
+  });
+
+  it("todo id casa o formato aceito no submit (^[a-z0-9-]{1,64}$)", () => {
+    for (const c of EVAL_DATASET) expect(c.id).toMatch(EVAL_CASE_ID_PATTERN);
   });
 
   it("cobre todas as categorias", () => {

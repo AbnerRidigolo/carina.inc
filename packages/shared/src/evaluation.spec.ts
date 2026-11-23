@@ -43,6 +43,19 @@ describe("EvalSubmitSchema", () => {
     const many = Object.fromEntries(Array.from({ length: 43 }, (_, i) => [`c${i}`, "r"]));
     expect(EvalSubmitSchema.safeParse({ answers: many }).success).toBe(false);
   });
+  it("ids só com [a-z0-9-], de 1 a 64 caracteres", () => {
+    expect(EvalSubmitSchema.safeParse({ answers: { "acoes-isencao-20k": "r" } }).success).toBe(
+      true,
+    );
+    expect(EvalSubmitSchema.safeParse({ answers: { ["a".repeat(64)]: "r" } }).success).toBe(true);
+    for (const bad of ["a".repeat(65), "A", "a b", "a_b", "", "ação", "a/b"]) {
+      expect(EvalSubmitSchema.safeParse({ answers: { [bad]: "r" } }).success, bad).toBe(false);
+    }
+  });
+  it("recusa a chave __proto__ (antes era descartada em silêncio)", () => {
+    const body: unknown = JSON.parse('{"answers":{"__proto__":"x","ptax":"y"}}');
+    expect(EvalSubmitSchema.safeParse(body).success).toBe(false);
+  });
   it("limita o texto a 20 000 caracteres", () => {
     expect(EvalSubmitSchema.safeParse({ answers: { a: "x".repeat(20_000) } }).success).toBe(true);
     expect(EvalSubmitSchema.safeParse({ answers: { a: "x".repeat(20_001) } }).success).toBe(false);
@@ -55,14 +68,30 @@ describe("EvalReportSchema", () => {
     category: "macro",
     score: 0.5,
     passed: false,
-    matched: ["a"],
-    missing: ["b"],
-    forbiddenHits: [],
+    factsTotal: 2,
+    factsMatched: 1,
+    forbiddenHits: 0,
     complianceFlags: [],
   };
   it("valida o resultado de um caso", () => {
     expect(EvalCaseResultSchema.safeParse(result).success).toBe(true);
     expect(EvalCaseResultSchema.safeParse({ ...result, score: 1.5 }).success).toBe(false);
+  });
+  it("o resultado de um caso só traz contagens, nunca o texto do gabarito", () => {
+    const parsed = EvalCaseResultSchema.parse({ ...result, matched: ["a"], missing: ["b"] });
+    expect(Object.keys(parsed).sort()).toEqual([
+      "caseId",
+      "category",
+      "complianceFlags",
+      "factsMatched",
+      "factsTotal",
+      "forbiddenHits",
+      "passed",
+      "score",
+    ]);
+    expect(EvalCaseResultSchema.safeParse({ ...result, forbiddenHits: ["x"] }).success).toBe(false);
+    expect(EvalCaseResultSchema.safeParse({ ...result, factsTotal: 0.5 }).success).toBe(false);
+    expect(EvalCaseResultSchema.safeParse({ ...result, factsMatched: 3 }).success).toBe(false);
   });
   it("valida o relatório com o uso cobrado", () => {
     const report = {

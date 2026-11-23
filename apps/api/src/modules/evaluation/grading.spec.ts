@@ -24,7 +24,8 @@ describe("normalize", () => {
   it("NFD e vírgula decimal casam a alternativa", () => {
     const nfd = "Isenção: aliquota de 22,5%".normalize("NFD");
     const r = gradeCase(caso, nfd);
-    expect(r.matched).toEqual(["alíquota 22,5%", "isenção"]);
+    expect(r.factsMatched).toBe(2);
+    expect(r.factsTotal).toBe(2);
     expect(r.passed).toBe(true);
   });
 });
@@ -34,20 +35,38 @@ describe("gradeCase", () => {
     const r = gradeCase(caso, "Há isenção até o limite; acima, a alíquota é de 22,5%.");
     expect(r.passed).toBe(true);
     expect(r.score).toBe(1);
-    expect(r.missing).toEqual([]);
+    expect(r.factsMatched).toBe(r.factsTotal);
   });
 
-  it("resposta incompleta lista os fatos faltantes", () => {
+  it("resposta incompleta conta os fatos faltantes (sem dizer quais)", () => {
     const r = gradeCase(caso, "A alíquota é de 22,5%.");
     expect(r.passed).toBe(false);
     expect(r.score).toBe(0.5);
-    expect(r.missing).toEqual(["isenção"]);
+    expect(r.factsTotal - r.factsMatched).toBe(1);
+  });
+
+  it("o resultado só traz contagens: nenhum texto do gabarito", () => {
+    const r = gradeCase(caso, "x");
+    expect(Object.keys(r).sort()).toEqual([
+      "caseId",
+      "category",
+      "complianceFlags",
+      "factsMatched",
+      "factsTotal",
+      "forbiddenHits",
+      "passed",
+      "score",
+    ]);
+    const raw = JSON.stringify(r);
+    for (const f of [...caso.expectedFacts, ...caso.forbidden]) {
+      expect(raw).not.toContain(f.description);
+    }
   });
 
   it("afirmação proibida reprova mesmo com fatos corretos", () => {
     const r = gradeCase(caso, "Isenção até o limite; acima, 22,5% — ou seria 27,5%?");
     expect(r.passed).toBe(false);
-    expect(r.forbiddenHits).toEqual(["27,5% (errado)"]);
+    expect(r.forbiddenHits).toBe(1);
   });
 
   it("violação de compliance é flagrada", () => {
@@ -123,6 +142,22 @@ describe("evaluate", () => {
     expect(() => evaluate({ "nao-existe": "x", "outro-id": "y" })).toThrow(/nao-existe, outro-id/);
   });
 
+  it("lista no máximo 10 ids inexistentes, seguidos de 'e mais K'", () => {
+    const answers = Object.fromEntries(
+      Array.from({ length: 15 }, (_, i) => [`nao-existe-${String(i).padStart(2, "0")}`, "x"]),
+    );
+    try {
+      evaluate(answers);
+      expect.unreachable();
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("nao-existe-00");
+      expect(msg).toContain("nao-existe-09");
+      expect(msg).not.toContain("nao-existe-10");
+      expect(msg).toContain("e mais 5");
+    }
+  });
+
   it("o erro de caso inexistente não carrega o texto das respostas", () => {
     try {
       evaluate({ "nao-existe": "SEGREDO-DA-RESPOSTA" });
@@ -136,7 +171,8 @@ describe("evaluate", () => {
 /**
  * Paridade com o Python 3 (legacy/python/carina/data_engine/evaluation.py::EvalCase.grade).
  * Os resultados esperados foram gerados rodando o Python sobre estas respostas; os testes não
- * precisam do Python. Flags de compliance: só os códigos (a forma da flag é coberta em
+ * precisam do Python. O Python devolve as descrições dos fatos (`matched`, `missing`,
+ * `forbidden_hits`); o TS só devolve contagens, então a paridade compara `len()` dessas listas. Flags de compliance: só os códigos (a forma da flag é coberta em
  * watchtower/inspect-text.parity.spec.ts).
  */
 interface ParityRow {
@@ -273,11 +309,19 @@ describe("paridade com o Python", () => {
     expect({
       score: r.score,
       passed: r.passed,
-      matched: r.matched,
-      missing: r.missing,
+      factsTotal: r.factsTotal,
+      factsMatched: r.factsMatched,
       forbiddenHits: r.forbiddenHits,
       flagCodes: r.complianceFlags.map((f) => f.code),
-    }).toEqual(row.expected);
+    }).toEqual({
+      // O relatório só traz contagens; elas saem das listas que o Python devolve.
+      score: row.expected.score,
+      passed: row.expected.passed,
+      factsTotal: row.expected.matched.length + row.expected.missing.length,
+      factsMatched: row.expected.matched.length,
+      forbiddenHits: row.expected.forbiddenHits.length,
+      flagCodes: row.expected.flagCodes,
+    });
   });
 
   it("agregado idêntico ao do Python para as 6 respostas finais por caso", () => {

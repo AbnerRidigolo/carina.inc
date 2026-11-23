@@ -25,7 +25,7 @@
 
 1. **Resposta com acento decomposto e vírgula decimal** ("22,5%" em NFD) casa a alternativa "22.5%". → Task 1.
 2. **Resposta enorme ou 43 casos**: 422 antes de corrigir, sem cobrança. → Task 2.
-3. **JSON do catálogo e do relatório**: nenhuma chave `expectedFacts`/`forbidden`/`reference`/`alternatives` em lugar nenhum (busca recursiva no corpo). → Task 2.
+3. **JSON do catálogo e do relatório**: nenhuma chave `expectedFacts`/`forbidden`/`reference`/`alternatives`/`matched`/`missing` em lugar nenhum e nenhum texto de fato ou referência do dataset em nenhuma string (busca recursiva no corpo, com submissão toda errada e toda certa); o relatório só traz contagens (`factsTotal`, `factsMatched`, `forbiddenHits`). → Task 2.
 4. **Mesmo id repetido / categoria inválida** no catálogo → 422 com as categorias válidas. → Task 2.
 5. **Paridade**: para respostas de exemplo, o resultado TS é igual ao do Python. → Task 1.
 
@@ -53,7 +53,7 @@
 
 **Interfaces:**
 - Consumes: Task 1.
-- Produces: `GET /api/eval/cases?category=` e `POST /api/eval/submit` com `@RequireScopes("eval:run")`, padrão de cota/limite/cobrança de `market.controller.ts`.
+- Produces: `GET /api/eval/cases?category=` e `POST /api/eval/submit` com `@RequireScopes("eval:run")`, padrão de limite/cobrança de `market.controller.ts` e reserva/devolução da cota mensal como o `ChatService` (revisão final).
 
 - [ ] **Step 1: Write the failing tests**: e2e "sem eval:run → 403"; "catálogo traz 42 casos sem gabarito (busca recursiva por chaves proibidas)"; "categoria inválida → 422"; "submit corrige, agrega e cobra uma vez (usage evaluation 5.00)"; "caso inexistente → 422 sem cobrança"; "43 respostas ou resposta > 20 000 → 422 sem cobrança"; "nenhum log contém o texto das respostas"; seed int "chave de demo tem eval:run".
 - [ ] **Step 2: Run** → FAIL.

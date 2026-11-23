@@ -43,10 +43,10 @@ com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
 O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a base de conhecimento
 (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
 
-| Variável            | Valor padrão                               | Escopos                              |
-| ------------------- | ------------------------------------------ | ------------------------------------ |
+| Variável            | Valor padrão                               | Escopos                                         |
+| ------------------- | ------------------------------------------ | ----------------------------------------------- |
 | `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run` |
-| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`               |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`                          |
 
 > **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
 > `NODE_ENV=production` o seed recusa as chaves fixas, a menos que `SEED_ALLOW_DEMO_KEYS=true`.
@@ -163,9 +163,13 @@ curl -s -X POST localhost:3000/api/eval/submit -H "$APP" -H 'Content-Type: appli
 ```
 
 O catálogo é grátis. Cada submissão corrigida custa R$ 5,00 (`evaluation`), cobrada uma vez e só
-depois de corrigir; entrada inválida (422: caso inexistente, mais de 42 respostas, resposta com mais
-de 20 000 caracteres) não cobra. Respostas e gabarito nunca vão para log. Não há tela na web nem
-histórico salvo; detalhes em
+depois de corrigir, e gasta 1 unidade da cota mensal do tenant (esgotada: 429 com `Retry-After`, sem
+cobrança); entrada inválida (422: caso inexistente, id fora de `^[a-z0-9-]{1,64}$`, mais de 42
+respostas, resposta com mais de 20 000 caracteres) não cobra nem gasta cota. O relatório traz, por
+caso, só contagens (`factsTotal`, `factsMatched`, `forbiddenHits`), nunca o texto dos fatos
+esperados: assim o benchmark não pode ser colhido submetendo respostas erradas (o Python devolvia
+as descrições). Respostas e gabarito nunca vão para log. Não há tela na web nem histórico salvo;
+detalhes em
 [ARQUITETURA](docs/ARCHITECTURE.md#16-benchmark-seal-br-evaluation) e
 [decisões](docs/DECISOES-E-GARANTIAS.md#benchmark-seal-br-fase-2-entrega-3).
 
@@ -250,8 +254,9 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   [`imports.e2e.spec.ts`](apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo de novo…"),
   [`rls-isolation.int.spec.ts`](apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não
   enxerga import_file de A…").
-- **Benchmark SEAL BR**: catálogo sem gabarito, escopo `eval:run`, cobrança de R$ 5,00 só depois de
-  corrigir (422 não cobra) e nenhuma resposta nos logs:
+- **Benchmark SEAL BR**: catálogo e relatório sem gabarito (o relatório só traz contagens), escopo
+  `eval:run`, cobrança de R$ 5,00 só depois de corrigir (422 não cobra), cota mensal (429 sem
+  cobrança) e nenhuma resposta nos logs:
   [`evaluation.e2e.spec.ts`](apps/api/test/evaluation/evaluation.e2e.spec.ts),
   [`grading.spec.ts`](apps/api/src/modules/evaluation/grading.spec.ts).
 - **Fluxo completo** pela fiação de produção:

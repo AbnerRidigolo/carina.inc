@@ -47,22 +47,22 @@ export function round4(x: number): number {
   return Number(fixed);
 }
 
+/**
+ * Corrige um caso. O resultado só traz contagens (fatos esperados, encontrados e proibidos): as
+ * descrições do gabarito nunca saem do servidor, ao contrário do Python, que as devolvia.
+ */
 export function gradeCase(c: EvalCase, answer: string): EvalCaseResult {
   const normalized = normalize(answer);
-  const matched = c.expectedFacts.filter((f) => presentIn(f, normalized)).map((f) => f.description);
-  const missing = c.expectedFacts
-    .filter((f) => !presentIn(f, normalized))
-    .map((f) => f.description);
-  const forbiddenHits = c.forbidden
-    .filter((f) => presentIn(f, normalized))
-    .map((f) => f.description);
+  const factsMatched = c.expectedFacts.filter((f) => presentIn(f, normalized)).length;
+  const forbiddenHits = c.forbidden.filter((f) => presentIn(f, normalized)).length;
+  const factsTotal = c.expectedFacts.length;
   return {
     caseId: c.id,
     category: c.category,
-    score: round4(matched.length / c.expectedFacts.length),
-    passed: missing.length === 0 && forbiddenHits.length === 0,
-    matched,
-    missing,
+    score: round4(factsMatched / factsTotal),
+    passed: factsMatched === factsTotal && forbiddenHits === 0,
+    factsTotal,
+    factsMatched,
     forbiddenHits,
     complianceFlags: inspectText(answer),
   };
@@ -80,16 +80,23 @@ export function catalog(category?: EvalCategory): EvalCaseView[] {
 
 const BY_ID: ReadonlyMap<string, EvalCase> = new Map(EVAL_DATASET.map((c) => [c.id, c]));
 
+/** Quantos ids inexistentes a mensagem de erro lista; o resto vira "e mais K". */
+const MAX_LISTED_UNKNOWN = 10;
+
 /**
  * Corrige `{ caseId: resposta }`. Execução parcial é permitida. Ids inexistentes lançam
- * `ValidationError` listando só os ids (nunca o texto das respostas).
+ * `ValidationError` listando só os ids (nunca o texto das respostas), no máximo 10.
  */
 export function evaluate(answers: Record<string, string>): Omit<EvalReport, "usage"> {
   const unknown = Object.keys(answers)
     .filter((id) => !BY_ID.has(id))
     .sort();
   if (unknown.length > 0) {
-    throw new ValidationError(`Casos inexistentes no benchmark: ${unknown.join(", ")}`);
+    const listed = unknown.slice(0, MAX_LISTED_UNKNOWN).join(", ");
+    const rest = unknown.length - MAX_LISTED_UNKNOWN;
+    throw new ValidationError(
+      `Casos inexistentes no benchmark: ${listed}${rest > 0 ? ` e mais ${String(rest)}` : ""}`,
+    );
   }
 
   const results = Object.keys(answers)

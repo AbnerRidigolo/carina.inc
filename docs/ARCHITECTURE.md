@@ -61,6 +61,8 @@ apps/api/src/modules
   imports         upload de OFX/CSV/XLSX B3, parsers, ImportWorker e ImportCleanupJob
   market          cotações, histórico e indicadores macro (brapi.dev + BCB SGS ou mock), cache no
                   Redis, rotas `/api/market/*` e `MarketService.priceFor` (preço de servidor)
+  evaluation      benchmark SEAL BR: dataset estático, correção determinística e rotas
+                  `/api/eval/*`
   health          /health e /ready (single-flight + cache curto)
 ```
 
@@ -81,7 +83,7 @@ As regras de fronteira são verificadas assim:
    com `search_path = public, pg_temp`. Chave revogada ou tenant suspenso → 401. `@Public()` só em
    `/health` e `/ready`.
 2. **Escopos.** Toda rota não pública declara `@RequireScopes` (todos) ou `@RequireAnyScope` (um
-   deles): `chat`, `inbox:decide`, `data:write` e `admin`.
+   deles): `chat`, `inbox:decide`, `data:write`, `market:read`, `eval:run` e `admin`.
 3. **`RateLimitGuard`.** Janela deslizante de 60 s por tenant (ZSET + Lua), com `Retry-After`.
    Falha fechado se o Redis cair.
 4. **`TenantContext`** (AsyncLocalStorage). O `TenantPrismaService` abre uma transação por
@@ -501,3 +503,31 @@ MonitorJob (worker; na api só com WORKERS_ENABLED) a cada MONITOR_INTERVAL_MS
   `aria-live="polite"`) e mostra um texto fixo e neutro ("hoje" só quando o dia do alerta é hoje
   em São Paulo, senão "em DD/MM"), com o aviso de que não é recomendação de investimento.
 - **LGPD.** Os logs levam só ids e contagens. O alerta guarda só ativo, variação e preço público.
+
+## 16. Benchmark SEAL BR (`evaluation`)
+
+Bateria de 42 perguntas (tributação, CVM, Open Finance, produtos e macro) com correção
+determinística, portada de `legacy/python/carina/data_engine/evaluation.py`. Só roda no processo
+**api**; não há job nem worker. Desenho no [spec](superpowers/specs/2026-11-23-evaluation-design.md).
+
+```text
+GET  /api/eval/cases?category=   → catalog(category)           (pergunta, sem gabarito; grátis)
+POST /api/eval/submit            → evaluate(answers) → billing.record(evaluation, clientId nulo)
+                                    → relatório + usage { evaluation, "5.00" }
+```
+
+- **Escopo e guards.** As duas rotas exigem `eval:run`; passam pelos guards globais na mesma ordem
+  das demais rotas (ApiKeyGuard, depois RateLimitGuard). Não reservam a cota mensal, como as rotas
+  de mercado.
+- **Dataset e gabarito.** [`dataset.ts`](../apps/api/src/modules/evaluation/dataset.ts) fica só na
+  API: `packages/shared` tem apenas a visão pública (`EvalCaseView`: id, categoria, dificuldade e
+  pergunta), porque ele vai para o bundle da web.
+- **Correção.** [`grading.ts`](../apps/api/src/modules/evaluation/grading.ts): `normalize`
+  (minúsculas, `,` → `.`, NFKD sem marcas, espaços colapsados), fatos por substring de alternativas,
+  afirmações proibidas, `inspectText` do Watchtower como `complianceFlags` e média de 4 casas com o
+  mesmo desempate do `round` do Python. Execução parcial é permitida (1 a 42 respostas, até 20 000
+  caracteres cada); caso inexistente é 422 com a lista de ids.
+- **Cobrança.** `evaluation` a R$ 5,00 por submissão, registrada DEPOIS de corrigir, com
+  `clientId` nulo (o benchmark é do tenant, não de um cliente). 403 e 422 não cobram.
+- **LGPD.** Respostas e gabarito nunca vão para log, erro ou auditoria: o corpo só é lido pelo
+  motor, e os erros e logs levam ids e contagens.

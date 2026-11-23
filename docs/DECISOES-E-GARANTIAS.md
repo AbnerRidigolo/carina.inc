@@ -199,6 +199,34 @@ o motivo de cada uma:
 - **Sem mapeamento salvo por tenant**, e reprocessar um job com outro mapeamento exige subir o
   arquivo de novo.
 
+## Benchmark SEAL BR (fase 2, entrega 3)
+
+`GET /api/eval/cases` e `POST /api/eval/submit` expõem o benchmark do Python (fluxo e módulos em
+[ARCHITECTURE.md](ARCHITECTURE.md#16-benchmark-seal-br-evaluation); desenho original no
+[spec](superpowers/specs/2026-11-23-evaluation-design.md)). Decisões e o motivo de cada uma:
+
+| Tema | Decisão | Motivo (e alternativa descartada) |
+| --- | --- | --- |
+| Correção | Porte determinístico do Python: presença de fatos (substring normalizada), afirmações proibidas e flags de compliance do Watchtower; sem LLM-judge | Reproduzível, auditável, sem custo de modelo e com paridade conferida contra o Python. Um LLM-judge daria notas diferentes a cada execução e tornaria o benchmark caro |
+| Escopo | `eval:run` novo; o seed o dá à chave de demo que já tem `data:write` | Rodar o benchmark é gasto (R$ 5,00) que não deve vir de `chat` nem de `data:write` |
+| Cobrança | `evaluation` de R$ 5,00 por submissão, registrada depois de corrigir, com `clientId` nulo; o catálogo é grátis; 422 não cobra | Mesma regra das outras rotas cobradas (cobrado ⇔ concluído). O benchmark é do tenant, não de um cliente |
+| Gabarito | Só na API; o catálogo devolve id, categoria, dificuldade e pergunta | `packages/shared` vai para o bundle da web, e quem baixa o gabarito não é avaliado |
+| Limites | 1 a 42 respostas, cada uma com até 20 000 caracteres | Limites nossos: o tamanho do dataset e um teto por texto, para a correção (substring) não virar vetor de custo |
+| LGPD | Respostas e gabarito nunca vão para log, erro ou auditoria | Uma resposta pode conter dado pessoal; só ids e contagens são registrados |
+
+### Limitações do benchmark
+
+- **Sem LLM-judge.** Uma resposta certa com outras palavras (sem nenhuma das alternativas
+  registradas) reprova, e uma resposta que cita o fato de passagem passa. A nota mede a presença de
+  fatos, não a qualidade do raciocínio.
+- **Sem histórico salvo.** O relatório volta na resposta e some; não há tabela de submissões nem
+  comparação entre execuções. Só o uso cobrado fica no billing.
+- **Dataset estático.** Os 42 casos estão no código, sem versionamento do dataset e sem como o
+  tenant incluir casos próprios. Os fatos refletem a legislação da época do porte.
+- **Sem tela na web.** O benchmark só existe pela API.
+- **Sem reserva da cota mensal**, como as rotas de mercado: o rate limit por minuto vale, a cota
+  não.
+
 ## Garantias provadas por testes
 
 Cada linha cita o arquivo e o teste que a prova. Os testes de integração e E2E rodam contra
@@ -221,6 +249,9 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Planos da brapi**: N símbolos com lote de K viram ceil(N/K) requisições com o mesmo cabeçalho; requisições em série (concorrência 1 por padrão); um lote falho não devolve resultado parcial; hora da cotação limitada a `now` | [`brapi.provider.spec.ts`](../apps/api/src/modules/market/providers/brapi.provider.spec.ts) ("lotes e chamadas em série…", "hora exatamente em now + 2 min passa…"), [`market-core.int.spec.ts`](../apps/api/test/market/market-core.int.spec.ts) ("live: lotes de MARKET_BRAPI_MAX_SYMBOLS_PER_CALL…") |
 | **Cota do token protegida**: 20 chamadas com 20 símbolos desconhecidos → 1 busca por símbolo em 60 s (cache negativo); orçamento das rotas esgotado → 503 com `Retry-After` sem cobrança, enquanto o `priceFor` segue com orçamento próprio; zera no minuto seguinte; Redis fora → rotas 502, preço segue | [`market.service.spec.ts`](../apps/api/src/modules/market/market.service.spec.ts) ("cache negativo e orçamento…"), [`market-service.int.spec.ts`](../apps/api/test/market/market-service.int.spec.ts) ("orçamento das rotas no Redis real…"), [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) ("orçamento de chamadas ao provedor esgotado") |
 | **Rotas `/api/market/*`**: sem `market:read` → 403; cada chamada bem-sucedida (inclusive acerto de cache) cobra `data_query` de R$ 0,05; entrada inválida → 422, provedor fora → 502 e orçamento esgotado → 503 com `Retry-After`, todos problem+json, sem cobrança e sem texto interno | [`market.e2e.spec.ts`](../apps/api/test/market/market.e2e.spec.ts) |
+| **Benchmark SEAL BR**: sem `eval:run` → 403; o catálogo traz os 42 casos sem nenhuma chave de gabarito; categoria inválida, caso inexistente, 43 respostas ou resposta acima de 20 000 caracteres → 422 sem cobrança; a submissão corrigida cobra `evaluation` uma vez; nenhum log contém o texto das respostas | [`evaluation.e2e.spec.ts`](../apps/api/test/evaluation/evaluation.e2e.spec.ts) ("sem eval:run → 403 problem+json, sem cobrança", "catálogo traz 42 casos sem gabarito (busca recursiva por chaves proibidas)", "submit corrige, agrega e cobra uma vez (usage evaluation 5.00)", "caso inexistente → 422 sem cobrança", "43 respostas ou resposta > 20 000 → 422 sem cobrança", "nenhum log contém o texto das respostas") |
+| **Correção determinística idêntica à do Python** (agregado e linhas de paridade, arredondamento do `round`), sem vazar gabarito nem o texto das respostas nos erros | [`grading.spec.ts`](../apps/api/src/modules/evaluation/grading.spec.ts) ("agregado idêntico ao do Python para as 6 respostas finais por caso", "imita o round(x, 4) do Python, inclusive empates exatos (para o par)", "não vaza gabarito nem referência", "o erro de caso inexistente não carrega o texto das respostas") |
+| A chave de demo tem `eval:run`, e o seed reescopa uma chave já existente | [`seed.int.spec.ts`](../apps/api/test/seed/seed.int.spec.ts) ("chave de demo tem eval:run", "rodar o seed de novo reescopa uma chave existente…") |
 | **`MARKET_MODE` explícita no compose** (a API recusa subir em produção sem ela): `api`, `worker` e `seed` a definem, com padrão `mock` | [`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts) ("docker-compose.yml: MARKET_MODE") |
 | **Importação: os bytes não sobram.** `import_file` fica vazia ao fechar o job (`done`, arquivo ilegível ou erro inesperado), e a limpeza apaga o arquivo com mais de 1 h marcando o job `expired` | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("OFX de ponta a ponta: done, transações source import, import_file vazio, 1 cobrança, data.ingested", "arquivo ilegível → failed/unreadable, sem bytes e sem cobrança", "erro inesperado → failed/internal, bytes apagados, evento confirmado (handle resolve)", "import_file de 2 h → expired (job mantido, bytes apagados); arquivo recente intocado") |
 | **RLS em `import_file`**: outro tenant não lê nem apaga; com cliente fixado, o arquivo de outro cliente do mesmo tenant é invisível; INSERT com `tenant_id` alheio viola a política; o banco recusa bytes acima de 10 MB e a exclusão do job leva o arquivo | [`rls-isolation.int.spec.ts`](../apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não enxerga import_file de A em SELECT nem apaga em DELETE", "com cliente fixado, o import_file de outro cliente do mesmo tenant é invisível", "INSERT em import_file com tenant_id alheio viola a RLS"), [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts) ("import_file: bytes acima de 10 MB são recusados (23514); 10 MB exatos passam", "apagar o import_job apaga o import_file (ON DELETE CASCADE)") |

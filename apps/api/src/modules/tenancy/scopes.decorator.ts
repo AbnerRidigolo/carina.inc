@@ -1,7 +1,14 @@
 import { SetMetadata } from "@nestjs/common";
 
 /** Escopos de uma chave de API. */
-export const SCOPES = ["chat", "inbox:decide", "data:write", "market:read", "admin"] as const;
+export const SCOPES = [
+  "chat",
+  "inbox:decide",
+  "data:write",
+  "market:read",
+  "eval:run",
+  "admin",
+] as const;
 export type Scope = (typeof SCOPES)[number];
 
 export const REQUIRED_SCOPES_KEY = "carina:required-scopes";

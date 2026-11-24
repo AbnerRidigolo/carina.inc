@@ -118,6 +118,7 @@ describe("grafo de módulos de produção", () => {
         "BillingController",
         "ChatController",
         "ClientsController",
+        "EvaluationController",
         "HealthController",
         "ImportsController",
         "InboxController",

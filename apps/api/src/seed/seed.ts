@@ -62,7 +62,11 @@ export const DEMO_CLIENTS: readonly { externalId: string; profile: Profile; seed
 ];
 
 const DEMO_KEYS = [
-  { label: "demo-app", env: "DEMO_APP_KEY", scopes: ["chat", "data:write", "market:read"] },
+  {
+    label: "demo-app",
+    env: "DEMO_APP_KEY",
+    scopes: ["chat", "data:write", "market:read", "eval:run"],
+  },
   { label: "demo-approver", env: "DEMO_APPROVER_KEY", scopes: ["chat", "inbox:decide"] },
 ] as const;
 

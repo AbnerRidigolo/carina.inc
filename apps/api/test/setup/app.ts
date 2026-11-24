@@ -17,7 +17,7 @@ import { generateApiKey, hashApiKey } from "../../src/modules/tenancy/api-key.js
 import { TenancyModule } from "../../src/modules/tenancy/tenancy.module.js";
 import { appUrl, migratorSql, migratorUrl, redisDbUrl } from "./db.js";
 
-export type SeedKeyName = "chat" | "approver" | "ingest" | "market";
+export type SeedKeyName = "chat" | "approver" | "ingest" | "market" | "eval";
 
 /** Escopos de cada chave criada por `seedTenant`. */
 export const SEED_KEY_SCOPES: Record<SeedKeyName, string[]> = {
@@ -25,6 +25,7 @@ export const SEED_KEY_SCOPES: Record<SeedKeyName, string[]> = {
   approver: ["chat", "inbox:decide"],
   ingest: ["data:write"],
   market: ["market:read"],
+  eval: ["eval:run"],
 };
 
 export interface SeedTenantOptions {

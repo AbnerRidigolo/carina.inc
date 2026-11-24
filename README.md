@@ -43,10 +43,10 @@ com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
 O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a base de conhecimento
 (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
 
-| Variável            | Valor padrão                               | Escopos                              |
-| ------------------- | ------------------------------------------ | ------------------------------------ |
-| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`  |
-| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`               |
+| Variável            | Valor padrão                               | Escopos                                         |
+| ------------------- | ------------------------------------------ | ----------------------------------------------- |
+| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run` |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`                          |
 
 > **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
 > `NODE_ENV=production` o seed recusa as chaves fixas, a menos que `SEED_ALLOW_DEMO_KEYS=true`.
@@ -147,6 +147,32 @@ carteira" da web. Não há notícias, volume anômalo nem canal externo (Fase 3)
 [ARQUITETURA](docs/ARCHITECTURE.md#15-monitor-de-carteira-monitor) e
 [limitações](docs/DECISOES-E-GARANTIAS.md#limitações-do-monitor-de-carteira).
 
+## Benchmark SEAL BR
+
+Uma bateria de 42 perguntas sobre tributação, CVM, Open Finance, produtos e macro, portada do
+Python, para medir um assistente financeiro. É determinística: a correção confere a presença de
+fatos esperados na resposta (texto normalizado, sem acento e com vírgula decimal), reprova
+afirmações proibidas e roda as checagens de compliance do Watchtower; não há LLM-judge. Escopo
+`eval:run` (a chave app da demo tem):
+
+```bash
+curl -s "localhost:3000/api/eval/cases?category=tributacao" -H "$APP"          # catálogo, sem gabarito
+curl -s -X POST localhost:3000/api/eval/submit -H "$APP" -H 'Content-Type: application/json' \
+  -d '{"answers":{"acoes-isencao-20k":"É isento: vendas até R$ 20.000 por mês."}}'
+# → {"answered":1,"passed":1,"passRate":1,...,"usage":{"workType":"evaluation","priceBrl":"5.00"}}
+```
+
+O catálogo é grátis. Cada submissão corrigida custa R$ 5,00 (`evaluation`), cobrada uma vez e só
+depois de corrigir, e gasta 1 unidade da cota mensal do tenant (esgotada: 429 com `Retry-After`, sem
+cobrança); entrada inválida (422: caso inexistente, id fora de `^[a-z0-9-]{1,64}$`, mais de 42
+respostas, resposta com mais de 20 000 caracteres) não cobra nem gasta cota. O relatório traz, por
+caso, só contagens (`factsTotal`, `factsMatched`, `forbiddenHits`), nunca o texto dos fatos
+esperados: assim o benchmark não pode ser colhido submetendo respostas erradas (o Python devolvia
+as descrições). Respostas e gabarito nunca vão para log. Não há tela na web nem histórico salvo;
+detalhes em
+[ARQUITETURA](docs/ARCHITECTURE.md#16-benchmark-seal-br-evaluation) e
+[decisões](docs/DECISOES-E-GARANTIAS.md#benchmark-seal-br-fase-2-entrega-3).
+
 ## Arquitetura
 
 ```mermaid
@@ -228,6 +254,11 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   [`imports.e2e.spec.ts`](apps/api/test/imports/imports.e2e.spec.ts) ("o mesmo arquivo de novo…"),
   [`rls-isolation.int.spec.ts`](apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não
   enxerga import_file de A…").
+- **Benchmark SEAL BR**: catálogo e relatório sem gabarito (o relatório só traz contagens), escopo
+  `eval:run`, cobrança de R$ 5,00 só depois de corrigir (422 não cobra), cota mensal (429 sem
+  cobrança) e nenhuma resposta nos logs:
+  [`evaluation.e2e.spec.ts`](apps/api/test/evaluation/evaluation.e2e.spec.ts),
+  [`grading.spec.ts`](apps/api/src/modules/evaluation/grading.spec.ts).
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -279,6 +310,9 @@ limite conhecido:
 - **PII vai ao provedor de LLM no modo live**, e as conversas ficam nos checkpoints do LangGraph
   sem RLS, sem TTL e sem caminho de eliminação (LGPD). A auditoria guarda a pergunta mascarada
   por padrões e a resposta só como digest.
+- **Benchmark SEAL BR sem LLM-judge, sem histórico e sem tela.** A correção só confere a presença
+  de fatos (uma resposta certa com outras palavras reprova); as submissões não são guardadas; o
+  dataset é estático (42 casos no código); não há tela na web.
 - **Sem API administrativa** para suspender tenant ou revogar chave; a revogação vale em até 60 s.
 - **Importação sem arquivo real.** OFX, CSV e a planilha da B3 foram reconstruídos da documentação
   pública; PDF SINACOR, `INVSTMTRS` e o resto estão em
@@ -294,11 +328,11 @@ A lista completa, com os próximos passos de engenharia em ordem de prioridade, 
 ## Roadmap
 
 **Fase 2 — produtos B2B:** importação de arquivos (OFX, CSV e planilhas da Área do Investidor B3
-já feitos; notas de corretagem em PDF na entrega 2), AOPs, `evaluation`, `builder` e os agentes restantes.
+já feitos; notas de corretagem em PDF na entrega 2), AOPs, `builder` e os agentes restantes.
 Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
 categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
 base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor de carteira também
-está feito (alerta pela API e pelo WebSocket, sem canal externo).
+está feito (alerta pela API e pelo WebSocket, sem canal externo), e o `evaluation` (benchmark SEAL BR) também, só pela API.
 
 **Fase 3 — integrações e remoção do Python:** notificações externas (WhatsApp, SMTP e webhook) para os alertas do monitor
 e remoção de `legacy/python` e do job `legacy-python` do CI.

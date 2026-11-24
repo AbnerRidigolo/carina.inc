@@ -1,6 +1,7 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ParseAbortedError, ParseThreadError, parseFile } from "./parse-file.js";
+import { heapFlagOverride, ParseAbortedError, ParseThreadError, parseFile } from "./parse-file.js";
 import { PARSE_LIMITS } from "./parsers/types.js";
 
 const fixture = (dir: string, name: string): Uint8Array =>
@@ -153,20 +154,78 @@ describe("parseFile (parse numa worker thread)", () => {
     ).rejects.toBeInstanceOf(ParseThreadError);
   });
 
-  it("thread que estoura a memória (ERR_WORKER_OUT_OF_MEMORY) → limit_exceeded, não erro", async () => {
-    const hog = {
-      filename: `const keep = []; for (;;) keep.push(new Array(1e5).fill({ a: keep.length }));`,
+  const HOG = {
+    filename: `const keep = []; for (;;) keep.push(new Array(1e5).fill({ a: keep.length }));`,
+    eval: true,
+  };
+  const hogParse = (opts: { v8HeapLimit?: boolean; heapCheckMs?: number }) =>
+    parseFile("ofx", new Uint8Array([1]), { format: "ofx" }, new AbortController().signal, {
+      thread: HOG,
+      maxHeapMb: 16,
+      ...opts,
+    });
+
+  it("thread que estoura a memória → limit_exceeded, não erro (as duas travas)", async () => {
+    const r = await hogParse({});
+    expect(r.failure).toBe("limit_exceeded");
+    expect(r.positions).toEqual([]);
+    expect(r.transactions).toEqual([]);
+  });
+
+  it("vigia de heap sozinho (sem resourceLimits, como sob --max-old-space-size) → limit_exceeded", async () => {
+    const r = await hogParse({ v8HeapLimit: false });
+    expect(r.failure).toBe("limit_exceeded");
+  });
+
+  it("trava do V8 sozinha (vigia desligado): vale sem flag de heap; com flag, o aviso é verdadeiro", async () => {
+    // Limite efetivo da heap da thread, lido de dentro dela.
+    const reportsLimit = {
+      filename: `require("node:worker_threads").parentPort.postMessage(
+        { ok: true, result: require("node:v8").getHeapStatistics().heap_size_limit });`,
       eval: true,
     };
-    const r = await parseFile(
+    const limit = (await parseFile(
       "ofx",
       new Uint8Array([1]),
       { format: "ofx" },
       new AbortController().signal,
-      { thread: hog, maxHeapMb: 16 },
-    );
+      { thread: reportsLimit, maxHeapMb: 128 },
+    )) as unknown as number;
+    if (heapFlagOverride() !== undefined) {
+      // A flag do processo anulou resourceLimits: só o vigia limita (teste acima).
+      expect(limit).toBeGreaterThan(256 * 1024 * 1024);
+      return;
+    }
+    expect(limit).toBeLessThanOrEqual(256 * 1024 * 1024);
+    const r = await hogParse({ heapCheckMs: 60_000 });
     expect(r.failure).toBe("limit_exceeded");
-    expect(r.positions).toEqual([]);
-    expect(r.transactions).toEqual([]);
+  });
+
+  it("canário da versão do Node: resourceLimits vale sem flag e é anulado por --max-old-space-size", () => {
+    // Processo filho com o NODE_OPTIONS controlado, independente do ambiente do teste.
+    const probe = `const { Worker } = require("node:worker_threads");
+      new Worker('require("node:worker_threads").parentPort.postMessage(require("node:v8").getHeapStatistics().heap_size_limit)',
+        { eval: true, resourceLimits: { maxOldGenerationSizeMb: 128 } })
+        .once("message", (n) => { console.log(Math.round(n / 1048576)); process.exit(0); });`;
+    const limitMb = (nodeOptions: string): number =>
+      Number(
+        execFileSync(process.execPath, ["-e", probe], {
+          env: { ...process.env, NODE_OPTIONS: nodeOptions },
+          encoding: "utf8",
+        }).trim(),
+      );
+    expect(limitMb("")).toBeLessThanOrEqual(256);
+    expect(limitMb("--max-old-space-size=4096")).toBeGreaterThan(1024);
+  });
+
+  it("heapFlagOverride acha a flag de heap na linha de comando ou em NODE_OPTIONS", () => {
+    expect(heapFlagOverride([], "")).toBeUndefined();
+    expect(heapFlagOverride(["--conditions=source"], "--use-openssl-ca")).toBeUndefined();
+    expect(heapFlagOverride(["--max-old-space-size=8192"], "")).toBe("--max-old-space-size=8192");
+    expect(heapFlagOverride([], "--use-openssl-ca --max_old_space_size=4096")).toBe(
+      "--max_old_space_size=4096",
+    );
+    expect(heapFlagOverride([], "--max-heap-size=1024")).toBe("--max-heap-size=1024");
+    expect(heapFlagOverride([], "--max-semi-space-size=16")).toBeUndefined();
   });
 });

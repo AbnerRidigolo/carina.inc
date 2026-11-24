@@ -4,8 +4,16 @@
  * `worker_threads` Worker, uma por arquivo, encerrada à força (`terminate`) ao estourar
  * PARSE_LIMITS.parseTimeoutMs (30 s) → `failure: "limit_exceeded"`. Um timer cooperativo na
  * mesma thread não serviria: ele só dispara depois que o parser devolve o controle. A heap da
- * thread é limitada a `maxHeapMb` (env IMPORT_PARSE_MAX_HEAP_MB; padrão PARSE_LIMITS.maxThreadHeapMb, 512 MB, `resourceLimits`): estourar
- * (`ERR_WORKER_OUT_OF_MEMORY`) também vira `limit_exceeded`, sem derrubar o processo.
+ * thread é limitada a `maxHeapMb` (env IMPORT_PARSE_MAX_HEAP_MB; padrão PARSE_LIMITS.maxThreadHeapMb,
+ * 512 MB) por duas travas, e estourar qualquer uma vira `limit_exceeded`, sem derrubar o processo:
+ *   1. `resourceLimits.maxOldGenerationSizeMb`: o V8 mata a thread (`ERR_WORKER_OUT_OF_MEMORY`).
+ *      ATENÇÃO: uma flag de heap do PROCESSO (`--max-old-space-size`, `--max-heap-size`, inclusive
+ *      via NODE_OPTIONS) vale para todos os isolates e ANULA essa opção em silêncio: a thread passa
+ *      a ter o limite do processo (comportamento documentado do Node, nodejs/node#43992, em
+ *      qualquer versão). Ver `heapFlagOverride`.
+ *   2. Vigia (`worker.getHeapStatistics()` a cada `heapCheckMs`, padrão 50 ms; responde mesmo
+ *      com a thread presa em CPU): heap usada acima de `maxHeapMb` → `terminate()`. Independe de
+ *      flags; pode deixar a heap passar do limite pelo que a thread alocar entre duas leituras.
  *
  * - Os bytes são TRANSFERIDOS para a thread (sem cópia de até 10 MB): o `Uint8Array` do chamador
  *   fica destacado (vazio) depois da chamada. Se ele for uma vista parcial de um buffer maior, só
@@ -46,6 +54,13 @@ export interface ParseFileOptions {
   timeoutMs?: number;
   /** Padrão: PARSE_LIMITS.maxThreadHeapMb. */
   maxHeapMb?: number;
+  /** Intervalo do vigia de heap. Padrão: PARSE_LIMITS.heapCheckMs. */
+  heapCheckMs?: number;
+  /**
+   * Só testes: `false` não passa `resourceLimits` à thread, para provar o vigia sozinho (como
+   * quando uma flag do processo anula a trava do V8). Padrão: true.
+   */
+  v8HeapLimit?: boolean;
   thread?: ParseThreadSpec;
 }
 
@@ -92,6 +107,20 @@ function defaultThread(): ParseThreadSpec {
   };
 }
 
+const HEAP_FLAG = /^--max[-_](old[-_]space|heap)[-_]size(=|$)/;
+
+/**
+ * A flag de heap do processo que anula `resourceLimits.maxOldGenerationSizeMb` das threads, se
+ * houver (na linha de comando ou em NODE_OPTIONS). Com ela, só o vigia limita a heap do parse.
+ */
+export function heapFlagOverride(
+  execArgv: readonly string[] = process.execArgv,
+  nodeOptions: string | undefined = process.env.NODE_OPTIONS,
+): string | undefined {
+  const args = [...execArgv, ...(nodeOptions ?? "").split(/\s+/)];
+  return args.find((a) => HEAP_FLAG.test(a));
+}
+
 function limitExceeded(): ParsedFile {
   return {
     positions: [],
@@ -122,6 +151,7 @@ export function parseFile(
   const spec = opts.thread ?? defaultThread();
   const timeoutMs = opts.timeoutMs ?? PARSE_LIMITS.parseTimeoutMs;
   const maxHeapMb = opts.maxHeapMb ?? PARSE_LIMITS.maxThreadHeapMb;
+  const heapCheckMs = opts.heapCheckMs ?? PARSE_LIMITS.heapCheckMs;
   const own = transferable(bytes);
   const request: ParseRequest = { format, bytes: own, options };
 
@@ -129,7 +159,9 @@ export function parseFile(
     const thread = new Worker(spec.filename, {
       workerData: request,
       transferList: [own.buffer],
-      resourceLimits: { maxOldGenerationSizeMb: maxHeapMb },
+      ...(opts.v8HeapLimit === false
+        ? {}
+        : { resourceLimits: { maxOldGenerationSizeMb: maxHeapMb } }),
       ...(spec.eval === true ? { eval: true } : {}),
       ...(spec.execArgv ? { execArgv: spec.execArgv } : {}),
     });
@@ -138,6 +170,7 @@ export function parseFile(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(heapTimer);
       signal.removeEventListener("abort", onAbort);
       fn();
       // Sem esperar: terminate de uma thread que já respondeu é imediato; de uma presa em CPU,
@@ -151,6 +184,23 @@ export function parseFile(
       settle(() => resolve(limitExceeded()));
     }, timeoutMs);
     signal.addEventListener("abort", onAbort, { once: true });
+
+    // Vigia de heap: uma leitura por vez; rejeição (thread já saiu) só encerra o vigia.
+    const maxHeapBytes = maxHeapMb * 1024 * 1024;
+    let heapTimer: NodeJS.Timeout | undefined;
+    const watchHeap = () => {
+      heapTimer = setTimeout(() => {
+        thread.getHeapStatistics().then(
+          (s) => {
+            if (settled) return;
+            if (s.used_heap_size > maxHeapBytes) settle(() => resolve(limitExceeded()));
+            else watchHeap();
+          },
+          () => undefined,
+        );
+      }, heapCheckMs);
+    };
+    thread.once("online", watchHeap);
 
     thread.once("message", (reply: ThreadReply) => {
       settle(() => {

@@ -12,6 +12,7 @@ import type {
   EvalCategoryStats,
   EvalReport,
 } from "@carina/shared";
+import { round4 } from "../../core/math/round4.js";
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import { inspectText } from "../watchtower/inspect-text.js";
 import { EVAL_DATASET, type EvalCase, type ExpectedFact } from "./dataset.js";
@@ -25,26 +26,6 @@ export function normalize(text: string): string {
 
 function presentIn(fact: ExpectedFact, normalizedAnswer: string): boolean {
   return fact.alternatives.some((alt) => normalizedAnswer.includes(normalize(alt)));
-}
-
-/**
- * `round(x, 4)` do Python: arredonda a 4 casas, com empate exato (representável em binário, como
- * 0.03125) indo para o par, como o `round` do Python. Fora de empates exatos, `toFixed` (que usa o
- * valor exato do double) dá o mesmo resultado do Python. Com ≤ 4 fatos por caso, o score nunca
- * empata; o desempate só importa para médias.
- */
-export function round4(x: number): number {
-  const fixed = x.toFixed(4);
-  const exact = x.toFixed(40);
-  const dot = exact.indexOf(".");
-  const tail = exact.slice(dot + 1 + 4);
-  if (/^50*$/.test(tail)) {
-    // Empate exato: toFixed arredondou para longe de zero; escolhe o par.
-    const down = exact.slice(0, dot + 1 + 4);
-    const lastDigit = Number(down.at(-1));
-    return Number(lastDigit % 2 === 0 ? down : fixed);
-  }
-  return Number(fixed);
 }
 
 /**

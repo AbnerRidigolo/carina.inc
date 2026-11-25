@@ -1,7 +1,8 @@
+import { SYMBOL_RE } from "@carina/shared";
 import type { Quote } from "@carina/shared";
 
-/** Símbolo aceito antes de montar qualquer URL ou chave de cache. */
-export const SYMBOL_RE = /^\^?[A-Z0-9]{1,12}$/;
+// O padrão vive no pacote shared (o contrato de estratégia usa o mesmo); reexportado aqui.
+export { SYMBOL_RE };
 
 /**
  * Heurística do sufixo numérico do ticker (portada do Python): 3 a 8 ação; 31 a 39 BDR; 11 fundo;

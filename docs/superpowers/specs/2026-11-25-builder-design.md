@@ -66,6 +66,30 @@ sem cobrança. Mais uma tabela de paridade com o Python (barras fixas → métri
 rodando o motor Python. Int: RLS da tabela, limite de 100. E2E: escopo (403), 404 entre tenants, cota
 esgotada → 429 sem cobrança, símbolo desconhecido / provedor fora → sem cobrança.
 
+### Tabela de paridade com o Python (valores esperados)
+
+Gerada rodando `run_backtest` de `legacy/python/carina/builder/backtest.py` com `python3 -I` e
+`PYTHONPATH=legacy/python` (HistoricalBar, BuilderError e logger substituídos por stubs); datas diárias
+a partir de 2026-01-01. Os mesmos valores estão em `apps/api/src/modules/builder/backtest.spec.ts`.
+
+| Caso | kind (fast/slow) | Fechamentos | retorno % | drawdown % | vol. anual. % | trocas | equity final |
+|---|---|---|---|---|---|---|---|
+| alta_monotonica | buy_hold (10/50) | 100, 101.5, 103.2, 104.9, 106.1, 108, 109.4, 111.3, 112.8, 114.6 | 14.6 | 0.0 | 3.2937 | 1 | 114.6 |
+| drawdown | buy_hold (10/50) | 100, 108, 115, 120, 104, 92, 95, 101, 99, 107, 112 | 12.0 | 23.3333 | 118.4684 | 1 | 112.0 |
+| cruzamento_simples | sma_cross (2/4) | 100, 102, 104, 106, 108, 110, 70, 50, 40, 30, 20, 10 | -33.9623 | 36.3636 | 168.0369 | 2 | 66.0377 |
+| precos_planos | buy_hold (10/50) | 50, 50, 50, 50, 50, 50 | 0.0 | 0.0 | 0.0 | 1 | 100.0 |
+| duas_barras | buy_hold (10/50) | 10, 12.5 | 25.0 | 0.0 | 0.0 | 1 | 125.0 |
+| sma_varios_cruzamentos | sma_cross (3/7) | 10, 10.4, 10.9, 11.5, 11.2, 10.6, 10.1, 9.7, 9.9, 10.5, 11.3, 12.1, 11.8, 11.0, 10.2, 9.5, 9.8, 10.7, 11.6, 12.4, 13.0, 12.2, 11.1 | -19.5529 | 24.8718 | 65.5076 | 3 | 80.4471 |
+
+Curvas de equity (base 100, arredondadas a 4 casas):
+
+- `alta_monotonica`: [100.0, 101.5, 103.2, 104.9, 106.1, 108.0, 109.4, 111.3, 112.8, 114.6]
+- `drawdown`: [100.0, 108.0, 115.0, 120.0, 104.0, 92.0, 95.0, 101.0, 99.0, 107.0, 112.0]
+- `cruzamento_simples`: [100.0, 100.0, 100.0, 100.0, 101.8868, 103.7736, 66.0377, 66.0377, 66.0377, 66.0377, 66.0377, 66.0377]
+- `precos_planos`: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+- `duas_barras`: [100.0, 125.0]
+- `sma_varios_cruzamentos`: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 107.0796, 104.4248, 97.3451, 90.2655, 84.0708, 84.0708, 84.0708, 84.0708, 89.8688, 94.2173, 88.4193, 80.4471]
+
 ## 6. O que fica com quem implementa
 
 Nomes internos, formato do id na resposta, como forjar o histórico nos testes (provedor mock ou

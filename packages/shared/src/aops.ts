@@ -21,6 +21,8 @@ export type AopAgent = z.infer<typeof AopAgentSchema>;
 /** Máximo de agentes por AOP (o mesmo `MAX_SPECIALISTS` do chat). */
 export const AOP_MAX_AGENTS = 3;
 export const AOP_MAX_CLIENTS = 20;
+/** Máximo de AOPs por tenant (ligados ou não), imposto na criação. */
+export const AOP_MAX_PER_TENANT = 50;
 
 /**
  * Agenda do AOP. A hora é em America/Sao_Paulo (o Brasil não tem horário de verão, UTC-3 fixo).

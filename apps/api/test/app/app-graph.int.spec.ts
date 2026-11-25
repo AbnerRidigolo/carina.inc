@@ -116,6 +116,7 @@ describe("grafo de módulos de produção", () => {
     expect(controllersOf(ref)).toEqual(
       [
         "BillingController",
+        "BuilderController",
         "ChatController",
         "ClientsController",
         "EvaluationController",

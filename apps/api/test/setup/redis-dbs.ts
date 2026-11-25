@@ -50,6 +50,7 @@ export const REDIS_DBS = {
     "imports/imports.e2e.spec.ts": 7,
     "market/market.e2e.spec.ts": 0,
     "evaluation/evaluation.e2e.spec.ts": 9,
+    "builder/builder.e2e.spec.ts": 11,
     "monitor/monitor.e2e.spec.ts": 8,
   },
 } as const satisfies Record<"int" | "e2e", Record<string, number>>;

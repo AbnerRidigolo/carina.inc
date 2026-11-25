@@ -227,6 +227,35 @@ o motivo de cada uma:
   tenant incluir casos próprios. Os fatos refletem a legislação da época do porte.
 - **Sem tela na web.** O benchmark só existe pela API.
 
+## Estratégias e backtest (fase 2, entrega 4)
+
+`POST/GET /api/builder/strategies`, `GET /api/builder/strategies/:id` e
+`POST /api/builder/strategies/:id/backtest` (fluxo e módulos em
+[ARCHITECTURE.md](ARCHITECTURE.md#17-estratégias-e-backtest-builder); desenho original no
+[spec](superpowers/specs/2026-11-25-builder-design.md)). Decisões e o motivo de cada uma:
+
+| Tema | Decisão | Motivo (e alternativa descartada) |
+| --- | --- | --- |
+| Armazenamento | Tabela `strategy` no Postgres, sob RLS por tenant | O Python guardava as estratégias no FalkorDB, que o projeto não tem; o Postgres já isola por tenant (RLS) e dispensa um serviço novo |
+| Limite | No máximo 100 estratégias por tenant; a 101ª é 422 | Limite nosso, para a lista e o armazenamento não crescerem sem teto; a contagem e o INSERT rodam sob um lock por tenant |
+| Escopo | `builder:run` novo; o seed o dá à chave de demo que já tem `data:write` | Rodar backtest é gasto (R$ 7,50) que não deve vir de `chat` nem de `data:write` |
+| Cobrança | `backtest` de R$ 7,50 só no sucesso, `clientId` nulo; criar, listar e ler são grátis; 404, 422, 502 e 503 não cobram | Mesma regra das outras rotas cobradas (cobrado ⇔ concluído) |
+| Cota mensal | O backtest reserva 1 unidade da cota como o chat e o evaluation, DEPOIS de estratégia, histórico e motor passarem; se a cobrança falha, devolve a reserva; cota esgotada → 429 com `Retry-After` | Reservar só depois de validar evita gastar cota com 404, 422 ou falha do provedor; sem a cota, um tenant gastaria sem teto mensal |
+| Sinal do `sma_cross` | Compra só quando a média rápida é estritamente maior que a lenta, em aritmética inteira exata; empate significa fora da posição | A soma em float do Python varia por versão e, em platôs de preço, invertia o sinal e mudava trocas e equity; o empate determinístico dá o mesmo resultado em qualquer plataforma |
+| Fechamento ≤ 0 | O backtest recusa (422) qualquer barra com fechamento menor ou igual a zero | O preço `"0"` passa no schema, mas dividiria por zero nos retornos e produziria `Infinity`/`NaN` |
+| Mercado | O histórico vem do `MarketService` (cache e orçamento das rotas): orçamento esgotado → 503 com `Retry-After`, provedor fora → 502, sem texto do provedor | Reaproveita o cache e protege a cota do token único do provedor |
+| LGPD | Logs só com ids, `kind` e contagens | O nome da estratégia é texto livre do cliente |
+
+### Limitações do builder
+
+- **Só duas estratégias.** `buy_hold` e `sma_cross`; sem outros indicadores nem regras compostas.
+- **Sem custos nem slippage.** Corretagem, emolumentos, impostos e deslizamento não entram no
+  retorno; o resultado é otimista.
+- **Sem edição nem remoção.** Uma estratégia criada não muda e não sai (só conta para o limite de
+  100); errou, cria outra.
+- **Sem tela na web.** O builder só existe pela API.
+- **Sem histórico de execuções.** O resultado volta na resposta e some; só o uso cobrado fica no billing.
+
 ## Garantias provadas por testes
 
 Cada linha cita o arquivo e o teste que a prova. Os testes de integração e E2E rodam contra
@@ -255,6 +284,13 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **Erros curtos**: id de ~100 KB → 422 com `detail` abaixo de 1 KB; mais de 10 ids inexistentes → a mensagem lista 10 e "e mais K"; `__proto__` → 422 | [`evaluation.e2e.spec.ts`](../apps/api/test/evaluation/evaluation.e2e.spec.ts) ("id de ~100 KB → 422 com detail curto (o id não volta no erro), sem cobrança", "mais de 10 ids inexistentes: a mensagem lista 10 e diz quantos faltam", "chave __proto__ → 422 (não é descartada em silêncio), sem cobrança") |
 | **Correção determinística idêntica à do Python** (agregado e linhas de paridade, arredondamento do `round`), sem vazar gabarito nem o texto das respostas nos erros | [`grading.spec.ts`](../apps/api/src/modules/evaluation/grading.spec.ts) ("agregado idêntico ao do Python para as 6 respostas finais por caso", "imita o round(x, 4) do Python, inclusive empates exatos (para o par)", "não vaza gabarito nem referência", "o erro de caso inexistente não carrega o texto das respostas") |
 | A chave de demo tem `eval:run`, e o seed reescopa uma chave já existente | [`seed.int.spec.ts`](../apps/api/test/seed/seed.int.spec.ts) ("chave de demo tem eval:run", "rodar o seed de novo reescopa uma chave existente…") |
+| **Estratégias e backtest, escopo e isolamento**: sem `builder:run` → 403; a estratégia de outro tenant é 404 no GET e no backtest, sem cobrança; o tenant B não lê nem lista a de A (RLS) | [`builder.e2e.spec.ts`](../apps/api/test/builder/builder.e2e.spec.ts) ("sem builder:run → 403 problem+json, sem cobrança", "estratégia de outro tenant → 404 no GET e no backtest, sem cobrança"), [`builder.int.spec.ts`](../apps/api/test/builder/builder.int.spec.ts) ("tenant B não lê nem lista a estratégia de A") |
+| **Backtest cobra uma vez e só no sucesso**: R$ 7,50 (`backtest`); histórico insuficiente (422), provedor fora (502) e orçamento de mercado esgotado (503 com `Retry-After`) não cobram nem gastam cota | [`builder.e2e.spec.ts`](../apps/api/test/builder/builder.e2e.spec.ts) ("backtest cobra uma vez (usage backtest 7.50)", "histórico insuficiente → 422 sem cobrança", "provedor fora → 502 sem cobrança e sem gastar cota", "503 com Retry-After sem cobrança; histórico em cache segue 200"), [`builder.controller.spec.ts`](../apps/api/src/modules/builder/builder.controller.spec.ts) ("estratégia inexistente (404) não busca histórico, não reserva nem cobra") |
+| **Cota mensal no backtest**: com cota 1, o segundo → 429 com `Retry-After` e há uma cobrança só; um 422 não gasta a cota; se a cobrança falha, a reserva é devolvida | [`builder.e2e.spec.ts`](../apps/api/test/builder/builder.e2e.spec.ts) ("cota 1: o primeiro backtest passa, o segundo → 429 com Retry-After, 1 cobrança só", "cota 1: um 422 não gasta a cota; o backtest válido seguinte → 200"), [`builder.controller.spec.ts`](../apps/api/src/modules/builder/builder.controller.spec.ts) ("falha na cobrança estorna a cota e repassa o erro") |
+| **Limite de 100 estratégias por tenant**, também com criações simultâneas | [`builder.e2e.spec.ts`](../apps/api/test/builder/builder.e2e.spec.ts) ("limite de 100 estratégias por tenant → 422 na 101ª"), [`builder.int.spec.ts`](../apps/api/test/builder/builder.int.spec.ts) ("101ª estratégia → ValidationError", "criações simultâneas com 99 gravadas: só uma entra (limite atômico)") |
+| **Motor sem lookahead, com empate fora da posição e fechamento ≤ 0 recusado** | [`backtest.spec.ts`](../apps/api/src/modules/builder/backtest.spec.ts) ("a posição do dia t usa o sinal de t-1 (captura o dia seguinte ao sinal)", "série totalmente plana: SMAs iguais, empate = fora da posição (0 trocas, equity 100)", "platôs de preço: sinal exato liga e desliga nos empates (3 trocas), equity 100", "fechamento zero recusa o backtest") |
+| **Nenhum log contém o nome da estratégia** | [`builder.e2e.spec.ts`](../apps/api/test/builder/builder.e2e.spec.ts) ("nenhum log contém o nome da estratégia") |
+| A chave de demo tem `builder:run` | [`seed.int.spec.ts`](../apps/api/test/seed/seed.int.spec.ts) ("chave de demo tem builder:run") |
 | **`MARKET_MODE` explícita no compose** (a API recusa subir em produção sem ela): `api`, `worker` e `seed` a definem, com padrão `mock` | [`toolchain.spec.ts`](../apps/api/src/toolchain.spec.ts) ("docker-compose.yml: MARKET_MODE") |
 | **Importação: os bytes não sobram.** `import_file` fica vazia ao fechar o job (`done`, arquivo ilegível ou erro inesperado), e a limpeza apaga o arquivo com mais de 1 h marcando o job `expired` | [`imports.int.spec.ts`](../apps/api/test/imports/imports.int.spec.ts) ("OFX de ponta a ponta: done, transações source import, import_file vazio, 1 cobrança, data.ingested", "arquivo ilegível → failed/unreadable, sem bytes e sem cobrança", "erro inesperado → failed/internal, bytes apagados, evento confirmado (handle resolve)", "import_file de 2 h → expired (job mantido, bytes apagados); arquivo recente intocado") |
 | **RLS em `import_file`**: outro tenant não lê nem apaga; com cliente fixado, o arquivo de outro cliente do mesmo tenant é invisível; INSERT com `tenant_id` alheio viola a política; o banco recusa bytes acima de 10 MB e a exclusão do job leva o arquivo | [`rls-isolation.int.spec.ts`](../apps/api/test/database/rls-isolation.int.spec.ts) ("tenant B não enxerga import_file de A em SELECT nem apaga em DELETE", "com cliente fixado, o import_file de outro cliente do mesmo tenant é invisível", "INSERT em import_file com tenant_id alheio viola a RLS"), [`migrations.int.spec.ts`](../apps/api/test/database/migrations.int.spec.ts) ("import_file: bytes acima de 10 MB são recusados (23514); 10 MB exatos passam", "apagar o import_job apaga o import_file (ON DELETE CASCADE)") |

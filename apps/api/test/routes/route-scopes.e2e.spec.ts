@@ -94,6 +94,8 @@ describe("Escopos das rotas registradas", () => {
     expect(routes.map((r) => r.route).sort()).toEqual(
       [
         "GET /audit",
+        "GET /builder/strategies",
+        "GET /builder/strategies/:id",
         "GET /clients",
         "GET /clients/:clientId/alerts",
         "GET /clients/:clientId/imports",
@@ -108,6 +110,8 @@ describe("Escopos das rotas registradas", () => {
         "GET /market/quotes",
         "GET /ready",
         "GET /usage",
+        "POST /builder/strategies",
+        "POST /builder/strategies/:id/backtest",
         "POST /chat",
         "POST /eval/submit",
         "POST /clients/:clientId/imports",
@@ -148,6 +152,7 @@ describe("Escopos das rotas registradas", () => {
       if (r.route === "POST /chat" || r.route === "POST /ws/ticket")
         return { all: ["chat"], any: [] };
       if (r.route.startsWith("GET /market/")) return { all: ["market:read"], any: [] };
+      if (r.route.includes("/builder/")) return { all: ["builder:run"], any: [] };
       if (r.route.startsWith("GET /eval/") || r.route === "POST /eval/submit")
         return { all: ["eval:run"], any: [] };
       return { all: [r.route.startsWith("POST ") ? "data:write" : "chat"], any: [] };

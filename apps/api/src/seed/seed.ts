@@ -65,7 +65,7 @@ const DEMO_KEYS = [
   {
     label: "demo-app",
     env: "DEMO_APP_KEY",
-    scopes: ["chat", "data:write", "market:read", "eval:run"],
+    scopes: ["chat", "data:write", "market:read", "eval:run", "builder:run"],
   },
   { label: "demo-approver", env: "DEMO_APPROVER_KEY", scopes: ["chat", "inbox:decide"] },
 ] as const;

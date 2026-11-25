@@ -51,8 +51,10 @@ export class StrategyRepository {
     const { tenantId } = TenantContext.current();
     // Serializa as criações do mesmo tenant até o fim da transação. Em READ COMMITTED (o padrão de
     // `TenantPrismaService.tx`) a contagem abaixo tira um snapshot novo DEPOIS do lock e enxerga o
-    // que a criação anterior gravou e confirmou. Com REPEATABLE READ/SERIALIZABLE o snapshot seria
-    // o do primeiro comando da transação: não abra esta `tx` com outro isolamento.
+    // que a criação anterior gravou e confirmou. Com REPEATABLE READ o snapshot seria o do primeiro
+    // comando da transação e a contagem poderia ficar defasada (estourar o limite). Em SERIALIZABLE
+    // o Postgres não estoura o limite: aborta com falha de serialização (40001). Em ambos, não
+    // abra esta `tx` com outro isolamento.
     await tx.$queryRaw`
       SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
         'strategy_create', ${tenantId}::text

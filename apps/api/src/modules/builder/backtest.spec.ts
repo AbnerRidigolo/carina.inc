@@ -78,6 +78,12 @@ describe("runBacktest: histórico insuficiente", () => {
     expect(run).toThrow("Histórico insuficiente para 'sma_cross': 3 barras (mínimo 11)");
   });
 
+  it("símbolo sem barras: mensagem própria, ainda ValidationError (422)", () => {
+    const run = () => buyHold([]);
+    expect(run).toThrow(ValidationError);
+    expect(run).toThrow("Símbolo sem histórico no provedor");
+  });
+
   it("buy_hold exige ao menos 2 barras", () => {
     expect(() => buyHold([100])).toThrow(
       "Histórico insuficiente para 'buy_hold': 1 barras (mínimo 2)",

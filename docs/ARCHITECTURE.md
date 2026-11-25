@@ -575,6 +575,7 @@ POST /api/builder/strategies/:id/backtest?range=
   populacional dos retornos diários vezes a raiz de 252, com arredondamento a 4 casas.
 - **Ordem da cobrança.** Tudo o que pode falhar por motivo do cliente ou do provedor (estratégia,
   histórico, motor) roda ANTES da reserva da cota; só o sucesso reserva e cobra `backtest` a
-  R$ 7,50, uma vez, com `clientId` nulo. Os erros do mercado são os mesmos das rotas
+  R$ 7,50, uma vez, com `clientId` nulo. Antes até do histórico, uma pré-checagem sem I/O recusa
+  (422) o `range` que não comporta as barras da estratégia, para não gastar o orçamento do provedor. Os erros do mercado são os mesmos das rotas
   `/api/market/*` (mapeados pelo filtro global de erros de domínio).
 - **LGPD.** Os logs levam só ids, `kind` e contagens (nunca o nome da estratégia).

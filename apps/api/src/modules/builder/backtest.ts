@@ -12,7 +12,7 @@
  * paridade numérica com o Python (após arredondamento): a volatilidade pode diferir no último ulp em
  * entradas extremas, o que o arredondamento a 4 casas absorve.
  */
-import type { BacktestResult, HistoricalBar, StrategyKind } from "@carina/shared";
+import type { BacktestResult, HistoricalBar, HistoryRange, StrategyKind } from "@carina/shared";
 import { round4 } from "../../core/math/round4.js";
 import { ValidationError } from "../../core/errors/domain-errors.js";
 
@@ -24,6 +24,40 @@ export interface BacktestInput {
   bars: HistoricalBar[];
   fast: number;
   slow: number;
+}
+
+/**
+ * Máximo de pregões da B3 que cada `range` do provedor pode conter (teto, não o valor típico).
+ * Serve à pré-checagem barata do controller, antes de gastar uma chamada do orçamento do provedor.
+ */
+export const MAX_BARS_PER_RANGE: Readonly<Record<HistoryRange, number>> = {
+  "5d": 5,
+  "1mo": 23,
+  "3mo": 66,
+  "6mo": 130,
+  "1y": 253,
+  "2y": 506,
+  "5y": 1265,
+};
+
+/** Barras mínimas que a estratégia exige (2 para `buy_hold`, `slow + 1` para `sma_cross`). */
+export function minimumBars(kind: StrategyKind, slow: number): number {
+  return kind === "buy_hold" ? 2 : slow + 1;
+}
+
+/**
+ * Recusa SEM buscar histórico um `range` que não comporta as barras que a estratégia exige.
+ *
+ * @throws ValidationError (422), com mensagem fixa só com o intervalo e as contagens.
+ */
+export function assertRangeFits(kind: StrategyKind, slow: number, range: HistoryRange): void {
+  const minimum = minimumBars(kind, slow);
+  const capacity = MAX_BARS_PER_RANGE[range];
+  if (capacity < minimum) {
+    throw new ValidationError(
+      `Intervalo curto demais para '${kind}': '${range}' comporta até ${String(capacity)} barras (mínimo ${String(minimum)})`,
+    );
+  }
 }
 
 /** Casas decimais máximas de `PriceSchema` (até 6): todo preço vira inteiro escalado por 10^6. */
@@ -61,12 +95,13 @@ function pstdev(values: number[]): number {
 /**
  * Roda o backtest de uma especificação sobre barras diárias em ordem cronológica.
  *
- * @throws ValidationError se o histórico é insuficiente para a estratégia ou se algum fechamento
+ * @throws ValidationError se o símbolo não tem histórico, se o histórico é insuficiente para a estratégia ou se algum fechamento
  *   não é positivo (o `PriceSchema` aceita "0", que daria Infinity/NaN nos retornos).
  */
 export function runBacktest(input: BacktestInput): Omit<BacktestResult, "usage"> {
   const { kind, symbol, bars, fast, slow } = input;
-  const minimum = kind === "buy_hold" ? 2 : slow + 1;
+  if (bars.length === 0) throw new ValidationError("Símbolo sem histórico no provedor");
+  const minimum = minimumBars(kind, slow);
   if (bars.length < minimum) {
     throw new ValidationError(
       `Histórico insuficiente para '${kind}': ${String(bars.length)} barras (mínimo ${String(minimum)})`,

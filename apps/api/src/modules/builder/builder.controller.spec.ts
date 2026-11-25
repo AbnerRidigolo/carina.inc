@@ -132,6 +132,27 @@ describe("BuilderController.backtest", () => {
     expect(billing.record).not.toHaveBeenCalled();
   });
 
+  it("range curto demais para a janela não busca histórico", async () => {
+    const { controller, billing, quota, market } = setup({
+      found: { ...strategy, spec: { ...strategy.spec, kind: "sma_cross" as never, slow: 50 } },
+    });
+    // 1mo comporta no máximo 23 pregões; o sma_cross com slow=50 exige 51 barras.
+    const run = controller.backtest(tenant, ID, { range: "1mo" });
+    await expect(run).rejects.toThrow(ValidationError);
+    await expect(run).rejects.toThrow(
+      "Intervalo curto demais para 'sma_cross': '1mo' comporta até 23 barras (mínimo 51)",
+    );
+    expect(market.history).not.toHaveBeenCalled();
+    expect(quota.reserve).not.toHaveBeenCalled();
+    expect(billing.record).not.toHaveBeenCalled();
+  });
+
+  it("range que comporta a janela segue para o histórico", async () => {
+    const { controller, market } = setup();
+    await controller.backtest(tenant, ID, { range: "5d" });
+    expect(market.history).toHaveBeenCalledWith("PETR4", "5d");
+  });
+
   it("cota esgotada (429) não cobra nem estorna", async () => {
     const { controller, billing, quota } = setup();
     quota.reserve.mockRejectedValueOnce(new QuotaExceededError("Cota mensal esgotada", 60));

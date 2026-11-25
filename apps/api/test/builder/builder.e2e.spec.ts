@@ -7,12 +7,14 @@
 import { Writable } from "node:stream";
 import { BacktestResultSchema, StrategySchema, UsageSummarySchema } from "@carina/shared";
 import { Redis } from "ioredis";
+import { Logger as PinoLogger } from "nestjs-pino";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MarketDataUnavailableError } from "../../src/core/errors/domain-errors.js";
 import { LoggingModule } from "../../src/core/logging/logging.module.js";
 import { BillingModule } from "../../src/modules/billing/billing.module.js";
 import { BuilderModule } from "../../src/modules/builder/builder.module.js";
+import { MockMarketProvider } from "../../src/modules/market/providers/mock.provider.js";
 import { MARKET_DATA_PROVIDER } from "../../src/modules/market/market.service.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { redisDbUrl } from "../setup/db.js";
@@ -51,6 +53,9 @@ function setup(
       redisDb: REDIS_DB,
       env: { MARKET_MODE: "mock", ...opts.env },
     });
+    // `createTestApp` cria o app com `logger: false`: sem isto o Logger do Nest (o do controller)
+    // nunca chega ao pino e os asserts de log passariam sem observar nada. Igual ao bootstrap.
+    if (opts.logDestination) ctx.t.app.useLogger(ctx.t.app.get(PinoLogger));
     ctx.server = ctx.t.app.getHttpServer() as Parameters<typeof request>[0];
     ctx.A = await ctx.t.seedTenant({ name: "Builder A" });
     ctx.B = await ctx.t.seedTenant({ name: "Builder B" });
@@ -138,20 +143,22 @@ describe("Builder E2E", () => {
   it("estratégia de outro tenant → 404 no GET e no backtest, sem cobrança", async () => {
     const mine = await create(A());
     const before = (await backtests(B())).count;
+    const beforeA = (await backtests(A())).count;
     await get(`${BASE}/${mine.id}`, B().keys.builder).expect(404);
     await post(`${BASE}/${mine.id}/backtest`, {}, B().keys.builder).expect(404);
     const list = await get(BASE, B().keys.builder).expect(200);
     expect((list.body as { id: string }[]).map((s) => s.id)).not.toContain(mine.id);
     expect((await backtests(B())).count).toBe(before);
-    expect((await backtests(A())).count).toBe(0);
+    expect((await backtests(A())).count).toBe(beforeA);
   });
 
   it("id malformado ou inexistente → 404, sem cobrança", async () => {
     const k = A().keys.builder;
+    const before = (await backtests(A())).count;
     await get(`${BASE}/nao-e-uuid`, k).expect(404);
     await post(`${BASE}/nao-e-uuid/backtest`, {}, k).expect(404);
     await get(`${BASE}/${UNKNOWN_ID}`, k).expect(404);
-    expect((await backtests(A())).count).toBe(0);
+    expect((await backtests(A())).count).toBe(before);
   });
 
   it("backtest cobra uma vez (usage backtest 7.50)", async () => {
@@ -196,7 +203,8 @@ describe("Builder E2E", () => {
   it("símbolo desconhecido do mock (sem barras) → 422 sem cobrança", async () => {
     const s = await create(A(), { kind: "buy_hold", symbol: "ZZZZ3" });
     const before = (await backtests(A())).count;
-    await post(`${BASE}/${s.id}/backtest`, {}, A().keys.builder).expect(422);
+    const res = await post(`${BASE}/${s.id}/backtest`, {}, A().keys.builder).expect(422);
+    expect(JSON.stringify(res.body)).toContain("Símbolo sem histórico no provedor");
     expect((await backtests(A())).count).toBe(before);
   });
 
@@ -206,6 +214,8 @@ describe("Builder E2E", () => {
     await post(`${BASE}/${s.id}/backtest`, {}, A().keys.builder).expect(200);
     await new Promise((r) => setTimeout(r, 100));
     expect(lines.length).toBeGreaterThan(0);
+    // O logger realmente captura o backtest: sem isto, "não contém" passaria com logs vazios.
+    expect(lines.some((l) => l.includes("Backtest executado") && l.includes(s.id))).toBe(true);
     expect(lines.join("\n")).not.toContain("NOME-SECRETO");
   });
 
@@ -241,20 +251,32 @@ describe("Builder E2E", () => {
 });
 
 describe("Builder E2E (provedor falhando)", () => {
-  const failing = () => Promise.reject(new MarketDataUnavailableError());
+  // Falha só na primeira busca de histórico; depois responde como o mock (para provar que a cota
+  // do 502 não foi gasta: o backtest seguinte passa com cota 1).
+  const mock = new MockMarketProvider(() => Date.now());
+  let failuresLeft = 1;
+  const flaky = {
+    fetchQuotes: mock.fetchQuotes.bind(mock),
+    fetchHistory: (...args: Parameters<typeof mock.fetchHistory>) =>
+      failuresLeft-- > 0
+        ? Promise.reject(new MarketDataUnavailableError())
+        : mock.fetchHistory(...args),
+  };
   const { ctx, post, backtests, create } = setup({
-    overrides: [
-      { token: MARKET_DATA_PROVIDER, useValue: { fetchQuotes: failing, fetchHistory: failing } },
-    ],
+    overrides: [{ token: MARKET_DATA_PROVIDER, useValue: flaky }],
   });
 
   it("provedor fora → 502 sem cobrança e sem gastar cota", async () => {
-    const A = ctx.A as SeededTenant;
-    const s = await create(A);
-    const res = await post(`${BASE}/${s.id}/backtest`, {}, A.keys.builder);
+    failuresLeft = 1;
+    const T = await (ctx.t as TestApp).seedTenant({ name: "Cota 502", monthlyQuota: 1 });
+    const s = await create(T);
+    const res = await post(`${BASE}/${s.id}/backtest`, {}, T.keys.builder);
     expect(res.status).toBe(502);
     expect(res.headers["content-type"]).toContain("application/problem+json");
-    expect((await backtests(A)).count).toBe(0);
+    expect((await backtests(T)).count).toBe(0);
+    // Cota 1 intacta: o próximo backtest (provedor de volta) passa e é o único cobrado.
+    await post(`${BASE}/${s.id}/backtest`, {}, T.keys.builder).expect(200);
+    expect((await backtests(T)).count).toBe(1);
   });
 });
 
@@ -263,16 +285,45 @@ describe("Builder E2E (orçamento de chamadas ao provedor esgotado)", () => {
     env: { MARKET_PROVIDER_MAX_CALLS_PER_MIN: "1" },
   });
 
-  it("503 com Retry-After sem cobrança; histórico em cache segue 200", async () => {
+  it("503 com Retry-After sem cobrança nem cota gasta; histórico em cache segue 200", async () => {
     const A = ctx.A as SeededTenant;
-    const first = await create(A, HOLD);
-    const other = await create(A, { kind: "buy_hold", symbol: "VALE3" });
-    await post(`${BASE}/${first.id}/backtest`, {}, A.keys.builder).expect(200);
-    const before = (await backtests(A)).count;
-    const res = await post(`${BASE}/${other.id}/backtest`, {}, A.keys.builder);
+    // A esquenta o cache de PETR4 (gasta a única chamada do minuto); T tem cota 1.
+    const warm = await create(A, HOLD);
+    await post(`${BASE}/${warm.id}/backtest`, {}, A.keys.builder).expect(200);
+    const T = await (ctx.t as TestApp).seedTenant({ name: "Cota 503", monthlyQuota: 1 });
+    const cached = await create(T, HOLD);
+    const other = await create(T, { kind: "buy_hold", symbol: "VALE3" });
+    const res = await post(`${BASE}/${other.id}/backtest`, {}, T.keys.builder);
     expect(res.status).toBe(503);
     expect(Number(res.headers["retry-after"])).toBeGreaterThanOrEqual(1);
-    expect((await backtests(A)).count).toBe(before);
-    await post(`${BASE}/${first.id}/backtest`, {}, A.keys.builder).expect(200);
+    expect((await backtests(T)).count).toBe(0);
+    // Cota 1 intacta: o histórico em cache ainda dá 200, e só ele é cobrado.
+    await post(`${BASE}/${cached.id}/backtest`, {}, T.keys.builder).expect(200);
+    expect((await backtests(T)).count).toBe(1);
+  });
+});
+
+describe("Builder E2E (pré-checagem do intervalo)", () => {
+  let historyCalls = 0;
+  const counting = {
+    fetchQuotes: () => Promise.resolve([]),
+    fetchHistory: () => {
+      historyCalls += 1;
+      return Promise.resolve([]);
+    },
+  };
+  const { ctx, post, backtests, create } = setup({
+    overrides: [{ token: MARKET_DATA_PROVIDER, useValue: counting }],
+  });
+
+  it("sma_cross slow=400 com range=5d → 422 sem tocar o provedor, sem cota e sem cobrança", async () => {
+    historyCalls = 0;
+    const T = await (ctx.t as TestApp).seedTenant({ name: "Cota range", monthlyQuota: 1 });
+    const s = await create(T, { kind: "sma_cross", symbol: "PETR4", fast: 5, slow: 400 });
+    const res = await post(`${BASE}/${s.id}/backtest?range=5d`, {}, T.keys.builder);
+    expect(res.status).toBe(422);
+    expect(JSON.stringify(res.body)).toContain("Intervalo curto demais");
+    expect(historyCalls).toBe(0);
+    expect((await backtests(T)).count).toBe(0);
   });
 });

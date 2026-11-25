@@ -118,3 +118,21 @@ describe("heuristicCompile: segurança e limites", () => {
     expect(c.agents).toEqual(["risk"]);
   });
 });
+
+describe("heuristicCompile: dias da semana com limite de palavra", () => {
+  it("'segunda opinião' não muda o dia da semana", () => {
+    const c = heuristicCompile("peça uma segunda opinião sobre o risco");
+    expect(c.schedule.weekday).toBe(4);
+    expect(c.schedule.frequency).toBe("weekly");
+  });
+
+  it("'quarta parte' não muda o dia da semana", () => {
+    expect(heuristicCompile("analise a quarta parte da carteira").schedule.weekday).toBe(4);
+  });
+
+  it("formas com -feira continuam valendo (hífen é limite)", () => {
+    expect(heuristicCompile("toda sexta-feira veja o risco").schedule.weekday).toBe(4);
+    expect(heuristicCompile("toda segunda-feira veja o risco").schedule.weekday).toBe(0);
+    expect(heuristicCompile("toda quarta-feira veja o risco").schedule.weekday).toBe(2);
+  });
+});

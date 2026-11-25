@@ -14,6 +14,7 @@ import { MAX_SPECIALISTS } from "../orchestrator/heuristic.js";
 /** Termo curto ou ambíguo: casa só como palavra inteira (mesma forma do chat). */
 const word = (term: string, suffix = ""): RegExp =>
   new RegExp(`(^|[^\\p{L}\\p{N}])${term}${suffix}([^\\p{L}\\p{N}]|$)`, "u");
+// `suffix` também serve de lookahead: "segunda opinião" e "quarta parte" não são dias da semana.
 
 type Matcher = string | RegExp;
 
@@ -43,20 +44,23 @@ const KEYWORDS: readonly (readonly [AopAgent, readonly Matcher[]])[] = [
   ],
 ];
 
-const DAILY = ["todo dia", "diária", "diario", "diariamente", "diário"];
-const MONTHLY = ["todo mês", "mensal", "mensalmente", "fechamento do mês"];
+/** Periodicidade e dias da semana casam por palavra inteira ("segunda opinião" não é segunda-feira). */
+const DAILY = ["todo\\s+dia", "diária", "diario", "diariamente", "diário"].map((t) => word(t));
+const MONTHLY = ["todo\\s+mês", "mensal", "mensalmente", "fechamento\\s+do\\s+mês"].map((t) =>
+  word(t),
+);
 
 /** 0=segunda … 6=domingo; a ordem de verificação é a do Python. */
-const WEEKDAYS: readonly (readonly [string, number])[] = [
-  ["segunda", 0],
-  ["terça", 1],
-  ["terca", 1],
-  ["quarta", 2],
-  ["quinta", 3],
-  ["sexta", 4],
-  ["sábado", 5],
-  ["sabado", 5],
-  ["domingo", 6],
+const WEEKDAYS: readonly (readonly [RegExp, number])[] = [
+  [word("segunda", "(?!\\s+(?:opini|vez|via|parte|chamada))"), 0],
+  [word("terça"), 1],
+  [word("terca"), 1],
+  [word("quarta", "(?!\\s+(?:parte|vez))"), 2],
+  [word("quinta"), 3],
+  [word("sexta"), 4],
+  [word("sábado"), 5],
+  [word("sabado"), 5],
+  [word("domingo"), 6],
 ];
 
 /** Padrão: semanal, sexta, 9h (o "11h UTC" do Python). */
@@ -76,9 +80,9 @@ export function heuristicCompile(text: string): {
     .slice(0, MAX_SPECIALISTS);
 
   const schedule: Schedule = { ...DEFAULT_SCHEDULE };
-  if (DAILY.some((k) => q.includes(k))) schedule.frequency = "daily";
-  else if (MONTHLY.some((k) => q.includes(k))) schedule.frequency = "monthly";
-  const day = WEEKDAYS.find(([name]) => q.includes(name));
+  if (DAILY.some((k) => k.test(q))) schedule.frequency = "daily";
+  else if (MONTHLY.some((k) => k.test(q))) schedule.frequency = "monthly";
+  const day = WEEKDAYS.find(([name]) => name.test(q));
   if (day) {
     schedule.frequency = "weekly";
     schedule.weekday = day[1];

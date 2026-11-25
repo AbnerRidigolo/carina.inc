@@ -8,6 +8,7 @@ import {
   AopUpdateSchema,
   ScheduleSchema,
 } from "./aops.js";
+import { StreamEventSchema } from "./ingestion.js";
 
 const UUID = "3f1c2a64-8d0e-4b8e-9a53-0f7c1b2d4e61";
 const aop = {
@@ -129,5 +130,21 @@ describe("contratos de AOP", () => {
     expect(AopRunPageSchema.safeParse({ items: [run], nextCursor: null }).success).toBe(true);
     expect(AopRunPageSchema.safeParse({ items: [], nextCursor: "abc" }).success).toBe(true);
     expect(AopRunPageSchema.safeParse({ items: [run] }).success).toBe(false);
+  });
+
+  it("StreamEvent aop.run_requested: aopId uuid, fireAt ISO e sem cliente (o AOP é do tenant)", () => {
+    const event = {
+      type: "aop.run_requested",
+      eventId: "7a1c2a64-8d0e-4b8e-9a53-0f7c1b2d4e62",
+      tenantId: "t1",
+      clientId: "",
+      aopId: UUID,
+      fireAt: "2026-11-27T12:01:00.000Z",
+    };
+    expect(StreamEventSchema.safeParse(event).success).toBe(true);
+    expect(StreamEventSchema.safeParse({ ...event, clientId: "c1" }).success).toBe(false);
+    expect(StreamEventSchema.safeParse({ ...event, aopId: "x" }).success).toBe(false);
+    expect(StreamEventSchema.safeParse({ ...event, fireAt: "ontem" }).success).toBe(false);
+    expect(StreamEventSchema.safeParse({ ...event, tenantId: undefined }).success).toBe(false);
   });
 });

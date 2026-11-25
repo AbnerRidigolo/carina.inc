@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "./core/config/config.module.js";
 import { LoggingModule } from "./core/logging/logging.module.js";
 import { RedisModule } from "./core/redis/redis.module.js";
+import { AopsCoreModule } from "./modules/aops/aops-core.module.js";
 import { DataIngestionCoreModule } from "./modules/data-ingestion/data-ingestion-core.module.js";
 import { ImportsCoreModule } from "./modules/imports/imports-core.module.js";
 import { InboxCoreModule } from "./modules/inbox/inbox-core.module.js";
@@ -20,13 +21,16 @@ import { OrchestratorModule } from "./modules/orchestrator/orchestrator.module.j
  * - ImportsCoreModule → ImportWorker (grupo `imports` do stream `jobs`) e ImportCleanupJob (timer
  *   de 5 min com lock global `imports:cleanup`);
  * - MonitorCoreModule → MonitorJob (timer de MONITOR_INTERVAL_MS, só no pregão, com lock global
- *   `monitor:tick`; grava portfolio_alert e publica `monitor.alert` em `inbox.events`).
+ *   `monitor:tick`; grava portfolio_alert e publica `monitor.alert` em `inbox.events`);
+ * - AopsCoreModule → AopJob (agenda dos AOPs a cada AOP_TICK_MS com lock global `aops:tick` e
+ *   disparo idempotente; disparos manuais pelo grupo `aops` do stream `jobs`).
  */
 @Module({
   imports: [
     ConfigModule,
     LoggingModule.forRoot(),
     RedisModule,
+    AopsCoreModule,
     DataIngestionCoreModule,
     ImportsCoreModule,
     InboxCoreModule,

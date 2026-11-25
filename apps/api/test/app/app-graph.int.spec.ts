@@ -15,6 +15,7 @@ import { AppModule } from "../../src/app.module.js";
 import { ENV } from "../../src/core/config/config.module.js";
 import { loadEnv } from "../../src/core/config/env.js";
 import { StreamsService, type ConsumeOptions } from "../../src/core/redis/streams.service.js";
+import { AopJob } from "../../src/modules/aops/aop.job.js";
 import { ChatGateway } from "../../src/modules/chat/chat.gateway.js";
 import { InboxBroadcast } from "../../src/modules/chat/inbox-broadcast.js";
 import { SyncWorker } from "../../src/modules/data-ingestion/sync.worker.js";
@@ -141,7 +142,8 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ImportWorker).running).toBe(true);
     expect(ref.get(ImportCleanupJob).running).toBe(true);
     expect(ref.get(MonitorJob).running).toBe(true);
-    expect(groups.sort()).toEqual(["jobs:imports", "jobs:resumers", "jobs:sync"]);
+    expect(ref.get(AopJob).running).toBe(true);
+    expect(groups.sort()).toEqual(["jobs:aops", "jobs:imports", "jobs:resumers", "jobs:sync"]);
     expect(controllersOf(ref)).toEqual([]);
     expect(ref.get(MarketService)).toBeInstanceOf(MarketService);
     expect(() => ref?.get(MarketController, { strict: false })).toThrow();

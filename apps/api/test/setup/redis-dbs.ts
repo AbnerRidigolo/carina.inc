@@ -60,10 +60,14 @@ export const REDIS_DBS = {
  * - monitor/monitor.int.spec.ts divide com app/app-graph.int.spec.ts, que não lê nem grava
  *   chaves (o `consume` dele é um no-op); o monitor só apaga `monitor:*` e `market:*` e filtra
  *   `inbox.events` pelos próprios tenants.
+ * - aops/aop-run.int.spec.ts divide com app/app-graph.int.spec.ts pelo mesmo motivo; chama o
+ *   handler do AopJob direto (não consome `jobs`) e só apaga `aops:*` e as chaves de cota dos
+ *   próprios tenants.
  */
 export const SHARED_REDIS_DBS = {
   int: {
     "monitor/monitor.int.spec.ts": "app/app-graph.int.spec.ts",
+    "aops/aop-run.int.spec.ts": "app/app-graph.int.spec.ts",
   },
   e2e: {},
 } as const satisfies {

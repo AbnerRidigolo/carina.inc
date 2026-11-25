@@ -80,6 +80,11 @@ export const EnvSchema = z
     /** Intervalo (ms) entre ciclos do monitor de carteira. Padrão 10 min; mínimo 1 min. */
     MONITOR_INTERVAL_MS: z.coerce.number().int().min(60_000).default(600_000),
     /**
+     * Intervalo (ms) entre ciclos da agenda dos AOPs (procedimentos de agentes). Padrão 5 min;
+     * mínimo 1 min. Um disparo vencido roda no primeiro ciclo depois do horário agendado.
+     */
+    AOP_TICK_MS: z.coerce.number().int().min(60_000).default(300_000),
+    /**
      * Símbolos cotados por ciclo do monitor (rodízio sobre a carteira de todos os tenants). Padrão
      * 10 = MARKET_MONITOR_MAX_CALLS_PER_MIN (10) × MARKET_BRAPI_MAX_SYMBOLS_PER_CALL (1).
      */

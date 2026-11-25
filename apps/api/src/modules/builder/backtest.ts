@@ -3,6 +3,13 @@
  *
  * Port de `legacy/python/carina/builder/backtest.py`: sem aleatoriedade e sem lookahead (a posição
  * do dia `t` usa o sinal calculado com dados até `t-1`). Métricas em base 100 (equity inicial).
+ *
+ * Decisão deliberada: o SINAL do `sma_cross` é exato, em aritmética inteira (BigInt) sobre as
+ * strings decimais de preço, e não em float. Janelas planas ou empatadas dão SMAs matematicamente
+ * iguais, e a soma em float do Python varia por versão (3.12+ usa soma compensada, 3.11 não), o que
+ * invertia `fast > slow` e mudava trocas e equity. Aqui um empate matemático é SEMPRE "fora da
+ * posição", de forma determinística. Retornos, equity, drawdown e volatilidade seguem em float, com
+ * paridade bit a bit com o Python.
  */
 import type { BacktestResult, HistoricalBar, StrategyKind } from "@carina/shared";
 import { round4 } from "../../core/math/round4.js";
@@ -18,25 +25,32 @@ export interface BacktestInput {
   slow: number;
 }
 
-/** Média das `window` barras anteriores a `endExclusive` (`null` se não há barras suficientes). */
-function sma(closes: number[], window: number, endExclusive: number): number | null {
-  if (endExclusive < window) return null;
-  let sum = 0;
-  for (let i = endExclusive - window; i < endExclusive; i++) sum += closes[i] ?? 0;
-  return sum / window;
+/** Casas decimais máximas de `PriceSchema` (até 6): todo preço vira inteiro escalado por 10^6. */
+const PRICE_DECIMALS = 6;
+
+/** "12.5" → 12500000n, exato (sem passar por float). */
+function toScaled(price: string): bigint {
+  const [intPart = "0", frac = ""] = price.split(".");
+  return BigInt(intPart + frac.padEnd(PRICE_DECIMALS, "0").slice(0, PRICE_DECIMALS));
 }
 
-/** Sinal por barra (`true` = comprado), usando dados ATÉ a própria barra. */
-function signals(kind: StrategyKind, closes: number[], fast: number, slow: number): boolean[] {
-  if (kind === "buy_hold") return closes.map(() => true);
-  return closes.map((_, t) => {
-    const fastSma = sma(closes, fast, t + 1);
-    const slowSma = sma(closes, slow, t + 1);
-    return fastSma !== null && slowSma !== null && fastSma > slowSma;
+/** Sinal por barra (`true` = comprado), usando dados ATÉ a própria barra, com decisão exata. */
+function signals(kind: StrategyKind, scaled: bigint[], fast: number, slow: number): boolean[] {
+  if (kind === "buy_hold") return scaled.map(() => true);
+  // Soma acumulada: prefix[i] = soma das i primeiras barras (janela = diferença de dois prefixos).
+  const prefix: bigint[] = [0n];
+  for (const v of scaled) prefix.push((prefix[prefix.length - 1] ?? 0n) + v);
+  const windowSum = (end: number, window: number): bigint =>
+    (prefix[end] ?? 0n) - (prefix[end - window] ?? 0n);
+  return scaled.map((_, t) => {
+    const end = t + 1;
+    if (end < fast || end < slow) return false;
+    // média rápida > média lenta  <=>  fastSum * slow > slowSum * fast (empate → fora)
+    return windowSum(end, fast) * BigInt(slow) > windowSum(end, slow) * BigInt(fast);
   });
 }
 
-/** Desvio-padrão populacional (`statistics.pstdev` do Python). */
+/** Desvio-padrão populacional (dois passos: média, depois variância). */
 function pstdev(values: number[]): number {
   const mean = values.reduce((s, v) => s + v, 0) / values.length;
   const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length;
@@ -62,7 +76,12 @@ export function runBacktest(input: BacktestInput): Omit<BacktestResult, "usage">
   if (!first || !last) throw new ValidationError("Histórico vazio");
 
   const closes = bars.map((b) => Number(b.close));
-  const flags = signals(kind, closes, fast, slow);
+  const flags = signals(
+    kind,
+    bars.map((b) => toScaled(b.close)),
+    fast,
+    slow,
+  );
 
   let equity = 100;
   let peak = equity;

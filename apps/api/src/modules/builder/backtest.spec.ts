@@ -75,12 +75,37 @@ describe("runBacktest: histórico insuficiente", () => {
   it("falha explicitamente, com a contagem de barras e o mínimo", () => {
     const run = () => smaCross([1, 2, 3], 2, 10);
     expect(run).toThrow(ValidationError);
-    expect(run).toThrow(/insuficiente.*3 barras.*mínimo 11/);
+    expect(run).toThrow("Histórico insuficiente para 'sma_cross': 3 barras (mínimo 11)");
   });
 
   it("buy_hold exige ao menos 2 barras", () => {
-    expect(() => buyHold([100])).toThrow(/1 barras.*mínimo 2/);
+    expect(() => buyHold([100])).toThrow(
+      "Histórico insuficiente para 'buy_hold': 1 barras (mínimo 2)",
+    );
     expect(buyHold([100, 101]).bars).toBe(2);
+  });
+});
+
+describe("runBacktest: empate exato no sma_cross", () => {
+  // Esperados: motor Python com o SINAL exato (Fraction) e o resto em float, sobre séries geradas
+  // por fuzz com platôs, onde a soma em float diverge da exata (Python 3.13 e TS flutuam diferente).
+  it("série totalmente plana: SMAs iguais, empate = fora da posição (0 trocas, equity 100)", () => {
+    const r = smaCross(Array<number>(18).fill(13.96), 3, 7);
+    expect(r.trades).toBe(0);
+    expect(r.finalEquity).toBe(100);
+    expect(r.equityCurve).toEqual(Array<number>(18).fill(100));
+  });
+
+  it("platôs de preço: sinal exato liga e desliga nos empates (3 trocas), equity 100", () => {
+    const closes = [
+      24.72, 24.72, 24.72, 24.72, 24.92, 24.92, 24.92, 24.92, 24.92, 24.92, 24.92, 24.92, 25.02,
+      25.02, 25.02, 25.02, 25.02, 25.02,
+    ];
+    const r = smaCross(closes, 3, 7);
+    expect(r.trades).toBe(3); // a soma em float daria 1 troca e equity 100,4013
+    expect(r.finalEquity).toBe(100);
+    expect(r.totalReturnPct).toBe(0);
+    expect(r.equityCurve).toEqual(Array<number>(18).fill(100));
   });
 });
 
@@ -205,7 +230,7 @@ const PARIDADE_PYTHON = [
 ] as const;
 
 describe("runBacktest: paridade com o Python", () => {
-  it.each(PARIDADE_PYTHON)(": métricas e curva idênticas às do motor Python", (caso) => {
+  it.each(PARIDADE_PYTHON)("$nome: métricas e curva idênticas às do motor Python", (caso) => {
     const r = runBacktest({
       kind: caso.kind,
       symbol: "PETR4",

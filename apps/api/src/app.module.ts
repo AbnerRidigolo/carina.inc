@@ -4,6 +4,7 @@ import { LoggingModule, type LoggingOptions } from "./core/logging/logging.modul
 import { RedisModule } from "./core/redis/redis.module.js";
 import { AgentsModule } from "./modules/agents/agents.module.js";
 import { BillingModule } from "./modules/billing/billing.module.js";
+import { BuilderModule } from "./modules/builder/builder.module.js";
 import { ChatModule } from "./modules/chat/chat.module.js";
 import { DataIngestionModule } from "./modules/data-ingestion/data-ingestion.module.js";
 import { HealthModule } from "./modules/health/health.module.js";
@@ -52,6 +53,7 @@ export class AppModule {
         ImportsModule,
         MarketModule,
         EvaluationModule,
+        BuilderModule,
         MonitorModule,
         KnowledgeModule,
         LlmModule,

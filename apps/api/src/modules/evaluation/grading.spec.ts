@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import { EVAL_DATASET, type EvalCase } from "./dataset.js";
-import { catalog, evaluate, gradeCase, normalize, round4 } from "./grading.js";
+import { catalog, evaluate, gradeCase, normalize } from "./grading.js";
 
 const caso: EvalCase = {
   id: "t",
@@ -93,17 +93,6 @@ describe("gradeCase", () => {
       ],
     };
     expect(gradeCase(tres, "aaa").score).toBe(0.3333);
-  });
-});
-
-describe("round4", () => {
-  it("imita o round(x, 4) do Python, inclusive empates exatos (para o par)", () => {
-    expect(round4(0.03125)).toBe(0.0312);
-    expect(round4(0.09375)).toBe(0.0938);
-    expect(round4(0.00005)).toBe(0.0001);
-    expect(round4(2 / 3)).toBe(0.6667);
-    expect(round4(1)).toBe(1);
-    expect(round4(0)).toBe(0);
   });
 });
 

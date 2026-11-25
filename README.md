@@ -43,10 +43,10 @@ com `docker compose down -v` antes de subir de novo. Sem isso, o seed falha com
 O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a base de conhecimento
 (`cliente-conservador`, `cliente-moderado` e `cliente-arrojado`) e duas chaves:
 
-| Variável            | Valor padrão                               | Escopos                                         |
-| ------------------- | ------------------------------------------ | ----------------------------------------------- |
-| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run` |
-| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`                          |
+| Variável            | Valor padrão                               | Escopos                                                           |
+| ------------------- | ------------------------------------------ | ----------------------------------------------------------------- |
+| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run`, `builder:run`    |
+| `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`                                            |
 
 > **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
 > `NODE_ENV=production` o seed recusa as chaves fixas, a menos que `SEED_ALLOW_DEMO_KEYS=true`.
@@ -173,6 +173,34 @@ detalhes em
 [ARQUITETURA](docs/ARCHITECTURE.md#16-benchmark-seal-br-evaluation) e
 [decisões](docs/DECISOES-E-GARANTIAS.md#benchmark-seal-br-fase-2-entrega-3).
 
+## Estratégias e backtest
+
+O `builder` guarda estratégias **declarativas** (nunca código do cliente) e roda um backtest
+determinístico sobre o histórico diário do mercado. Duas estratégias: `buy_hold` e `sma_cross`
+(média móvel rápida contra lenta). Escopo `builder:run` (a chave app da demo tem):
+
+```bash
+curl -s -X POST localhost:3000/api/builder/strategies -H "$APP" -H 'Content-Type: application/json' \
+  -d '{"name":"Cruzamento 10/50","spec":{"kind":"sma_cross","symbol":"PETR4","fast":10,"slow":50}}'
+# → 201 {"id":"<uuid>","name":"Cruzamento 10/50","spec":{...},"createdAt":"..."}
+curl -s localhost:3000/api/builder/strategies -H "$APP"                       # as do tenant, mais novas primeiro
+curl -s localhost:3000/api/builder/strategies/<uuid> -H "$APP"                # 404 se não for do tenant
+curl -s -X POST "localhost:3000/api/builder/strategies/<uuid>/backtest?range=1y" -H "$APP"
+# → {"symbol":"PETR4","kind":"sma_cross","bars":252,"totalReturnPct":...,"equityCurve":[...],
+#    "usage":{"workType":"backtest","priceBrl":"7.50"}}
+```
+
+Criar, listar e ler são grátis. Cada backtest bem-sucedido custa R$ 7,50 (`backtest`) e gasta 1
+unidade da cota mensal. A ordem é: `range` válido (`5d` a `5y`, padrão `1y`), estratégia do tenant
+(404), histórico pelo `MarketService` (orçamento esgotado: 503 com `Retry-After`; provedor fora:
+502), motor (histórico insuficiente ou fechamento menor ou igual a zero: 422) e só então a reserva
+da cota (esgotada: 429 com `Retry-After`) e a cobrança. Qualquer erro anterior não reserva cota
+nem cobra. Cada tenant guarda no máximo 100 estratégias (a 101ª é 422). O sinal do `sma_cross` é
+exato e um empate entre as médias significa fora da posição. Limitações: só duas estratégias, sem
+custos de transação nem slippage, sem edição ou remoção de estratégias e sem tela na web; detalhes em
+[ARQUITETURA](docs/ARCHITECTURE.md#17-estratégias-e-backtest-builder) e
+[decisões](docs/DECISOES-E-GARANTIAS.md#estratégias-e-backtest-fase-2-entrega-4).
+
 ## Arquitetura
 
 ```mermaid
@@ -259,6 +287,10 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   cobrança) e nenhuma resposta nos logs:
   [`evaluation.e2e.spec.ts`](apps/api/test/evaluation/evaluation.e2e.spec.ts),
   [`grading.spec.ts`](apps/api/src/modules/evaluation/grading.spec.ts).
+- **Estratégias e backtest**: escopo `builder:run`, estratégia de outro tenant é 404, o backtest
+  cobra R$ 7,50 uma vez e só no sucesso, e 404, 422, 502, 503 e 429 não cobram:
+  [`builder.e2e.spec.ts`](apps/api/test/builder/builder.e2e.spec.ts),
+  [`backtest.spec.ts`](apps/api/src/modules/builder/backtest.spec.ts).
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -332,7 +364,7 @@ já feitos; notas de corretagem em PDF na entrega 2), AOPs, `builder` e os agent
 Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
 categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
 base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor de carteira também
-está feito (alerta pela API e pelo WebSocket, sem canal externo), e o `evaluation` (benchmark SEAL BR) também, só pela API.
+está feito (alerta pela API e pelo WebSocket, sem canal externo), e o `evaluation` (benchmark SEAL BR) e o `builder` (estratégias e backtest) também, só pela API.
 
 **Fase 3 — integrações e remoção do Python:** notificações externas (WhatsApp, SMTP e webhook) para os alertas do monitor
 e remoção de `legacy/python` e do job `legacy-python` do CI.

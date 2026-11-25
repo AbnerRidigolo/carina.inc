@@ -63,6 +63,8 @@ apps/api/src/modules
                   Redis, rotas `/api/market/*` e `MarketService.priceFor` (preço de servidor)
   evaluation      benchmark SEAL BR: dataset estático, correção determinística e rotas
                   `/api/eval/*`
+  builder         estratégias declarativas (Postgres, RLS), backtest determinístico e rotas
+                  `/api/builder/*`
   health          /health e /ready (single-flight + cache curto)
 ```
 
@@ -83,7 +85,7 @@ As regras de fronteira são verificadas assim:
    com `search_path = public, pg_temp`. Chave revogada ou tenant suspenso → 401. `@Public()` só em
    `/health` e `/ready`.
 2. **Escopos.** Toda rota não pública declara `@RequireScopes` (todos) ou `@RequireAnyScope` (um
-   deles): `chat`, `inbox:decide`, `data:write`, `market:read`, `eval:run` e `admin`.
+   deles): `chat`, `inbox:decide`, `data:write`, `market:read`, `eval:run`, `builder:run` e `admin`.
 3. **`RateLimitGuard`.** Janela deslizante de 60 s por tenant (ZSET + Lua), com `Retry-After`.
    Falha fechado se o Redis cair.
 4. **`TenantContext`** (AsyncLocalStorage). O `TenantPrismaService` abre uma transação por
@@ -538,3 +540,42 @@ POST /api/eval/submit            → evaluate(answers) → quota.reserve(tenant)
   `clientId` nulo (o benchmark é do tenant, não de um cliente). 403, 422 e 429 não cobram.
 - **LGPD.** Respostas e gabarito nunca vão para log, erro ou auditoria: o corpo só é lido pelo
   motor, e os erros e logs levam ids e contagens.
+
+## 17. Estratégias e backtest (`builder`)
+
+Estratégias declarativas e um backtest determinístico, portados de
+`legacy/python/carina/builder/`. Só roda no processo **api**; não há job nem worker. Desenho no
+[spec](superpowers/specs/2026-11-25-builder-design.md).
+
+```text
+POST /api/builder/strategies               → StrategyCreateSchema → repo.create(tx)   (201; grátis)
+GET  /api/builder/strategies               → repo.list(tx)                            (grátis)
+GET  /api/builder/strategies/:id           → repo.get(tx, id)  (404 se não for do tenant; grátis)
+POST /api/builder/strategies/:id/backtest?range=
+     → range (HistoryRangeSchema, padrão 1y) → repo.get (404)
+     → MarketService.history(symbol, range)   (503 orçamento, 502 provedor)
+     → runBacktest(...)                       (422 histórico insuficiente / fechamento ≤ 0)
+     → quota.reserve(tenant)                  (429 sem cobrança)
+     → billing.record(backtest, clientId nulo)
+       (falhou → quota.refund(tenant) e repassa o erro)
+     → resultado + usage { backtest, "7.50" }
+```
+
+- **Escopo e guards.** As quatro rotas exigem `builder:run`, com os guards globais na ordem das
+  demais. Criar, listar e ler não cobram nem reservam cota.
+- **Dado.** A tabela `strategy` (migração 0010) fica sob RLS com FORCE por tenant, com CHECKs que
+  espelham o schema; o [`StrategyRepository`](../apps/api/src/modules/builder/strategy.repository.ts)
+  recebe a `tx` do `TenantPrismaService`. O limite de 100 estratégias por tenant é conferido na
+  mesma transação, sob um lock consultivo por tenant, então criações simultâneas não passam dele.
+- **Motor.** [`backtest.ts`](../apps/api/src/modules/builder/backtest.ts) é puro: o sinal do dia
+  `t-1` decide a posição do dia `t` (sem lookahead); o `sma_cross` compra quando a média rápida é
+  **estritamente maior** que a lenta, calculada em aritmética inteira exata (BigInt) sobre as
+  strings de preço, e um empate significa fora da posição; fechamento menor ou igual a zero é
+  recusado (422), porque dividiria por zero nos retornos. A volatilidade é o desvio-padrão
+  populacional dos retornos diários vezes a raiz de 252, com arredondamento a 4 casas.
+- **Ordem da cobrança.** Tudo o que pode falhar por motivo do cliente ou do provedor (estratégia,
+  histórico, motor) roda ANTES da reserva da cota; só o sucesso reserva e cobra `backtest` a
+  R$ 7,50, uma vez, com `clientId` nulo. Antes até do histórico, uma pré-checagem sem I/O recusa
+  (422) o `range` que não comporta as barras da estratégia, para não gastar o orçamento do provedor. Os erros do mercado são os mesmos das rotas
+  `/api/market/*` (mapeados pelo filtro global de erros de domínio).
+- **LGPD.** Os logs levam só ids, `kind` e contagens (nunca o nome da estratégia).

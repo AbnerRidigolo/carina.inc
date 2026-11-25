@@ -50,6 +50,7 @@ model Tenant {
   clients     Client[]
   usage       UsageRecord[]
   auditEvents AuditEvent[]
+  strategies  Strategy[]
 
   @@map("tenant")
 }
@@ -330,6 +331,31 @@ model PortfolioAlert {
   /// lista do cliente, mais novo primeiro
   @@index([tenantId, clientId, createdAt(sort: Desc), id(sort: Desc)])
   @@map("portfolio_alert")
+}
+
+/// Estratégia declarativa do builder (spec §4): pertence ao tenant, não a um cliente.
+/// No banco (migrations/0010): CHECKs espelhando o StrategySpecSchema (kind, símbolo, janelas e
+/// fast < slow só em sma_cross); limite de 100 por tenant imposto pelo StrategyRepository.
+model Strategy {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  /// 1..120 caracteres, já aparado
+  name      String
+  /// buy_hold, sma_cross
+  kind      String
+  /// símbolo no formato do mercado (SYMBOL_RE)
+  symbol    String
+  /// janela rápida, 2..200
+  fast      Int
+  /// janela lenta, 3..400
+  slow      Int
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// lista do tenant, mais nova primeiro
+  @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("strategy")
 }
 
 // ─── Conhecimento (grafo + busca híbrida) ───────────────────────────────────

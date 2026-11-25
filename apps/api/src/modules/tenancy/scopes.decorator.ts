@@ -7,6 +7,7 @@ export const SCOPES = [
   "data:write",
   "market:read",
   "eval:run",
+  "builder:run",
   "admin",
 ] as const;
 export type Scope = (typeof SCOPES)[number];

@@ -12,6 +12,9 @@ export const SignedDecimalSchema = z
   .string()
   .regex(/^-?\d{1,12}(\.\d{1,6})?$/, "decimal com sinal inválido");
 
+/** Símbolo aceito antes de montar qualquer URL ou chave de cache (ação, fundo, BDR ou índice `^`). */
+export const SYMBOL_RE = /^\^?[A-Z0-9]{1,12}$/;
+
 export const MarketStateSchema = z.enum(["open", "closed"]);
 export type MarketState = z.infer<typeof MarketStateSchema>;
 

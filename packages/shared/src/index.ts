@@ -3,6 +3,7 @@ export const SHARED_VERSION = "1";
 export * from "./agents.js";
 export * from "./audit.js";
 export * from "./billing.js";
+export * from "./builder.js";
 export * from "./chat.js";
 export * from "./evaluation.js";
 export * from "./imports.js";

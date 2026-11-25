@@ -9,7 +9,8 @@
  * iguais, e a soma em float do Python varia por versão (3.12+ usa soma compensada, 3.11 não), o que
  * invertia `fast > slow` e mudava trocas e equity. Aqui um empate matemático é SEMPRE "fora da
  * posição", de forma determinística. Retornos, equity, drawdown e volatilidade seguem em float, com
- * paridade bit a bit com o Python.
+ * paridade numérica com o Python (após arredondamento): a volatilidade pode diferir no último ulp em
+ * entradas extremas, o que o arredondamento a 4 casas absorve.
  */
 import type { BacktestResult, HistoricalBar, StrategyKind } from "@carina/shared";
 import { round4 } from "../../core/math/round4.js";
@@ -60,7 +61,8 @@ function pstdev(values: number[]): number {
 /**
  * Roda o backtest de uma especificação sobre barras diárias em ordem cronológica.
  *
- * @throws ValidationError se o histórico é insuficiente para a estratégia.
+ * @throws ValidationError se o histórico é insuficiente para a estratégia ou se algum fechamento
+ *   não é positivo (o `PriceSchema` aceita "0", que daria Infinity/NaN nos retornos).
  */
 export function runBacktest(input: BacktestInput): Omit<BacktestResult, "usage"> {
   const { kind, symbol, bars, fast, slow } = input;
@@ -76,6 +78,11 @@ export function runBacktest(input: BacktestInput): Omit<BacktestResult, "usage">
   if (!first || !last) throw new ValidationError("Histórico vazio");
 
   const closes = bars.map((b) => Number(b.close));
+  // Mensagem fixa só com a contagem de barras afetadas: nunca ecoa preços.
+  const nonPositive = closes.filter((c) => !(c > 0)).length;
+  if (nonPositive > 0) {
+    throw new ValidationError(`Fechamento não positivo em ${String(nonPositive)} barras`);
+  }
   const flags = signals(
     kind,
     bars.map((b) => toScaled(b.close)),

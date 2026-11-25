@@ -86,6 +86,21 @@ describe("runBacktest: histórico insuficiente", () => {
   });
 });
 
+describe("runBacktest: fechamento não positivo", () => {
+  it("fechamento zero recusa o backtest", () => {
+    // "0" passa no PriceSchema, mas dividiria por zero nos retornos (Infinity/NaN).
+    const run = () => buyHold([100, 0, 101, 0]);
+    expect(run).toThrow(ValidationError);
+    // Mensagem fixa só com a contagem de barras afetadas, sem preços.
+    expect(run).toThrow("Fechamento não positivo em 2 barras");
+  });
+
+  it("vale também para o sma_cross e para fechamento negativo", () => {
+    const closes = [-1, ...Array.from({ length: 11 }, (_, i) => 10 + i)];
+    expect(() => smaCross(closes, 2, 10)).toThrow("Fechamento não positivo em 1 barras");
+  });
+});
+
 describe("runBacktest: empate exato no sma_cross", () => {
   // Esperados: motor Python com o SINAL exato (Fraction) e o resto em float, sobre séries geradas
   // por fuzz com platôs, onde a soma em float diverge da exata (Python 3.13 e TS flutuam diferente).

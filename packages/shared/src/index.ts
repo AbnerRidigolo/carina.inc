@@ -1,6 +1,7 @@
 export const SHARED_VERSION = "1";
 
 export * from "./agents.js";
+export * from "./aops.js";
 export * from "./audit.js";
 export * from "./billing.js";
 export * from "./builder.js";

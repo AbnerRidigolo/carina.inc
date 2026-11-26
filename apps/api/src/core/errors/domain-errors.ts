@@ -31,6 +31,11 @@ export class PayloadTooLargeError extends DomainError {
   readonly code = "payload_too_large";
   readonly status = 413;
 }
+/** Conflito com o estado atual do recurso (ex.: disparo manual repetido no mesmo minuto). */
+export class ConflictError extends DomainError {
+  readonly code = "conflict";
+  readonly status = 409;
+}
 export class ApprovalConflictError extends DomainError {
   readonly code = "approval_conflict";
   readonly status = 409;

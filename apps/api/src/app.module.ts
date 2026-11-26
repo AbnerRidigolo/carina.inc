@@ -3,6 +3,7 @@ import { ConfigModule } from "./core/config/config.module.js";
 import { LoggingModule, type LoggingOptions } from "./core/logging/logging.module.js";
 import { RedisModule } from "./core/redis/redis.module.js";
 import { AgentsModule } from "./modules/agents/agents.module.js";
+import { AopsModule } from "./modules/aops/aops.module.js";
 import { BillingModule } from "./modules/billing/billing.module.js";
 import { BuilderModule } from "./modules/builder/builder.module.js";
 import { ChatModule } from "./modules/chat/chat.module.js";
@@ -54,6 +55,7 @@ export class AppModule {
         MarketModule,
         EvaluationModule,
         BuilderModule,
+        AopsModule,
         MonitorModule,
         KnowledgeModule,
         LlmModule,

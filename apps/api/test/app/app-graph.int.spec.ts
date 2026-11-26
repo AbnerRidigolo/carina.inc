@@ -95,10 +95,11 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ImportWorker).running).toBe(true);
     expect(ref.get(ImportCleanupJob).running).toBe(true);
     expect(ref.get(MonitorJob).running).toBe(true);
+    expect(ref.get(AopJob).running).toBe(true);
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(ref.get(ChatGateway)).toBeInstanceOf(ChatGateway);
     expect(ref.get(HealthController)).toBeInstanceOf(HealthController);
-    expect(groups.sort()).toEqual(["jobs:imports", "jobs:resumers", "jobs:sync"]);
+    expect(groups.sort()).toEqual(["jobs:aops", "jobs:imports", "jobs:resumers", "jobs:sync"]);
   });
 
   it("AppModule com WORKERS_ENABLED=false: providers existem, mas nenhum worker liga", async () => {
@@ -111,11 +112,13 @@ describe("grafo de módulos de produção", () => {
     expect(ref.get(ImportWorker).running).toBe(false);
     expect(ref.get(ImportCleanupJob).running).toBe(false);
     expect(ref.get(MonitorJob).running).toBe(false);
+    expect(ref.get(AopJob).running).toBe(false);
     // O broadcast da inbox é por processo HTTP (repassa aos sockets dele), não é worker.
     expect(ref.get(InboxBroadcast)).toBeInstanceOf(InboxBroadcast);
     expect(groups).toEqual([]);
     expect(controllersOf(ref)).toEqual(
       [
+        "AopsController",
         "BillingController",
         "BuilderController",
         "ChatController",

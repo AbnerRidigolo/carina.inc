@@ -135,7 +135,7 @@ describe("seed de demo", () => {
       await migratorSql(`UPDATE tenant SET suspended_at = NULL WHERE id = $1`, [tenantId]);
     }, 120_000);
 
-    it("rodar o seed de novo reescopa uma chave existente (banco semeado antes ganha market:read, eval:run e builder:run)", async () => {
+    it("rodar o seed de novo reescopa uma chave existente (banco semeado antes ganha market:read, eval:run, builder:run e aops:manage)", async () => {
       await migratorSql(`UPDATE api_key SET scopes = $2::text[] WHERE hash = $1`, [
         hashApiKey(DEFAULT_DEMO_APP_KEY),
         ["chat", "data:write"],
@@ -147,6 +147,7 @@ describe("seed de demo", () => {
         [hashApiKey(DEFAULT_DEMO_APP_KEY)],
       );
       expect(must(row).scopes.sort()).toEqual([
+        "aops:manage",
         "builder:run",
         "chat",
         "data:write",
@@ -154,6 +155,14 @@ describe("seed de demo", () => {
         "market:read",
       ]);
     }, 120_000);
+
+    it("chave de demo tem aops:manage", async () => {
+      const [row] = await migratorSql<{ scopes: string[] }>(
+        `SELECT scopes FROM api_key WHERE hash = $1`,
+        [hashApiKey(DEFAULT_DEMO_APP_KEY)],
+      );
+      expect(must(row).scopes).toContain("aops:manage");
+    });
 
     it("chave de demo tem builder:run", async () => {
       const [row] = await migratorSql<{ scopes: string[] }>(
@@ -187,7 +196,7 @@ describe("seed de demo", () => {
       expect(keys).toHaveLength(2);
       const byHash = new Map(keys.map((k) => [k.hash, k]));
       expect(byHash.get(hashApiKey(DEFAULT_DEMO_APP_KEY))?.scopes.sort()).toEqual(
-        ["builder:run", "chat", "data:write", "eval:run", "market:read"].sort(),
+        ["aops:manage", "builder:run", "chat", "data:write", "eval:run", "market:read"].sort(),
       );
       expect(byHash.get(hashApiKey(DEFAULT_DEMO_APPROVER_KEY))?.scopes.sort()).toEqual(
         ["chat", "inbox:decide"].sort(),

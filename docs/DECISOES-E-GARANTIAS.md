@@ -259,6 +259,45 @@ o motivo de cada uma:
 - **Sem tela na web.** O builder só existe pela API.
 - **Sem histórico de execuções.** O resultado volta na resposta e some; só o uso cobrado fica no billing.
 
+## Procedimentos agendados, AOPs (fase 2, entrega 5)
+
+`POST/GET /api/aops`, `GET/PATCH /api/aops/:id`, `POST /api/aops/:id/run` e
+`GET /api/aops/:id/runs` (fluxo e módulos em
+[ARCHITECTURE.md](ARCHITECTURE.md#18-procedimentos-agendados-aops); desenho original no
+[spec](superpowers/specs/2026-11-25-aops-design.md)). Decisões e o motivo de cada uma:
+
+| Tema | Decisão | Motivo (e alternativa descartada) |
+| --- | --- | --- |
+| Hora da agenda | A `hour` é em São Paulo (UTC-3 fixo) | O Python usava UTC, então "9h" rodava às 6h da manhã do cliente; o Brasil não tem horário de verão, então a conversão é exata |
+| Execução | Assíncrona: a rota `/run` só enfileira (202) e o worker executa | Executar na requisição seguraria a conexão por até 20 clientes × agentes e estouraria timeouts; o Python rodava na própria requisição |
+| Armazenamento | Tabelas `aop` e `aop_run` no Postgres, sob RLS por tenant | O Python guardava os AOPs no FalkorDB, que o projeto não tem; o Postgres já isola por tenant e dá unicidade transacional |
+| Limites | Até 50 AOPs por tenant, 20 clientes e 3 agentes por AOP, descrição de até 2000 caracteres | Limites nossos, para a lista, o custo por disparo e a pergunta aos agentes terem teto |
+| Agentes | Só os 7 especialistas do chat; o Executor (e o navigator) nunca é usado | Um procedimento agendado roda sem ninguém olhando: operar (propor ordens) sem aprovação humana seria inaceitável |
+| Disparo agendado | Idempotente por `claimFire` (UPDATE condicional em `last_fire_at`), mais o único `(aop_id, client_id, fire_at)` | Duas réplicas ou um ciclo repetido não rodam nem cobram duas vezes; no máximo uma vez por horário |
+| Disparo manual | Não usa `claimFire` nem mexe em `last_fire_at`; 1 por AOP por minuto (Redis `SET NX PX 60000`, senão 409 com `Retry-After`) | Um manual consumindo o `last_fire_at` engoliria o disparo agendado ainda pendente; o `fireAt` manual tem precisão de milissegundos para não colidir com o horário agendado |
+| Cota | Reservada por cliente (1 unidade cada), devolvida se todos os agentes falham ou a cobrança falha; esgotada no meio → `skipped/quota_exceeded` dele e dos seguintes | A execução é por cliente (cada um é cobrado e auditado); reservar o AOP inteiro de uma vez cobraria clientes que nunca rodaram |
+| Cobrança | Criar, listar, ler e ligar/desligar são grátis; cada cliente executado cobra o tipo de trabalho dos agentes (`classifyWork`) | Mesma regra do chat; cobrado ⇔ concluído |
+| Criação | Compila por LLM sem cobrar; só o limite global de requisições a limita | Igual ao Python; o custo é uma chamada curta e o tenant tem teto de 50 AOPs |
+| `clientIds` | 1 a 20 `externalId`; um id desconhecido é ACEITO na criação e vira `client_not_found` na execução | Igual ao Python; rejeitar exigiria resolver cada id sob RLS na criação, e o cliente pode ser sincronizado depois |
+| Compilador | LLM com saída normalizada (agentes válidos, ordem do chat, no máximo 3) e a heurística como contingência | A saída do modelo não é confiável; sem agente nas duas → 422 |
+| LGPD | Logs só com ids, agentes e contagens; a descrição só vai ao Watchtower, como a pergunta do chat | A descrição é texto livre do cliente |
+
+### Limitações dos AOPs
+
+- **Sem edição nem remoção.** Só ligar e desligar (`PATCH { enabled }`); um AOP criado não muda
+  e não sai (conta para o limite de 50); errou, cria outro e desliga o antigo.
+- **Sem entrega externa.** O resultado fica em `aop_run` (e o uso e a auditoria, no billing e no
+  Watchtower); nada é enviado por e-mail, WhatsApp ou webhook (Fase 3).
+- **Sem tela na web.** Os AOPs só existem pela API.
+- **`client_not_found` não vai ao histórico.** `aop_run.client_id` é FK não nula para `client`,
+  então um id que não existe (ou sumiu) não gera linha: aparece só no log do worker (contagens) e
+  no resumo da execução, nunca em `GET /runs`.
+- **A heurística é só a contingência.** Entra quando o LLM falha ou não acha agente; a detecção do
+  dia da semana (e dos agentes) é por palavras-chave, aproximada: frases ambíguas podem cair no
+  padrão (semanal, sexta, 9h).
+- **No máximo uma vez.** Se o worker cai depois do `claimFire`, aquele horário agendado não roda de
+  novo (escolha por não cobrar em dobro).
+
 ## Garantias provadas por testes
 
 Cada linha cita o arquivo e o teste que a prova. Os testes de integração e E2E rodam contra
@@ -342,6 +381,17 @@ Postgres e Redis reais (no CI, `pgvector/pgvector:pg17` e `redis:7-alpine`), con
 | **`portfolio_alert` só chega ao socket do mesmo tenant e cliente**, e o `InboxBroadcast` não lê o banco | [`monitor.e2e.spec.ts`](../apps/api/test/monitor/monitor.e2e.spec.ts) ("recebe portfolio_alert do próprio cliente e não o de outro cliente/tenant"); [`inbox-broadcast.spec.ts`](../apps/api/src/modules/chat/inbox-broadcast.spec.ts) ("monitor.alert vira portfolio_alert só para a chave do evento, sem ler o banco") |
 | **Painel "Alertas da carteira"**: lista com o texto fixo, alerta ao vivo no topo sem duplicar, aviso de que não é recomendação, código do ativo como texto (sem interpretar HTML) | [`AlertsPanel.test.tsx`](../apps/web/src/features/alerts/AlertsPanel.test.tsx) ("lista os alertas da API com o texto fixo", "alerta ao vivo entra no topo e não duplica um já listado", "rodapé diz que não é recomendação", "renderiza o código do ativo como texto, sem interpretar HTML") |
 | Provedores fora: REST → 503 com `Retry-After`; WS → evento `error` sem texto interno; nos dois, cota devolvida e nada cobrado | [`chat.e2e.spec.ts`](../apps/api/test/chat/chat.e2e.spec.ts), [`ws.e2e.spec.ts`](../apps/api/test/chat/ws.e2e.spec.ts) |
+| **AOPs: escopo e isolamento**: sem `aops:manage` → 403 e sem chave → 401; AOP de outro tenant é 404 em ler, PATCH, run e runs | [`aops.e2e.spec.ts`](../apps/api/test/aops/aops.e2e.spec.ts) ("sem aops:manage → 403 problem+json; sem chave → 401", "outro tenant → 404 em ler, PATCH, run e runs; a lista não vaza") |
+| **AOPs: criar compila e não cobra**; sem agentes → 422; `clientIds` vazio ou com 21 → 422; PATCH liga e desliga | [`aops.e2e.spec.ts`](../apps/api/test/aops/aops.e2e.spec.ts) ("cria (201) compilando, lista e lê; criar não cobra", "descrição sem agentes → 422 com a lista de agentes", "clientIds vazio ou com 21 ids → 422; id desconhecido é aceito (vira client_not_found na execução)", "PATCH liga e desliga; corpo inválido → 422") |
+| **AOPs: disparo manual**: 202 com `fireAt` em milissegundos, o worker grava a execução, `last_fire_at` não muda e o segundo no mesmo minuto é 409; desligado → 409 sem gastar o minuto; id inexistente → 404 | [`aops.e2e.spec.ts`](../apps/api/test/aops/aops.e2e.spec.ts) ("run → 202 e o worker grava a execução; last_fire_at não muda; segundo run no mesmo minuto → 409", "run de AOP desligado → 409 e não consome o minuto", "run de id inexistente → 404 sem tocar o guard do minuto"); [`aop.job.spec.ts`](../apps/api/src/modules/aops/aop.job.spec.ts) ("disparo manual roda com o fireAt do evento, sem tocar em last_fire_at", "disparo agendado vencido antes de um manual ainda roda no tick seguinte") |
+| **AOPs: histórico paginado** do mais novo, com `limit` e cursor validados | [`aops.e2e.spec.ts`](../apps/api/test/aops/aops.e2e.spec.ts) ("runs pagina (mais novos primeiro), valida limit e cursor") |
+| **AOPs: nenhum log contém a descrição**, e o log da rota existe | [`aops.e2e.spec.ts`](../apps/api/test/aops/aops.e2e.spec.ts) ("nenhum log contém a descrição"); [`aop-runner.spec.ts`](../apps/api/src/modules/aops/aop-runner.spec.ts) ("pergunta aos agentes contém a descrição como dado (mensagem human isolada, nunca no system)") |
+| **AOPs: disparo agendado idempotente**: duas réplicas no mesmo horário rodam uma vez; a reentrega do manual não roda nem cobra de novo | [`aop.job.spec.ts`](../apps/api/src/modules/aops/aop.job.spec.ts) ("duas réplicas no mesmo fire (lock expirado entre elas) → roda uma vez (RF 1)"); [`aop-run.int.spec.ts`](../apps/api/test/aops/aop-run.int.spec.ts) ("duas réplicas no mesmo fire (sem o lock global entre elas) → roda uma vez (claimFire)", "reentrega de aop.run_requested não roda de novo nem cobra duas vezes; não toca em last_fire_at"); [`aops.int.spec.ts`](../apps/api/test/aops/aops.int.spec.ts) ("claimFire: só o primeiro de dois concorrentes ganha") |
+| **AOPs: execução por cliente**: grava `aop_run`, `usage_record` e `audit_event` do cliente certo; cota esgotada no meio pula os seguintes sem cobrar; cliente removido não roda nem cobra; todos os agentes falham → sem cobrança | [`aop-run.int.spec.ts`](../apps/api/test/aops/aop-run.int.spec.ts) ("AOP semanal vencido → aop_run gravado, usage_record e audit_event com o cliente certo", "cota esgotada no meio: os seguintes ficam skipped/quota_exceeded, sem cobrança", "cliente removido depois de criar o AOP: sem execução nem cobrança dele; os outros rodam"); [`aop-runner.spec.ts`](../apps/api/src/modules/aops/aop-runner.spec.ts) ("todos falham → failed/agents_failed, cota estornada, sem cobrança") |
+| **AOPs: agenda em São Paulo**: `previousFire` confere com o Python (UTC↔São Paulo), 23h de São Paulo continua no dia certo, e a varredura de 40 dias é monotônica | [`schedule.spec.ts`](../apps/api/src/modules/aops/schedule.spec.ts) ("23h de São Paulo já é o dia seguinte em UTC: o disparo continua no dia de São Paulo", "varrendo 40 dias de 15 em 15 min: o disparo é monotônico, no máximo 24h atrás e muda uma vez por dia") |
+| **AOPs: compilador não confiável**: normaliza a saída do modelo (descarta inválidos e executor, corta em 3), cai na heurística e, sem agentes, recusa | [`compiler.spec.ts`](../apps/api/src/modules/aops/compiler.spec.ts) ("normaliza a saída do modelo: descarta inválidos e executor, mapeia, dedupa, ordena e corta em 3", "modelo falha: usa a heurística", "sem agentes (modelo e heurística): ValidationError com a lista de agentes") |
+| **AOPs: RLS e limite**: o tenant B não lê nem grava `aop_run` de A; o 51º AOP é recusado; criações simultâneas respeitam o limite | [`aops.int.spec.ts`](../apps/api/test/aops/aops.int.spec.ts) ("aop_run sob RLS: B não lê nem grava execução no AOP ou cliente de A", "51º AOP → ValidationError", "criações simultâneas com 49 gravados: só uma entra (limite atômico)") |
+| **Chave de demo tem `aops:manage`** e o seed reescopa chave existente | [`seed.int.spec.ts`](../apps/api/test/seed/seed.int.spec.ts) ("chave de demo tem aops:manage", "rodar o seed de novo reescopa uma chave existente (banco semeado antes ganha market:read, eval:run, builder:run e aops:manage)") |
 
 ## Como rodar os testes
 

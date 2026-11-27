@@ -44,7 +44,9 @@ de uma requisição); compilar só por heurística (perde o "linguagem natural" 
 - `AopSchema` (shared): `id`, `name` (1..120), `description` (1..2000, o texto original), `agents`
   (1..3 dentre `insight`, `predictor`, `risk`, `strategist`, `tax`, `researcher`, `assessor_liaison`;
   ordem fixa do chat, mesmo `MAX_SPECIALISTS = 3`), `schedule`, `clientIds` (1..20 externalIds),
-  `enabled`, `createdAt`, `lastFireAt` (nullable).
+  `enabled`, `createdAt`, `lastFireAt`. Ao criar, `lastFireAt = previousFire(agenda, agora)` e, ao
+  religar, nunca recua (`GREATEST`): o primeiro disparo é o PRÓXIMO horário (decisão da revisão final;
+  o Python disparava no primeiro ciclo). Para rodar já, usa-se o disparo manual.
 - `ScheduleSchema`: `frequency` (`daily|weekly|monthly`), `weekday` (0=segunda…6=domingo), `day`
   (1..28), `hour` (0..23). **Hora em `America/Sao_Paulo`** (decisão nossa; o Python usava UTC — o
   cliente pensa no horário de Brasília e o Brasil não tem horário de verão). Padrão: semanal, sexta,
@@ -80,7 +82,9 @@ de uma requisição); compilar só por heurística (perde o "linguagem natural" 
   idempotente, execução. Um AOP/tenant que falha não derruba os outros.
 - **Manual:** `POST /api/aops/:id/run` grava o disparo (`trigger: manual`, `fire_at = now`) e publica
   `aop.run_requested` no stream `jobs`; responde **202** com o `fireAt`. O worker consome (grupo
-  `aops`) e executa. No máximo 1 disparo manual por AOP por minuto (409 se repetido).
+  `aops`) e executa. No máximo 1 disparo manual por AOP por minuto (409 `manual_run_too_soon` com `Retry-After`;
+  AOP desligado → 409 `aop_disabled`). O `fireAt` manual guarda milissegundos e nunca cai em `.000` de
+  um minuto cheio, para não coincidir com um horário agendado; o disparo manual NÃO altera `last_fire_at`.
 - **Por cliente** (sequencial dentro do AOP; teto de 20 clientes): resolve o externalId sob o tenant
   (sumiu → `skipped/client_not_found`, sem cobrança); reserva a cota mensal (esgotada →
   `skipped/quota_exceeded` para este e os seguintes, sem cobrança); busca conhecimento do cliente

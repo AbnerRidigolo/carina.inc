@@ -121,6 +121,14 @@ describe("loadEnv", () => {
     }
   });
 
+  it("AOP_TICK_MS: padrão 5 min, mínimo 1 min", () => {
+    expect(loadEnv(min).AOP_TICK_MS).toBe(300_000);
+    expect(loadEnv({ ...min, AOP_TICK_MS: "60000" }).AOP_TICK_MS).toBe(60_000);
+    for (const bad of ["59999", "0", "1.5", "x"]) {
+      expect(() => loadEnv({ ...min, AOP_TICK_MS: bad })).toThrow(/AOP_TICK_MS/);
+    }
+  });
+
   it("BRAPI_TOKEN definido exige BRAPI_BASE_URL https (o token não vai em claro)", () => {
     for (const url of ["http://brapi.dev/api", "http://localhost:8080/api"]) {
       expect(() => loadEnv({ ...min, BRAPI_TOKEN: "tok", BRAPI_BASE_URL: url })).toThrow(

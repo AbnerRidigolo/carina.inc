@@ -93,6 +93,9 @@ describe("Escopos das rotas registradas", () => {
   it("enumera as rotas conhecidas (a reflexão não passa vazia)", () => {
     expect(routes.map((r) => r.route).sort()).toEqual(
       [
+        "GET /aops",
+        "GET /aops/:id",
+        "GET /aops/:id/runs",
         "GET /audit",
         "GET /builder/strategies",
         "GET /builder/strategies/:id",
@@ -110,6 +113,9 @@ describe("Escopos das rotas registradas", () => {
         "GET /market/quotes",
         "GET /ready",
         "GET /usage",
+        "PATCH /aops/:id",
+        "POST /aops",
+        "POST /aops/:id/run",
         "POST /builder/strategies",
         "POST /builder/strategies/:id/backtest",
         "POST /chat",
@@ -152,6 +158,7 @@ describe("Escopos das rotas registradas", () => {
       if (r.route === "POST /chat" || r.route === "POST /ws/ticket")
         return { all: ["chat"], any: [] };
       if (r.route.startsWith("GET /market/")) return { all: ["market:read"], any: [] };
+      if (r.route.includes("/aops")) return { all: ["aops:manage"], any: [] };
       if (r.route.includes("/builder/")) return { all: ["builder:run"], any: [] };
       if (r.route.startsWith("GET /eval/") || r.route === "POST /eval/submit")
         return { all: ["eval:run"], any: [] };

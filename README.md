@@ -16,6 +16,7 @@ Redis (limites atômicos, Streams) · LangGraph.js / LangChain.js · Zod compart
 - [Demo local](#demo-local)
 - [Importação de arquivos](#importação-de-arquivos)
 - [Monitor de carteira](#monitor-de-carteira)
+- [Procedimentos agendados (AOPs)](#procedimentos-agendados-aops)
 - [Arquitetura](#arquitetura)
 - [Garantias provadas por testes](#garantias-provadas-por-testes)
 - [Como rodar os testes](#como-rodar-os-testes)
@@ -45,7 +46,7 @@ O seed cria o tenant `demo`, três clientes sintéticos já sincronizados com a 
 
 | Variável            | Valor padrão                               | Escopos                                                           |
 | ------------------- | ------------------------------------------ | ----------------------------------------------------------------- |
-| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run`, `builder:run`    |
+| `DEMO_APP_KEY`      | `sk-live-demoapp0000000000000000000000000` | `chat`, `data:write`, `market:read`, `eval:run`, `builder:run`, `aops:manage` |
 | `DEMO_APPROVER_KEY` | `sk-live-demoapprover00000000000000000000` | `chat`, `inbox:decide`                                            |
 
 > **Essas chaves são públicas (estão neste repositório) e servem só para a demo local.** Com
@@ -201,6 +202,41 @@ custos de transação nem slippage, sem edição ou remoção de estratégias e 
 [ARQUITETURA](docs/ARCHITECTURE.md#17-estratégias-e-backtest-builder) e
 [decisões](docs/DECISOES-E-GARANTIAS.md#estratégias-e-backtest-fase-2-entrega-4).
 
+## Procedimentos agendados (AOPs)
+
+Um AOP é um procedimento descrito em linguagem natural ("toda sexta às 9h, analise o risco da
+carteira dos clientes premium") que o worker executa sozinho na agenda, para até 20 clientes, com
+até 3 dos agentes de chat (o Executor nunca é usado: AOP não opera). Escopo `aops:manage` (a chave
+app da demo tem):
+
+```bash
+curl -s -X POST localhost:3000/api/aops -H "$APP" -H 'Content-Type: application/json' \
+  -d '{"description":"Toda sexta às 9h, faça a análise do portfólio e do risco","clientIds":["c-1","c-2"]}'
+# → 201 {"id":"<uuid>","name":"...","agents":["insight","risk"],
+#        "schedule":{"frequency":"weekly","weekday":4,"day":1,"hour":9},"enabled":true,
+#        "unknownClientIds":[],...}   # primeiro disparo agendado: a PRÓXIMA sexta às 9h
+curl -s localhost:3000/api/aops -H "$APP"                                  # os do tenant, mais novos primeiro
+curl -s localhost:3000/api/aops/<uuid> -H "$APP"                           # 404 se não for do tenant
+curl -s -X PATCH localhost:3000/api/aops/<uuid> -H "$APP" -H 'Content-Type: application/json' -d '{"enabled":false}'
+curl -s -X POST localhost:3000/api/aops/<uuid>/run -H "$APP"               # 202 {"fireAt":"..."}; roda já, no worker
+curl -s "localhost:3000/api/aops/<uuid>/runs?limit=20&cursor=" -H "$APP"   # execuções, mais novas primeiro
+```
+
+Criar compila a descrição (LLM, com a heurística como contingência) e **não cobra**; o freio da
+compilação é o limite global de requisições (no teto de 50 AOPs, o 422 vem antes do LLM).
+`clientIds` (1 a 20, sem repetição) são os `externalId` do tenant; um id que ainda não existe é
+aceito, volta em `unknownClientIds` e vira `client_not_found` na execução. Criar ou religar **não
+roda na hora**: o primeiro disparo é o próximo horário da agenda (para rodar já, use `/run`). A hora
+da agenda é a de **São Paulo** (o Python usava UTC). A execução é assíncrona: o worker reserva 1
+unidade da cota **por cliente**, roda os agentes, cobra o tipo de trabalho como o chat e audita no
+Watchtower. O disparo agendado é idempotente (`claimFire`); o disparo manual (`/run`, 1 por AOP por
+minuto, senão 409; desligado também é 409) nunca consome o disparo agendado. Limitações: sem edição
+nem remoção (só ligar e desligar), sem entrega externa dos resultados, sem tela na web,
+`client_not_found` não entra no histórico de execuções (só no log do worker) e a heurística é só a
+contingência do LLM, com detecção aproximada de dia da semana; detalhes em
+[ARQUITETURA](docs/ARCHITECTURE.md#18-procedimentos-agendados-aops) e
+[decisões](docs/DECISOES-E-GARANTIAS.md#procedimentos-agendados-aops-fase-2-entrega-5).
+
 ## Arquitetura
 
 ```mermaid
@@ -211,7 +247,7 @@ flowchart LR
     graph["Orquestrador LangGraph.js<br/>classify → retrieve → especialistas → synthesize<br/>executor → approval (interrupt)"]
   end
   subgraph worker["processo worker"]
-    jobs["Sync · ResumeWorker · Reconciliação · Monitor"]
+    jobs["Sync · ResumeWorker · Reconciliação · Monitor · AOPs"]
   end
   pg[("PostgreSQL 17 + pgvector<br/>RLS FORCE · checkpoints do grafo")]
   redis[("Redis 7<br/>Streams · limites atômicos · tickets WS")]
@@ -291,6 +327,12 @@ e `redis:7-alpine`), conectados como `carina_app`, que é `NOSUPERUSER NOBYPASSR
   cobra R$ 7,50 uma vez e só no sucesso, e 404, 422, 502, 503 e 429 não cobram:
   [`builder.e2e.spec.ts`](apps/api/test/builder/builder.e2e.spec.ts),
   [`backtest.spec.ts`](apps/api/src/modules/builder/backtest.spec.ts).
+- **Procedimentos agendados (AOPs)**: escopo `aops:manage`, AOP de outro tenant é 404, criar não
+  cobra, o disparo manual responde 202, o worker grava a execução e o segundo no mesmo minuto é 409,
+  e nenhum log contém a descrição:
+  [`aops.e2e.spec.ts`](apps/api/test/aops/aops.e2e.spec.ts),
+  [`aop-run.int.spec.ts`](apps/api/test/aops/aop-run.int.spec.ts),
+  [`schedule.spec.ts`](apps/api/src/modules/aops/schedule.spec.ts).
 - **Fluxo completo** pela fiação de produção:
   [`full-flow.e2e.spec.ts`](apps/api/test/flow/full-flow.e2e.spec.ts).
 
@@ -364,7 +406,7 @@ já feitos; notas de corretagem em PDF na entrega 2), AOPs, `builder` e os agent
 Dos seis, quatro de chat (strategist, tax, researcher e assessor_liaison, até 3 por pergunta) e o
 categorizer (regras determinísticas na ingestão, sem LLM) estão feitos. O researcher responde só com a
 base de conhecimento (sem web) e o assessor_liaison só redige (nada é enviado). O monitor de carteira também
-está feito (alerta pela API e pelo WebSocket, sem canal externo), e o `evaluation` (benchmark SEAL BR) e o `builder` (estratégias e backtest) também, só pela API.
+está feito (alerta pela API e pelo WebSocket, sem canal externo), e o `evaluation` (benchmark SEAL BR) e o `builder` (estratégias e backtest) também, só pela API. Os AOPs (procedimentos agendados) também estão feitos, só pela API e sem entrega externa dos resultados.
 
 **Fase 3 — integrações e remoção do Python:** notificações externas (WhatsApp, SMTP e webhook) para os alertas do monitor
 e remoção de `legacy/python` e do job `legacy-python` do CI.

@@ -134,6 +134,17 @@ export class TenantPrismaService {
   }
 
   /**
+   * Ids dos tenants com AOP a varrer (`aop_tenant_ids()`, SECURITY DEFINER, migrations/0011): não
+   * suspensos e com ao menos um AOP habilitado. Mesmo desenho de `activeTenantIds`: só ids, e cada
+   * tenant é tratado depois sob `TenantContext.run`.
+   */
+  async aopTenantIds(): Promise<string[]> {
+    const rows = await this.base.$queryRaw<{ id: string }[]>`
+      SELECT aop_tenant_ids() AS id`;
+    return rows.map((r) => r.id);
+  }
+
+  /**
    * Transação interativa com o contexto atual fixado antes de `fn`. O contexto é lido na chamada
    * (corpo síncrono do método async); `withClient` dentro de `fn` não muda o `tx`. Todo o
    * trabalho de `fn` usa a mesma conexão e o mesmo contexto.

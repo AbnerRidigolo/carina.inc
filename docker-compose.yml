@@ -7,9 +7,11 @@
 # - api    (main.ts, WORKERS_ENABLED=false): REST + WebSocket + InboxBroadcast (um tail de
 #          `inbox.events` por processo HTTP, que repassa aos sockets dele; não é consumidor de grupo).
 # - worker (main.worker.ts, WORKERS_ENABLED forçado a true): SyncWorker (grupo `sync`),
-#          ResumeWorker (grupo `resumers`), ImportWorker (grupo `imports`), ReconciliationJob,
-#          ImportCleanupJob e MonitorJob (timers com lock Redis global por tick; o MonitorJob só
-#          cota no pregão e publica `monitor.alert` em `inbox.events`).
+#          ResumeWorker (grupo `resumers`), ImportWorker (grupo `imports`), AopJob (disparos
+#          manuais dos AOPs pelo grupo `aops`), ReconciliationJob, ImportCleanupJob, MonitorJob e a
+#          agenda do AopJob (timers com lock Redis global por tick; o MonitorJob só cota no pregão
+#          e publica `monitor.alert` em `inbox.events`; a agenda dos AOPs dispara cada horário uma
+#          vez, pelo `last_fire_at`).
 #   Réplicas extras do worker são seguras (grupos de consumo do Redis + locks), só não são
 #   necessárias para a demo.
 #

@@ -228,6 +228,8 @@ describe("migrações: papéis, grants e RLS (conectado como carina_app)", () =>
        ORDER BY c.relname`,
     );
     expect(tables.map((t) => t.relname)).toEqual([
+      "aop",
+      "aop_run",
       "approval_request",
       "audit_event",
       "client",

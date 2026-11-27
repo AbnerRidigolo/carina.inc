@@ -99,5 +99,17 @@ export const StreamEventSchema = z.discriminatedUnion("type", [
     status: ImportFinishedStatusSchema,
   }),
   z.object({ ...streamBase, type: z.literal("monitor.alert"), alert: PortfolioAlertSchema }),
+  /**
+   * Disparo manual de um AOP (spec §4.4), no stream `jobs` (grupo `aops`). O AOP é do tenant, não
+   * de um cliente: `clientId` vai vazio. `fireAt` é o instante do disparo manual, gravado como
+   * `aop_run.fire_at` (a idempotência da reentrega vem do único de aop_run).
+   */
+  z.object({
+    ...streamBase,
+    type: z.literal("aop.run_requested"),
+    clientId: z.literal(""),
+    aopId: z.uuid(),
+    fireAt: z.iso.datetime(),
+  }),
 ]);
 export type StreamEvent = z.infer<typeof StreamEventSchema>;

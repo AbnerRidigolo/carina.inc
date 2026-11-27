@@ -31,6 +31,22 @@ export class PayloadTooLargeError extends DomainError {
   readonly code = "payload_too_large";
   readonly status = 413;
 }
+/** Disparo manual de um AOP desligado (religue antes com `PATCH { enabled: true }`). */
+export class AopDisabledError extends DomainError {
+  readonly code = "aop_disabled";
+  readonly status = 409;
+}
+/** Disparo manual do mesmo AOP no último minuto; sempre com `Retry-After`. */
+export class ManualRunTooSoonError extends DomainError {
+  readonly code = "manual_run_too_soon";
+  readonly status = 409;
+
+  // Não é inútil: torna `retryAfterSeconds` obrigatório (a base o deixa opcional).
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message, retryAfterSeconds);
+  }
+}
 export class ApprovalConflictError extends DomainError {
   readonly code = "approval_conflict";
   readonly status = 409;

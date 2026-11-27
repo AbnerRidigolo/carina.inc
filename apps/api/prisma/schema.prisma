@@ -8,8 +8,9 @@
 //   audit_event.client_id, kg_relation.chunk_id), que aqui aparecem como relações simples.
 //   RLS, grants e funções ficam em migrations/0002_rls; a FK composta de decided_by_key_id está em
 //   0003_inbox_integrity, a função active_tenant_ids em 0004_reconciliation,
-//   import_cleanup_tenant_ids em 0008_import_cleanup e monitor_tenant_ids (com o CHECK de
-//   portfolio_alert.direction) em 0009_portfolio_alert.
+//   import_cleanup_tenant_ids em 0008_import_cleanup, monitor_tenant_ids (com o CHECK de
+//   portfolio_alert.direction) em 0009_portfolio_alert e aop_tenant_ids (com os CHECKs, o GRANT
+//   UPDATE por coluna e as políticas de aop/aop_run) em 0011_aops.
 // - FKs compostas (tenant_id, client_id, …) impedem que uma linha aponte para o cliente
 //   ou a entidade de outro tenant/cliente, mesmo que a aplicação erre o id.
 //
@@ -51,6 +52,7 @@ model Tenant {
   usage       UsageRecord[]
   auditEvents AuditEvent[]
   strategies  Strategy[]
+  aops        Aop[]
 
   @@map("tenant")
 }
@@ -96,6 +98,7 @@ model Client {
   kgRelations      KgRelation[]
   kgMentions       KgMention[]
   portfolioAlerts  PortfolioAlert[]
+  aopRuns          AopRun[]
 
   @@unique([tenantId, externalId])
   /// alvo das FKs compostas (tenant_id, client_id)
@@ -356,6 +359,83 @@ model Strategy {
   /// lista do tenant, mais nova primeiro
   @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
   @@map("strategy")
+}
+
+// ─── AOPs (procedimentos de agentes) ────────────────────────────────────────
+
+/// Procedimento recorrente compilado do texto do tenant (spec §4.1): pertence ao tenant.
+/// No banco (migrations/0011): CHECKs espelhando o AopSchema/ScheduleSchema (nome, descrição, 1..3
+/// agentes permitidos, 1..20 externalIds, agenda nas faixas); carina_app só faz UPDATE em enabled e
+/// last_fire_at (GRANT por coluna); limite de 50 por tenant imposto pelo AopsRepository.
+model Aop {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  /// 1..120 caracteres
+  name        String
+  /// o texto original, 1..2000 caracteres
+  description String
+  /// 1..3 dentre insight, predictor, risk, strategist, tax, researcher, assessor_liaison
+  agents      String[]
+  /// daily, weekly, monthly (hora em America/Sao_Paulo)
+  frequency   String
+  /// 0=segunda … 6=domingo
+  weekday     Int
+  /// 1..28
+  day         Int
+  /// 0..23
+  hour        Int
+  /// externalIds dos clientes, 1..20 (resolvidos a cada execução)
+  clientIds   String[]  @map("client_ids")
+  enabled     Boolean   @default(true)
+  /// último horário disparado (disparo idempotente, spec §4.4)
+  lastFireAt  DateTime? @map("last_fire_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runs   AopRun[]
+
+  /// alvo da FK composta de aop_run
+  @@unique([tenantId, id])
+  /// lista do tenant, mais novo primeiro
+  @@index([tenantId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("aop")
+}
+
+/// Execução de um AOP para um cliente: uma por AOP, cliente e horário (insert com ON CONFLICT DO
+/// NOTHING). No banco: CHECKs de trigger, status, failure_code e work_type (os do WorkTypeSchema);
+/// ok ⇔ sem failure_code; work_type e price_brl só em ok; results é objeto.
+model AopRun {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  aopId       String   @map("aop_id") @db.Uuid
+  /// uuid interno do cliente
+  clientId    String   @map("client_id") @db.Uuid
+  /// o horário agendado, ou o instante do disparo manual
+  fireAt      DateTime @map("fire_at") @db.Timestamptz(6)
+  /// schedule, manual
+  trigger     String
+  /// ok, failed, skipped
+  status      String
+  /// client_not_found, quota_exceeded, agents_failed
+  failureCode String?  @map("failure_code")
+  /// por agente: a saída validada ou { failed: true }
+  results     Json     @default("{}")
+  workType    String?  @map("work_type")
+  priceBrl    Decimal? @map("price_brl") @db.Decimal(18, 2)
+  /// evento do Watchtower (sem FK)
+  auditId     String?  @map("audit_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  aop    Aop    @relation(fields: [tenantId, aopId], references: [tenantId, id], onDelete: Cascade)
+  client Client @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Cascade)
+
+  /// um disparo por AOP, cliente e horário
+  @@unique([aopId, clientId, fireAt], map: "aop_run_once_key")
+  /// histórico do AOP, mais novo primeiro
+  @@index([tenantId, aopId, createdAt(sort: Desc), id(sort: Desc)])
+  /// cascata ao apagar o cliente
+  @@index([tenantId, clientId])
+  @@map("aop_run")
 }
 
 // ─── Conhecimento (grafo + busca híbrida) ───────────────────────────────────

@@ -16,6 +16,9 @@ import { type LocalTime, localTime } from "./month.js";
 
 const KEY_TTL_SECONDS = 40 * 24 * 60 * 60;
 
+/** O que a cota usa do tenant (a chave autenticada, ou o tenant lido do banco pelo worker). */
+export type QuotaTenant = Pick<AuthTenant, "tenantId" | "monthlyQuota">;
+
 /**
  * Reserva atômica: INCR + EXPIRE; se passou da cota, DECR de volta (no mesmo script, então o
  * valor acima da cota nunca é visível a outro comando) e devolve 0; senão devolve 1.
@@ -52,7 +55,7 @@ export class QuotaService {
   }
 
   /** Reserva uma unidade da cota do mês; `QuotaExceededError` (429 + Retry-After) se esgotada. */
-  async reserve(tenant: AuthTenant): Promise<void> {
+  async reserve(tenant: QuotaTenant): Promise<void> {
     if (tenant.monthlyQuota <= 0) return;
     const now = this.clock();
     const t = localTime(now);
@@ -75,7 +78,7 @@ export class QuotaService {
   }
 
   /** Devolve uma reserva (ex.: a operação falhou antes de consumir); o contador nunca fica < 0. */
-  async refund(tenant: AuthTenant): Promise<void> {
+  async refund(tenant: QuotaTenant): Promise<void> {
     if (tenant.monthlyQuota <= 0) return;
     const key = this.key(tenant.tenantId, localTime(this.clock()));
     await this.redis.eval(SAFE_DECR_LUA, 1, key);

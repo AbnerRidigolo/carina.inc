@@ -37,4 +37,6 @@ export const PARSE_LIMITS = {
   parseTimeoutMs: 30_000,
   /** Heap (old generation) da worker thread do parse; estourar → `limit_exceeded`. */
   maxThreadHeapMb: 512,
+  /** Intervalo do vigia de heap da thread (independe de flags de heap do processo). */
+  heapCheckMs: 50,
 } as const;

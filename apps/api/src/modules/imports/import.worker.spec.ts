@@ -398,4 +398,32 @@ describe("ImportWorker: ciclo de vida", () => {
     await worker.beforeApplicationShutdown();
     expect(worker.running).toBe(false);
   });
+
+  it("avisa no boot quando uma flag de heap do processo anula o limite do V8 da thread", async () => {
+    vi.stubEnv("NODE_OPTIONS", "--use-openssl-ca --max-old-space-size=8192");
+    const logger: ImportLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const consume = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    );
+    const worker = new ImportWorker(
+      { WORKERS_ENABLED: "true", IMPORT_PARSE_MAX_HEAP_MB: 512 },
+      { publish: vi.fn(), consume } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      logger,
+    );
+    try {
+      worker.onApplicationBootstrap();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ flag: "--max-old-space-size", maxHeapMb: 512 }),
+      );
+    } finally {
+      await worker.stop();
+      vi.unstubAllEnvs();
+    }
+  });
 });

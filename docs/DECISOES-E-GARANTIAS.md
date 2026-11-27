@@ -160,7 +160,7 @@ o motivo de cada uma:
 | Tema | Decisão | Motivo (e alternativa descartada) |
 | --- | --- | --- |
 | Onde ficam os bytes | Tabela `import_file` no Postgres, sob RLS, apagada na mesma transação que fecha o job | Sobrevive a reinício e o isolamento vem do banco. No Redis (TTL) não haveria RLS e o job se perderia com o Redis; parse síncrono prenderia a API numa planilha de 10 MB |
-| Parse | Assíncrono no `ImportWorker`, numa `worker_threads` encerrada aos 30 s e com heap limitada a 512 MB por padrão (`resourceLimits`, `IMPORT_PARSE_MAX_HEAP_MB`); estourar qualquer dos dois → `limit_exceeded` | Um arquivo hostil não trava o event loop do worker, não passa do tempo nem leva a memória do processo; encerrar a thread é o único jeito de interromper um parse síncrono |
+| Parse | Assíncrono no `ImportWorker`, numa `worker_threads` encerrada aos 30 s e com heap limitada a 512 MB por padrão (`IMPORT_PARSE_MAX_HEAP_MB`) por duas travas: `resourceLimits` do V8 e um vigia que lê `worker.getHeapStatistics()` a cada 50 ms e encerra a thread acima do limite; estourar o tempo ou a heap → `limit_exceeded` | Um arquivo hostil não trava o event loop do worker, não passa do tempo nem leva a memória do processo; encerrar a thread é o único jeito de interromper um parse síncrono |
 | Mesmo arquivo | Mesmo SHA-256 no mesmo cliente → 200 com o job existente (`queued`, `parsing`, `done`); `failed` → o mesmo job é reenfileirado (202) | Nunca processa duas vezes nem cobra de novo, e um mapeamento errado ou uma queda do worker não deixam o arquivo impossível de importar. Vale o teto de 5 ativos (429, `Retry-After: 30`) também no reenvio, para o reenfileiramento não furar o limite |
 | Arquivo vazio | 422; acima de 10 MB, 413 | Vazio é conteúdo inválido, não excesso de tamanho |
 | Nada é "chutado" | Separador decimal e formato de data do CSV vêm do mapeamento; valor ou data ambíguos viram erro de linha | Gravar número errado em silêncio é pior do que recusar a linha |
@@ -190,6 +190,16 @@ o motivo de cada uma:
   planilha de poucos MB pode passar disso ao ser expandida (uma de 5,78 MB chegou a 2,2 GB de
   heap sem limite) e termina como `failed`/`limit_exceeded`. Subir o limite exige memória
   sobrando no container do worker; a solução de fundo é ler as planilhas em streaming.
+- **Flag de heap do processo anula a trava do V8 da thread.** `--max-old-space-size` ou
+  `--max-heap-size` (na linha de comando ou em `NODE_OPTIONS`, comum em PaaS) vale para todos os
+  isolates e faz o Node ignorar `resourceLimits.maxOldGenerationSizeMb` em silêncio, em qualquer
+  versão (comportamento documentado, nodejs/node#43992). Não é efeito da versão do Node: 22.22.2 e
+  22.23.x se comportam igual com e sem a flag. Com a flag, só o vigia de heap limita: ele pode
+  deixar a heap passar do limite pelo que a thread alocar em 50 ms (medido: cerca de 22 MB a
+  ~500 MB/s) e conta lixo ainda não coletado, então um arquivo honesto perto do limite pode virar
+  `limit_exceeded` mais cedo. O `ImportWorker` registra um aviso no boot quando detecta a flag; o
+  canário em `parse-file.spec.ts` falha se uma versão do Node deixar de aplicar `resourceLimits`
+  sem a flag. Não use essas flags no processo do worker.
 - **Worker travado que volta.** Um worker que trava e volta depois de o job ter sido retomado por
   outro pode ainda gravar (e cobrar) no máximo um lote em andamento; a gravação é upsert idempotente,
   então o efeito é só o lote regravado. O `claim_token` impede que ele grave os seguintes ou feche o

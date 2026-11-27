@@ -61,7 +61,7 @@ import {
   ImportsRepository,
   type JobOutcome,
 } from "./imports.repository.js";
-import { parseFile } from "./parse-file.js";
+import { heapFlagOverride, parseFile } from "./parse-file.js";
 import { ROW_ERROR_MESSAGES } from "./parsers/row-errors.js";
 
 export const IMPORT_STREAM = "jobs";
@@ -137,6 +137,15 @@ export class ImportWorker
 
   onApplicationBootstrap(): void {
     if (this.env.WORKERS_ENABLED === "false") return;
+    const flag = heapFlagOverride();
+    if (flag !== undefined) {
+      // A flag do processo anula `resourceLimits` da thread do parse; só o vigia de heap limita.
+      this.logger.warn({
+        msg: "Flag de heap do processo anula o limite do V8 da thread de parse; só o vigia de heap limita",
+        flag: flag.split("=")[0],
+        maxHeapMb: this.env.IMPORT_PARSE_MAX_HEAP_MB,
+      });
+    }
     this.start();
   }
 

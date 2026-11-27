@@ -19,6 +19,7 @@ describe("types", () => {
       maxStoredErrors: 100,
       parseTimeoutMs: 30_000,
       maxThreadHeapMb: 512,
+      heapCheckMs: 50,
     });
   });
 });

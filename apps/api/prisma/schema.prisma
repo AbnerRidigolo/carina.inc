@@ -402,8 +402,8 @@ model Aop {
 }
 
 /// Execução de um AOP para um cliente: uma por AOP, cliente e horário (insert com ON CONFLICT DO
-/// NOTHING). No banco: CHECKs de trigger, status e failure_code; ok ⇔ sem failure_code; work_type e
-/// price_brl só em ok; results é objeto.
+/// NOTHING). No banco: CHECKs de trigger, status, failure_code e work_type (os do WorkTypeSchema);
+/// ok ⇔ sem failure_code; work_type e price_brl só em ok; results é objeto.
 model AopRun {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId    String   @map("tenant_id") @db.Uuid

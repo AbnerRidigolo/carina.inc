@@ -19,7 +19,8 @@
  *      resultados serializados) e o `aop_run` `ok`. Se o `aop_run` já existia (corrida com outro
  *      worker), a transação é desfeita (cobrança e auditoria juntas) e a cota devolvida: uma
  *      reentrega nunca cobra duas vezes.
- * Um erro inesperado num cliente (cobrança, banco) devolve a cota, é logado e os demais seguem.
+ * Um erro inesperado num cliente (busca do cliente, cobrança, banco) devolve a cota se reservada, é
+ * logado e os demais seguem: um erro transitório no cliente k custa só o cliente k.
  *
  * Resultados guardados com o mesmo limite do chat: a saída do agente já vem validada (schema e
  * `refine`) e o texto livre cortado em `MAX_OUTPUT_CHARS`; aqui, por defesa, o texto é cortado de
@@ -151,32 +152,36 @@ export class AopRunner {
     let quotaExhausted = false;
 
     for (const externalId of aop.clientIds.slice(0, AOP_MAX_CLIENTS)) {
-      const client = await this.db.tx((tx) =>
-        tx.client.findUnique({
-          where: { tenantId_externalId: { tenantId, externalId } },
-          select: { id: true },
-        }),
-      );
+      // A busca do cliente fica DENTRO do try: um erro transitório nela custa só este cliente.
+      let clientId: string | undefined;
       let outcome: Omit<AopClientOutcome, "clientId">;
-      if (client === null) {
-        outcome = { status: "skipped", failureCode: "client_not_found" };
-      } else {
-        outcome = await TenantContext.withClient(client.id, async () => {
-          try {
-            return await this.runClient(aop, opts, client.id, quotaTenant, quotaExhausted);
-          } catch (err) {
-            this.logger.error({
-              msg: "Execução do AOP falhou para o cliente",
-              ...errorFields(err),
-              tenantId,
-              aopId: aop.id,
-              clientId: client.id,
-            });
-            return { status: "error" as const, failureCode: null };
-          }
+      try {
+        const client = await this.db.tx((tx) =>
+          tx.client.findUnique({
+            where: { tenantId_externalId: { tenantId, externalId } },
+            select: { id: true },
+          }),
+        );
+        if (client === null) {
+          outcome = { status: "skipped", failureCode: "client_not_found" };
+        } else {
+          clientId = client.id;
+          const id = client.id;
+          outcome = await TenantContext.withClient(id, () =>
+            this.runClient(aop, opts, id, quotaTenant, quotaExhausted),
+          );
+        }
+      } catch (err) {
+        this.logger.error({
+          msg: "Execução do AOP falhou para o cliente",
+          ...errorFields(err),
+          tenantId,
+          aopId: aop.id,
+          ...(clientId === undefined ? {} : { clientId }),
         });
-        if (outcome.failureCode === "quota_exceeded") quotaExhausted = true;
+        outcome = { status: "error", failureCode: null };
       }
+      if (outcome.failureCode === "quota_exceeded") quotaExhausted = true;
       summary.clients.push({ clientId: externalId, ...outcome });
       if (outcome.status === "ok") summary.ok++;
       else if (outcome.status === "failed") summary.failed++;

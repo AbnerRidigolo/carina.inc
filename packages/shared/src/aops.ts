@@ -37,9 +37,18 @@ export const ScheduleSchema = z.object({
 });
 export type Schedule = z.infer<typeof ScheduleSchema>;
 
-export const AopNameSchema = z.string().min(1).max(120);
+/** Nome aparado; só espaços → recusado. */
+export const AopNameSchema = z.string().trim().min(1).max(120);
 export const AopDescriptionSchema = z.string().min(1).max(2000);
-const AopClientIdsSchema = z.array(ExternalIdSchema).min(1).max(AOP_MAX_CLIENTS);
+/**
+ * 1 a 20 externalIds, sem repetição: repetido → 422 (é erro de quem chama; recusar é mais claro que
+ * deduplicar em silêncio).
+ */
+const AopClientIdsSchema = z
+  .array(ExternalIdSchema)
+  .min(1)
+  .max(AOP_MAX_CLIENTS)
+  .refine((ids) => new Set(ids).size === ids.length, { message: "clientIds repetidos" });
 
 export const AopSchema = z.object({
   id: z.uuid(),
@@ -54,6 +63,15 @@ export const AopSchema = z.object({
   lastFireAt: z.iso.datetime().nullable(),
 });
 export type Aop = z.infer<typeof AopSchema>;
+
+/**
+ * Resposta do `POST /api/aops` (201): o AOP e os `clientIds` que não existem no tenant agora
+ * (aceitos assim mesmo; viram `client_not_found` na execução se continuarem sem existir).
+ */
+export const AopCreatedSchema = AopSchema.extend({
+  unknownClientIds: z.array(ExternalIdSchema),
+});
+export type AopCreated = z.infer<typeof AopCreatedSchema>;
 
 export const AopCreateSchema = z
   .object({

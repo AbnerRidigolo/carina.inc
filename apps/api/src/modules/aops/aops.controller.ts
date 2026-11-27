@@ -1,8 +1,10 @@
 import {
+  AOP_MAX_PER_TENANT,
   AopCreateSchema,
   AopUpdateSchema,
   type Aop,
   type AopCreate,
+  type AopCreated,
   type AopRunPage,
   type AopUpdate,
 } from "@carina/shared";
@@ -23,7 +25,12 @@ import type { Redis } from "ioredis";
 import { ZodValidationPipe } from "nestjs-zod";
 import { z } from "zod";
 import { TenantPrismaService } from "../../core/database/tenant-prisma.service.js";
-import { ConflictError, NotFoundError } from "../../core/errors/domain-errors.js";
+import {
+  AopDisabledError,
+  ManualRunTooSoonError,
+  NotFoundError,
+  ValidationError,
+} from "../../core/errors/domain-errors.js";
 import { REDIS } from "../../core/redis/redis.tokens.js";
 import { StreamsService } from "../../core/redis/streams.service.js";
 import { CLOCK, type Clock } from "../limits/clock.js";
@@ -53,15 +60,20 @@ type RunsQuery = z.output<typeof RunsQuerySchema>;
 
 /**
  * Procedimentos operacionais agendados (escopo `aops:manage`, spec §4.5). Criar compila a descrição
- * (LLM com contingência heurística) e NÃO cobra: o custo é só o do limite global de requisições.
- * `clientIds` (1 a 20) são externalIds; um id desconhecido é aceito na criação e vira
- * `client_not_found` na execução (como no Python). AOP de outro tenant é indistinguível de
- * inexistente (404, RLS).
+ * (LLM com contingência heurística) e NÃO cobra: o freio do custo da compilação é o limite global
+ * de requisições. No limite de 50 AOPs, uma contagem sob RLS recusa (422) ANTES do LLM; o limite que
+ * vale é o de `create`, sob lock. `clientIds` (1 a 20, sem repetição) são externalIds; um id
+ * desconhecido é aceito na criação (vira `client_not_found` na execução, como no Python) e volta em
+ * `unknownClientIds` no 201. O AOP nasce com `last_fire_at` no último horário agendado (o primeiro
+ * disparo é o próximo horário) e religar não dispara os horários perdidos. AOP de outro tenant é
+ * indistinguível de inexistente (404, RLS).
  *
- * `POST :id/run` só enfileira: 202 com o `fireAt` (o instante do pedido) e o worker executa. Não
- * mexe em `last_fire_at` (não consome o disparo agendado). Limite de 1 por AOP por minuto, atômico
- * no Redis (`SET NX PX`, chave `aop:manual:<aopId>`), só depois de o AOP existir e estar ligado
- * (404/409 não gastam o minuto); se a publicação falha, o guard é desfeito. 409 traz `Retry-After`.
+ * `POST :id/run` só enfileira: 202 com o `fireAt` (o instante do pedido, +1 ms se cair no .000 de um
+ * minuto cheio) e o worker executa. Não mexe em `last_fire_at` (não consome o disparo agendado).
+ * Desligado → 409 `aop_disabled`. Limite de 1 por AOP por minuto, atômico no Redis (`SET NX PX`,
+ * chave `aop:manual:<aopId>`), só depois de o AOP existir e estar ligado (404/409 não gastam o
+ * minuto); se a publicação falha, o guard é desfeito. Repetido → 409 `manual_run_too_soon` com
+ * `Retry-After`.
  *
  * Logs: só ids, agentes e contagens (nunca a descrição nem o nome).
  */
@@ -83,26 +95,39 @@ export class AopsController {
   async create(
     @CurrentTenant() tenant: AuthTenant,
     @Body(new ZodValidationPipe(AopCreateSchema)) body: AopCreate,
-  ): Promise<Aop> {
+  ): Promise<AopCreated> {
+    // Pré-checagem barata ANTES do LLM: no limite, nem compila (a compilação é a parte cara). O
+    // limite que vale continua sendo o conferido sob lock dentro de `create`.
+    const count = await this.db.tx((tx) => this.aops.count(tx));
+    if (count >= AOP_MAX_PER_TENANT) {
+      throw new ValidationError(`Limite de ${String(AOP_MAX_PER_TENANT)} AOPs por tenant atingido`);
+    }
     const compiled = await this.compiler.compile(body.description);
-    const created = await this.db.tx((tx) =>
-      this.aops.create(tx, {
-        name: body.name ?? compiled.name,
-        description: body.description,
-        agents: compiled.agents,
-        schedule: compiled.schedule,
-        clientIds: body.clientIds,
-      }),
-    );
+    const now = this.clock();
+    const { created, unknownClientIds } = await this.db.tx(async (tx) => ({
+      created: await this.aops.create(
+        tx,
+        {
+          name: body.name ?? compiled.name,
+          description: body.description,
+          agents: compiled.agents,
+          schedule: compiled.schedule,
+          clientIds: body.clientIds,
+        },
+        now,
+      ),
+      unknownClientIds: await this.aops.unknownClientIds(tx, body.clientIds),
+    }));
     this.logger.log({
       msg: "Procedimento criado",
       tenantId: tenant.tenantId,
       aopId: created.id,
       agents: created.agents,
       clients: created.clientIds.length,
+      unknownClients: unknownClientIds.length,
       via: compiled.via,
     });
-    return created;
+    return { ...created, unknownClientIds };
   }
 
   @Get()
@@ -124,7 +149,9 @@ export class AopsController {
     @Param("id") id: string,
     @Body(new ZodValidationPipe(AopUpdateSchema)) body: AopUpdate,
   ): Promise<Aop> {
-    const updated = await this.db.tx((tx) => this.aops.setEnabled(tx, id, body.enabled));
+    const updated = await this.db.tx((tx) =>
+      this.aops.setEnabled(tx, id, body.enabled, this.clock()),
+    );
     if (updated === null) throw new NotFoundError("Procedimento não encontrado");
     this.logger.log({
       msg: "Procedimento atualizado",
@@ -143,18 +170,21 @@ export class AopsController {
     @Param("id") id: string,
   ): Promise<{ fireAt: string }> {
     const aop = await this.load(id);
-    if (!aop.enabled) throw new ConflictError("Procedimento desligado");
+    if (!aop.enabled) throw new AopDisabledError("Procedimento desligado");
     const key = manualRunKey(aop.id);
     const won = await this.redis.set(key, "1", "PX", MANUAL_RUN_WINDOW_MS, "NX");
     if (won !== "OK") {
       const ttl = await this.redis.pttl(key);
       const retryAfter = Math.max(1, Math.ceil((ttl > 0 ? ttl : MANUAL_RUN_WINDOW_MS) / 1000));
-      throw new ConflictError(
+      throw new ManualRunTooSoonError(
         "Já há um disparo manual deste procedimento no último minuto",
         retryAfter,
       );
     }
-    const fireAt = new Date(this.clock()).toISOString();
+    // Um instante no .000 de um minuto cheio poderia ser igual a um horário agendado (sempre em hora
+    // cheia) e colidir no único de aop_run; +1 ms garante que nunca é.
+    const now = this.clock();
+    const fireAt = new Date(now % 60_000 === 0 ? now + 1 : now).toISOString();
     try {
       await this.streams.publish("jobs", {
         eventId: randomUUID(),

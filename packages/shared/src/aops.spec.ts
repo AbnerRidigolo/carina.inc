@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AopAgentSchema,
   AopCreateSchema,
+  AopCreatedSchema,
   AopRunPageSchema,
   AopRunSchema,
   AopSchema,
@@ -85,6 +86,26 @@ describe("contratos de AOP", () => {
       AopCreateSchema.safeParse({ description: "x", clientIds: ["a"], agents: ["executor"] })
         .success,
     ).toBe(false);
+  });
+
+  it("AopCreate recusa clientIds repetidos e nome só de espaços (o nome é aparado)", () => {
+    expect(
+      AopCreateSchema.safeParse({ description: "x", clientIds: ["a", "b", "a"] }).success,
+    ).toBe(false);
+    expect(
+      AopCreateSchema.safeParse({ description: "x", clientIds: ["a"], name: "   " }).success,
+    ).toBe(false);
+    expect(
+      AopCreateSchema.safeParse({ description: "x", clientIds: ["a"], name: "\t\n" }).success,
+    ).toBe(false);
+    const ok = AopCreateSchema.parse({ description: "x", clientIds: ["a"], name: "  Meu AOP  " });
+    expect(ok.name).toBe("Meu AOP");
+  });
+
+  it("AopCreated é o AOP mais os unknownClientIds", () => {
+    expect(AopCreatedSchema.safeParse({ ...aop, unknownClientIds: ["ghost"] }).success).toBe(true);
+    expect(AopCreatedSchema.safeParse({ ...aop, unknownClientIds: [] }).success).toBe(true);
+    expect(AopCreatedSchema.safeParse(aop).success).toBe(false);
   });
 
   it("AopUpdate exige enabled booleano e recusa campos extras", () => {

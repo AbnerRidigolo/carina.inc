@@ -6,7 +6,7 @@
  * usa tenants próprios, e as asserções sobre `tenantIds` olham só os tenants deste arquivo.
  */
 import { randomUUID } from "node:crypto";
-import { AopRunSchema, AopSchema, type AopRun } from "@carina/shared";
+import { AopRunSchema, AopSchema, WorkTypeSchema, type AopRun } from "@carina/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { PrismaService } from "../../src/core/database/prisma.service.js";
@@ -40,14 +40,18 @@ describe("AOPs: tabelas aop/aop_run e AopsRepository (carina_app, sob RLS)", () 
   const inTx = <T>(tenantId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
     inTenant(tenantId, () => db.tx(fn));
 
+  /** Relógio dos testes: quarta, 7/1/2026. O último horário semanal de sexta 9h é 2/1, 12:00Z. */
+  const NOW = Date.parse("2026-01-07T15:00:00.000Z");
+  const PREVIOUS_FRIDAY = "2026-01-02T12:00:00.000Z";
+
   const create = (tenantId: string, input: NewAop = aopInput()) =>
-    inTx(tenantId, (tx) => repo.create(tx, input));
+    inTx(tenantId, (tx) => repo.create(tx, input, NOW));
   const get = (tenantId: string, id: string) => inTx(tenantId, (tx) => repo.get(tx, id));
   const list = (tenantId: string) => inTx(tenantId, (tx) => repo.list(tx));
   const claim = (tenantId: string, id: string, fireAt: Date) =>
     inTx(tenantId, (tx) => repo.claimFire(tx, id, fireAt));
   const setEnabled = (tenantId: string, id: string, enabled: boolean) =>
-    inTx(tenantId, (tx) => repo.setEnabled(tx, id, enabled));
+    inTx(tenantId, (tx) => repo.setEnabled(tx, id, enabled, NOW));
   const insertRun = (tenantId: string, run: NewAopRun) =>
     inTx(tenantId, (tx) => repo.insertRun(tx, run));
   const listRuns = (tenantId: string, aopId: string, cursor: string | null, limit: number) =>
@@ -148,7 +152,8 @@ describe("AOPs: tabelas aop/aop_run e AopsRepository (carina_app, sob RLS)", () 
       schedule: { frequency: "weekly", weekday: 4, day: 1, hour: 9 },
       clientIds: ["a1", "a2"],
       enabled: true,
-      lastFireAt: null,
+      // O primeiro disparo é o próximo horário: nasce com o último que já passou.
+      lastFireAt: PREVIOUS_FRIDAY,
     });
     expect(await get(tenantA, created.id)).toEqual(created);
 
@@ -601,6 +606,8 @@ describe("AOPs: tabelas aop/aop_run e AopsRepository (carina_app, sob RLS)", () 
     );
     await expect(insert({ results: "[]" })).rejects.toThrow(/aop_run_results_check/);
     await expect(insert({ priceBrl: "-1.00" })).rejects.toThrow(/aop_run_price_brl_check/);
+    // work_type só dos valores do WorkTypeSchema.
+    await expect(insert({ workType: "almoco" })).rejects.toThrow(/aop_run_work_type_check/);
     // ok ⇔ sem failure_code.
     await expect(insert({ failureCode: "agents_failed" })).rejects.toThrow(/aop_run_outcome_check/);
     await expect(insert({ ...skipped, failureCode: null })).rejects.toThrow(
@@ -618,6 +625,9 @@ describe("AOPs: tabelas aop/aop_run e AopsRepository (carina_app, sob RLS)", () 
 
     // Controle.
     await expect(insert({})).resolves.toBeDefined();
+    for (const workType of WorkTypeSchema.options) {
+      await expect(insert({ workType })).resolves.toBeDefined();
+    }
     await expect(
       insert({ status: "failed", failureCode: "agents_failed", workType: null, priceBrl: null }),
     ).resolves.toBeDefined();

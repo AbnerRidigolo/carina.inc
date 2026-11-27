@@ -17,9 +17,13 @@
  * pedido) vira `aop_run.fire_at`, e a idempotência vem do único `(aop_id, client_id, fire_at)`: o
  * runner pula o cliente que já tem execução nesse `fireAt` e desfaz a cobrança numa corrida. Um lock
  * por disparo (`aops:manual:<aopId>:<fireAt>`) impede que uma reentrega concorrente (reclaim de uma
- * execução longa) rode os agentes em paralelo à primeira. Erro inesperado sobe: o stream reentrega
- * e o runner continua de onde parou. AOP inexistente ou desligado: ACK sem efeito. O limite de 1
- * disparo manual por minuto é da rota.
+ * execução longa) rode os agentes em paralelo à primeira: quem não pega o lock confirma (ACK) sem
+ * rodar. Reentrega: o erro de UM cliente é absorvido pelo runner (status `error`, logado, cota
+ * devolvida) e esse cliente não é refeito; só um erro fora dos clientes (ler o AOP ou a cota do
+ * tenant, o lock no Redis) sobe do handler. Aí a entrada fica pendente, o XAUTOCLAIM a reentrega
+ * depois de `claimIdleMs` (até `maxDeliveries`; depois, a DLQ) e o runner pula os clientes que já
+ * têm execução nesse `fireAt`. AOP inexistente ou desligado: ACK sem efeito. O limite de 1 disparo
+ * manual por minuto é da rota.
  *
  * Ciclo de vida: timer `unref` e consumidor só com WORKERS_ENABLED !== "false"; `stop` (no
  * `onModuleDestroy`/`beforeApplicationShutdown`) para os dois e espera o ciclo e o consumo em

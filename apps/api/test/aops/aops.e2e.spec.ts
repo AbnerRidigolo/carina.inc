@@ -7,13 +7,14 @@
  */
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
-import { AopRunPageSchema, AopSchema, UsageSummarySchema } from "@carina/shared";
+import { AopCreatedSchema, AopRunPageSchema, AopSchema, UsageSummarySchema } from "@carina/shared";
 import { Redis } from "ioredis";
 import { Logger as PinoLogger } from "nestjs-pino";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoggingModule } from "../../src/core/logging/logging.module.js";
 import { AopsModule } from "../../src/modules/aops/aops.module.js";
+import { AopCompiler } from "../../src/modules/aops/compiler.js";
 import { BillingModule } from "../../src/modules/billing/billing.module.js";
 import { createTestApp, type SeededTenant, type TestApp } from "../setup/app.js";
 import { migratorSql, must, redisDbUrl } from "../setup/db.js";
@@ -86,7 +87,7 @@ describe("AOPs E2E", () => {
   const create = async (
     T: SeededTenant,
     body: object = { description: DESCRIPTION, clientIds: ["c-1", "c-2"] },
-  ) => AopSchema.parse((await post(BASE, body, T.keys.aops).expect(201)).body);
+  ) => AopCreatedSchema.parse((await post(BASE, body, T.keys.aops).expect(201)).body);
   const runsOf = async (T: SeededTenant, id: string, query = "") =>
     AopRunPageSchema.parse((await get(`${BASE}/${id}/runs${query}`, T.keys.aops).expect(200)).body);
   const waitRuns = async (T: SeededTenant, id: string, n: number) => {
@@ -125,7 +126,12 @@ describe("AOPs E2E", () => {
     const read = AopSchema.parse(
       (await get(`${BASE}/${created.id}`, A.keys.aops).expect(200)).body,
     );
-    expect(read).toEqual(created);
+    const { unknownClientIds, ...stored } = created;
+    expect(unknownClientIds).toEqual([]);
+    expect(read).toEqual(stored);
+    // Nasce com o último horário agendado: o primeiro disparo é o próximo, nunca na hora.
+    expect(created.lastFireAt).not.toBeNull();
+    expect(Date.parse(must(created.lastFireAt))).toBeLessThanOrEqual(Date.now());
     expect(await aopUsage(A)).toEqual(before);
   });
 
@@ -162,6 +168,56 @@ describe("AOPs E2E", () => {
       { description: DESCRIPTION, clientIds: ["c-1"], agents: ["executor"] },
       A.keys.aops,
     ).expect(422);
+  });
+
+  it("201 traz unknownClientIds: os externalIds que não existem no tenant (aceitos assim mesmo)", async () => {
+    const created = await create(A, {
+      description: DESCRIPTION,
+      clientIds: ["c-1", "ghost-1", "c-2", "ghost-2"],
+    });
+    expect(created.unknownClientIds).toEqual(["ghost-1", "ghost-2"]);
+    expect(created.clientIds).toEqual(["c-1", "ghost-1", "c-2", "ghost-2"]);
+    // Sob RLS: o cliente de outro tenant também é desconhecido aqui.
+    const fromB = await create(B, { description: DESCRIPTION, clientIds: ["c-1"] });
+    expect(fromB.unknownClientIds).toEqual(["c-1"]);
+    const known = await create(A, { description: DESCRIPTION, clientIds: ["c-1", "c-2"] });
+    expect(known.unknownClientIds).toEqual([]);
+    // O GET devolve o AOP, sem o campo da criação.
+    const read = (await get(`${BASE}/${known.id}`, A.keys.aops).expect(200)).body as object;
+    expect(read).not.toHaveProperty("unknownClientIds");
+  });
+
+  it("clientIds repetidos ou nome só de espaços → 422", async () => {
+    await post(BASE, { description: DESCRIPTION, clientIds: ["c-1", "c-1"] }, A.keys.aops).expect(
+      422,
+    );
+    await post(
+      BASE,
+      { description: DESCRIPTION, clientIds: ["c-1"], name: "   " },
+      A.keys.aops,
+    ).expect(422);
+  });
+
+  it("no limite de 50 AOPs → 422 sem chamar o compilador", async () => {
+    const C = await t.seedTenant({ name: "AOPs cheio" });
+    await migratorSql(
+      `INSERT INTO aop (tenant_id, name, description, agents, frequency, weekday, day, hour,
+                        client_ids)
+       SELECT $1, 'semente ' || g, 'descrição', ARRAY['insight'], 'daily', 0, 1, 9, ARRAY['x']
+         FROM generate_series(1, 50) g`,
+      [C.tenantId],
+      { tenantId: C.tenantId },
+    );
+    const compile = vi.spyOn(t.app.get(AopCompiler), "compile");
+    try {
+      const res = await post(BASE, { description: DESCRIPTION, clientIds: ["x"] }, C.keys.aops);
+      expect(res.status).toBe(422);
+      expect(res.headers["content-type"]).toContain("application/problem+json");
+      expect(JSON.stringify(res.body)).toContain("Limite de 50 AOPs");
+      expect(compile).not.toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+    }
   });
 
   it("outro tenant → 404 em ler, PATCH, run e runs; a lista não vaza", async () => {
@@ -215,13 +271,14 @@ describe("AOPs E2E", () => {
       expect(r.status).toBe("ok");
       expect(r.fireAt).toBe(fireAt);
     }
-    expect(
-      AopSchema.parse((await get(`${BASE}/${aop.id}`, A.keys.aops)).body).lastFireAt,
-    ).toBeNull();
+    expect(AopSchema.parse((await get(`${BASE}/${aop.id}`, A.keys.aops)).body).lastFireAt).toBe(
+      aop.lastFireAt,
+    );
 
     const again = await post(`${BASE}/${aop.id}/run`, {}, A.keys.aops);
     expect(again.status).toBe(409);
     expect(again.headers["content-type"]).toContain("application/problem+json");
+    expect((again.body as { type: string }).type).toMatch(/\/manual_run_too_soon$/);
     expect(Number(again.headers["retry-after"])).toBeGreaterThan(0);
     // Outro AOP não é afetado pelo limite do primeiro.
     const other = await create(A);
@@ -231,7 +288,8 @@ describe("AOPs E2E", () => {
   it("run de AOP desligado → 409 e não consome o minuto", async () => {
     const aop = await create(A);
     await patch(`${BASE}/${aop.id}`, { enabled: false }, A.keys.aops).expect(200);
-    await post(`${BASE}/${aop.id}/run`, {}, A.keys.aops).expect(409);
+    const off = await post(`${BASE}/${aop.id}/run`, {}, A.keys.aops).expect(409);
+    expect((off.body as { type: string }).type).toMatch(/\/aop_disabled$/);
     await patch(`${BASE}/${aop.id}`, { enabled: true }, A.keys.aops).expect(200);
     await post(`${BASE}/${aop.id}/run`, {}, A.keys.aops).expect(202);
   });

@@ -12,9 +12,8 @@ import type { AopAgent, Schedule } from "@carina/shared";
 import { MAX_SPECIALISTS } from "../orchestrator/heuristic.js";
 
 /** Termo curto ou ambíguo: casa só como palavra inteira (mesma forma do chat). */
-const word = (term: string, suffix = ""): RegExp =>
-  new RegExp(`(^|[^\\p{L}\\p{N}])${term}${suffix}([^\\p{L}\\p{N}]|$)`, "u");
-// `suffix` também serve de lookahead: "segunda opinião" e "quarta parte" não são dias da semana.
+const word = (term: string): RegExp =>
+  new RegExp(`(^|[^\\p{L}\\p{N}])${term}([^\\p{L}\\p{N}]|$)`, "u");
 
 type Matcher = string | RegExp;
 
@@ -44,23 +43,37 @@ const KEYWORDS: readonly (readonly [AopAgent, readonly Matcher[]])[] = [
   ],
 ];
 
-/** Periodicidade e dias da semana casam por palavra inteira ("segunda opinião" não é segunda-feira). */
+/** Periodicidade casa por palavra inteira. */
 const DAILY = ["todo\\s+dia", "diária", "diario", "diariamente", "diário"].map((t) => word(t));
 const MONTHLY = ["todo\\s+mês", "mensal", "mensalmente", "fechamento\\s+do\\s+mês"].map((t) =>
   word(t),
 );
 
-/** 0=segunda … 6=domingo; a ordem de verificação é a do Python. */
+/**
+ * Dia da semana que também é ordinal ("segunda etapa", "terça parte", "quinta parte", "segunda
+ * mão"): conta só em contexto de dia, isto é, seguido de `-feira` ou precedido de `toda`, `toda a`,
+ * `todas as`, `na`, `nas`, `às`, `as`, `de` ou `em` (no singular ou plural: "às sextas").
+ */
+const ordinalDay = (term: string): RegExp =>
+  new RegExp(
+    `(^|[^\\p{L}\\p{N}])(?:${term}-feiras?|(?:toda(?:\\s+a)?|todas\\s+as|nas?|às|as|de|em)\\s+${term}s?)([^\\p{L}\\p{N}]|$)`,
+    "u",
+  );
+
+/**
+ * 0=segunda … 6=domingo; a ordem de verificação é a do Python. Sábado e domingo não são ordinais:
+ * casam como palavra inteira em qualquer contexto ("todo sábado", "e domingo também").
+ */
 const WEEKDAYS: readonly (readonly [RegExp, number])[] = [
-  [word("segunda", "(?!\\s+(?:opini|vez|via|parte|chamada))"), 0],
-  [word("terça"), 1],
-  [word("terca"), 1],
-  [word("quarta", "(?!\\s+(?:parte|vez))"), 2],
-  [word("quinta"), 3],
-  [word("sexta"), 4],
-  [word("sábado"), 5],
-  [word("sabado"), 5],
-  [word("domingo"), 6],
+  [ordinalDay("segunda"), 0],
+  [ordinalDay("terça"), 1],
+  [ordinalDay("terca"), 1],
+  [ordinalDay("quarta"), 2],
+  [ordinalDay("quinta"), 3],
+  [ordinalDay("sexta"), 4],
+  [word("sábados?"), 5],
+  [word("sabados?"), 5],
+  [word("domingos?"), 6],
 ];
 
 /** Padrão: semanal, sexta, 9h (o "11h UTC" do Python). */

@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import type { StreamEvent } from "@carina/shared";
 import type { Redis } from "ioredis";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { TenantContext } from "../../src/core/context/tenant-context.js";
 import { REDIS } from "../../src/core/redis/redis.tokens.js";
 import { TenantPrismaService } from "../../src/core/database/tenant-prisma.service.js";
 import { StreamsService } from "../../src/core/redis/streams.service.js";
@@ -213,6 +214,71 @@ describe("AOPs: execução no worker (AopJob + AopRunner, LLM mock)", () => {
     expect(await usageOf(tenantId)).toHaveLength(2);
     // logs só com ids e contagens
     expect(JSON.stringify(logged)).not.toContain("analise a carteira");
+  });
+
+  /** Repositório real, sob o tenant fixado (como a rota). */
+  const viaRepo = <T>(
+    tenantId: string,
+    fn: (
+      repo: AopsRepository,
+      tx: Parameters<Parameters<TenantPrismaService["tx"]>[0]>[0],
+    ) => Promise<T>,
+  ) =>
+    TenantContext.run({ tenantId }, () =>
+      t.app.get(TenantPrismaService).tx((tx) => fn(t.app.get(AopsRepository), tx)),
+    );
+  const NEW_AOP = {
+    name: "Carteira premium",
+    description: DESCRIPTION,
+    agents: ["insight"] as ["insight"],
+    schedule: { frequency: "weekly" as const, weekday: 4, day: 1, hour: 9 },
+  };
+
+  it("AOP recém-criado não dispara antes do próximo horário", async () => {
+    const { tenantId } = await tenantWith(["a1"]);
+    // Criado na sexta às 9h05, logo depois do horário das 9h: o primeiro disparo é a próxima sexta.
+    const justAfter = await viaRepo(tenantId, (repo, tx) =>
+      repo.create(tx, { ...NEW_AOP, clientIds: ["a1"] }, FRIDAY_0905),
+    );
+    expect(justAfter.lastFireAt).toBe(FIRE_0900);
+    expect((await job.runOnce({ onlyTenants: [tenantId] })).fired).toBe(0);
+    expect(await runsOf(tenantId)).toEqual([]);
+    expect(await usageOf(tenantId)).toEqual([]);
+
+    // Criado na terça (24/11): o horário seguinte é esta sexta às 9h, que já chegou → dispara uma vez.
+    const tuesday = Date.parse("2026-11-24T15:00:00.000Z");
+    const early = await viaRepo(tenantId, (repo, tx) =>
+      repo.create(tx, { ...NEW_AOP, clientIds: ["a1"] }, tuesday),
+    );
+    expect(early.lastFireAt).toBe("2026-11-20T12:00:00.000Z");
+    expect((await job.runOnce({ onlyTenants: [tenantId] })).fired).toBe(1);
+    expect((await lastFireOf(early.id, tenantId))?.toISOString()).toBe(FIRE_0900);
+    expect((await runsOf(tenantId)).map((r) => r.fire_at.toISOString())).toEqual([FIRE_0900]);
+  });
+
+  it("religar um AOP não dispara o horário perdido", async () => {
+    const { tenantId } = await tenantWith(["a1"]);
+    const aopId = await aopFor(tenantId, ["a1"], ["insight"]);
+    // Desligado há semanas: o último disparo foi em 13/11, e os de 20/11 e 27/11 foram perdidos.
+    await migratorSql(
+      `UPDATE aop SET enabled = false, last_fire_at = '2026-11-13T12:00:00Z' WHERE id = $1`,
+      [aopId],
+      { tenantId },
+    );
+    const on = await viaRepo(tenantId, (repo, tx) => repo.setEnabled(tx, aopId, true, FRIDAY_0905));
+    expect(on).toMatchObject({ enabled: true, lastFireAt: FIRE_0900 });
+    expect((await job.runOnce({ onlyTenants: [tenantId] })).fired).toBe(0);
+    expect(await runsOf(tenantId)).toEqual([]);
+
+    // Desligar não mexe em last_fire_at; religar não volta o relógio (GREATEST).
+    const off = await viaRepo(tenantId, (repo, tx) =>
+      repo.setEnabled(tx, aopId, false, Date.parse("2026-12-30T12:00:00.000Z")),
+    );
+    expect(off?.lastFireAt).toBe(FIRE_0900);
+    const again = await viaRepo(tenantId, (repo, tx) =>
+      repo.setEnabled(tx, aopId, true, Date.parse("2026-11-01T12:00:00.000Z")),
+    );
+    expect(again?.lastFireAt).toBe(FIRE_0900);
   });
 
   it("duas réplicas no mesmo fire (sem o lock global entre elas) → roda uma vez (claimFire)", async () => {

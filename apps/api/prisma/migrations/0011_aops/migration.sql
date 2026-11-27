@@ -15,9 +15,10 @@
 -- * aop_run: uma linha por (AOP, cliente, horário). client_id é o uuid INTERNO; FKs compostas
 --   (tenant_id, client_id) → client e (tenant_id, aop_id) → aop, ambas com cascade: a execução não
 --   aponta para cliente ou AOP de outro tenant, e some com eles. CHECKs: status ok ⇔ sem
---   failure_code; cobrança (work_type e price_brl) só quando executou (ok), nunca em pulado/falho
---   (anti-objetivo "cobrar sem executar"). audit_id sem FK: a auditoria é do Watchtower e o vínculo
---   é só informativo. Índice para o histórico do AOP, mais novo primeiro.
+--   failure_code; work_type só dos valores do WorkTypeSchema; cobrança (work_type e price_brl) só
+--   quando executou (ok), nunca em pulado/falho (anti-objetivo "cobrar sem executar"). audit_id
+--   sem FK: a auditoria é do Watchtower e o vínculo é só informativo. Índice para o histórico do
+--   AOP, mais novo primeiro.
 -- * Tabelas novas NÃO herdam grants (ver 0002): GRANT, ENABLE + FORCE RLS e política explícitos.
 --   aop: política só por tenant (como strategy); carina_app com SELECT e INSERT, e UPDATE só nas
 --   colunas enabled e last_fire_at (GRANT por coluna): o resto não muda depois de criado (spec §2).
@@ -100,6 +101,11 @@ CREATE TABLE "aop_run" (
            ELSE "work_type" IS NULL AND "price_brl" IS NULL END
     ),
     CONSTRAINT "aop_run_price_brl_check" CHECK ("price_brl" >= 0),
+    -- Espelha o WorkTypeSchema de @carina/shared (NULL passa: pulado/falho não cobra).
+    CONSTRAINT "aop_run_work_type_check" CHECK ("work_type" IN (
+      'query', 'analysis', 'multi_agent_analysis', 'optimization', 'execution', 'data_query',
+      'data_ingestion', 'evaluation', 'backtest'
+    )),
     CONSTRAINT "aop_run_results_check" CHECK (jsonb_typeof("results") = 'object')
 );
 

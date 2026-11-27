@@ -7,8 +7,11 @@
  *   transação (limite de `AOP_MAX_PER_TENANT`, ligados ou não), como o builder;
  * - `get`, `setEnabled`, `claimFire`, `listRuns`: id malformado → `null`/`false`/página vazia sem
  *   consultar (nunca 500 por cast de uuid);
- * - `claimFire`: o disparo idempotente do spec §4.4 (UPDATE condicional em `last_fire_at`); o
- *   disparo manual passa por ele também, com `fireAt` = agora;
+ * - `create`/`setEnabled(true)`: `last_fire_at` vai para o último horário agendado (`previousFire`),
+ *   então o primeiro disparo é sempre o PRÓXIMO horário, nunca um que já passou;
+ * - `claimFire`: o disparo idempotente do spec §4.4 (UPDATE condicional em `last_fire_at`), só da
+ *   agenda. O disparo manual NÃO passa por ele: a idempotência dele é o único
+ *   `(aop_id, client_id, fire_at)` de `aop_run` mais a checagem por cliente do runner;
  * - `insertRun`: `ON CONFLICT (aop_id, client_id, fire_at) DO NOTHING`; devolve `null` se já havia;
  * - `tenantIds`: único ponto sem tenant fixado, via `aop_tenant_ids()` (SECURITY DEFINER), que
  *   devolve só ids.
@@ -30,6 +33,7 @@ import { TenantPrismaService } from "../../core/database/tenant-prisma.service.j
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import { Prisma } from "../../generated/prisma/client.js";
 import { decodeCursor, encodeCursor } from "../monitor/monitor.repository.js";
+import { previousFire } from "./schedule.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -135,11 +139,14 @@ export class AopsRepository {
 
   /**
    * Grava o AOP (habilitado) no tenant fixado. A entrada já vem validada e normalizada pela
-   * compilação (os CHECKs do banco são a última barreira).
+   * compilação (os CHECKs do banco são a última barreira). `last_fire_at` nasce em
+   * `previousFire(agenda, nowMs)`: o primeiro disparo é o PRÓXIMO horário agendado, nunca o que já
+   * passou (um AOP criado na terça para "toda sexta" não roda pela sexta anterior). `nowMs` vem do
+   * CLOCK do chamador.
    *
    * @throws ValidationError (422) se o tenant já tem `AOP_MAX_PER_TENANT` AOPs.
    */
-  async create(tx: Tx, input: NewAop): Promise<Aop> {
+  async create(tx: Tx, input: NewAop, nowMs: number): Promise<Aop> {
     const { tenantId } = TenantContext.current();
     // Serializa as criações do mesmo tenant até o fim da transação; em READ COMMITTED (o padrão de
     // `TenantPrismaService.tx`) a contagem abaixo enxerga o que a criação anterior confirmou. Ver
@@ -154,15 +161,38 @@ export class AopsRepository {
       throw new ValidationError(`Limite de ${String(AOP_MAX_PER_TENANT)} AOPs por tenant atingido`);
     }
     const { frequency, weekday, day, hour } = input.schedule;
+    const lastFire = previousFire(input.schedule, nowMs).toISOString();
     const rows = await tx.$queryRaw<AopRow[]>`
       INSERT INTO aop (tenant_id, name, description, agents, frequency, weekday, day, hour,
-                       client_ids)
+                       client_ids, last_fire_at)
       VALUES (${tenantId}::uuid, ${input.name}, ${input.description}, ${input.agents}::text[],
-              ${frequency}, ${weekday}, ${day}, ${hour}, ${input.clientIds}::text[])
+              ${frequency}, ${weekday}, ${day}, ${hour}, ${input.clientIds}::text[],
+              ${lastFire}::timestamptz)
       RETURNING ${AOP_COLUMNS}`;
     const inserted = rows[0];
     if (inserted === undefined) throw new Error("INSERT em aop não devolveu a linha");
     return toAop(inserted);
+  }
+
+  /**
+   * Quantos AOPs o tenant fixado tem (ligados ou não). Pré-checagem barata da rota, ANTES da
+   * compilação por LLM; o limite que vale é o conferido sob lock em `create`.
+   */
+  async count(tx: Tx): Promise<number> {
+    const rows = await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM aop`;
+    return rows[0]?.n ?? 0;
+  }
+
+  /**
+   * Os `externalIds` que não existem como cliente no tenant fixado (uma consulta, sob RLS), na
+   * ordem recebida e sem repetição. Informativo: a criação os aceita mesmo assim.
+   */
+  async unknownClientIds(tx: Tx, externalIds: readonly string[]): Promise<string[]> {
+    if (externalIds.length === 0) return [];
+    const rows = await tx.$queryRaw<{ external_id: string }[]>`
+      SELECT external_id FROM client WHERE external_id = ANY(${[...externalIds]}::text[])`;
+    const known = new Set(rows.map((r) => r.external_id));
+    return [...new Set(externalIds)].filter((id) => !known.has(id));
   }
 
   /** AOPs do tenant fixado, mais novos primeiro. */
@@ -181,11 +211,29 @@ export class AopsRepository {
     return row === undefined ? null : toAop(row);
   }
 
-  /** Liga/desliga o AOP; devolve o AOP atualizado, ou `null` como em `get`. */
-  async setEnabled(tx: Tx, id: string, enabled: boolean): Promise<Aop | null> {
+  /**
+   * Liga/desliga o AOP; devolve o AOP atualizado, ou `null` como em `get`. Ligar avança
+   * `last_fire_at` para `GREATEST(last_fire_at, previousFire(agenda, nowMs))`: os horários perdidos
+   * enquanto estava desligado não disparam ao religar (o próximo disparo é o próximo horário).
+   * Desligar não mexe em `last_fire_at`. A agenda não muda depois de criada, então lê-la antes do
+   * UPDATE (na mesma transação) basta.
+   */
+  async setEnabled(tx: Tx, id: string, enabled: boolean, nowMs: number): Promise<Aop | null> {
     if (!UUID_RE.test(id)) return null;
+    if (!enabled) {
+      const rows = await tx.$queryRaw<AopRow[]>`
+        UPDATE aop SET enabled = false WHERE id = ${id}::uuid RETURNING ${AOP_COLUMNS}`;
+      const row = rows[0];
+      return row === undefined ? null : toAop(row);
+    }
+    const found = await this.get(tx, id);
+    if (found === null) return null;
+    const lastFire = previousFire(found.schedule, nowMs).toISOString();
     const rows = await tx.$queryRaw<AopRow[]>`
-      UPDATE aop SET enabled = ${enabled} WHERE id = ${id}::uuid RETURNING ${AOP_COLUMNS}`;
+      UPDATE aop SET enabled = true,
+                     last_fire_at = GREATEST(last_fire_at, ${lastFire}::timestamptz)
+       WHERE id = ${id}::uuid
+      RETURNING ${AOP_COLUMNS}`;
     const row = rows[0];
     return row === undefined ? null : toAop(row);
   }

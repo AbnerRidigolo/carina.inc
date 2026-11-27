@@ -213,23 +213,27 @@ app da demo tem):
 curl -s -X POST localhost:3000/api/aops -H "$APP" -H 'Content-Type: application/json' \
   -d '{"description":"Toda sexta às 9h, faça a análise do portfólio e do risco","clientIds":["c-1","c-2"]}'
 # → 201 {"id":"<uuid>","name":"...","agents":["insight","risk"],
-#        "schedule":{"frequency":"weekly","weekday":4,"day":1,"hour":9},"enabled":true,...}
+#        "schedule":{"frequency":"weekly","weekday":4,"day":1,"hour":9},"enabled":true,
+#        "unknownClientIds":[],...}   # primeiro disparo agendado: a PRÓXIMA sexta às 9h
 curl -s localhost:3000/api/aops -H "$APP"                                  # os do tenant, mais novos primeiro
 curl -s localhost:3000/api/aops/<uuid> -H "$APP"                           # 404 se não for do tenant
 curl -s -X PATCH localhost:3000/api/aops/<uuid> -H "$APP" -H 'Content-Type: application/json' -d '{"enabled":false}'
-curl -s -X POST localhost:3000/api/aops/<uuid>/run -H "$APP"               # 202 {"fireAt":"..."}; o worker executa
+curl -s -X POST localhost:3000/api/aops/<uuid>/run -H "$APP"               # 202 {"fireAt":"..."}; roda já, no worker
 curl -s "localhost:3000/api/aops/<uuid>/runs?limit=20&cursor=" -H "$APP"   # execuções, mais novas primeiro
 ```
 
-Criar compila a descrição (LLM, com a heurística como contingência) e **não cobra**; o único freio é
-o limite global de requisições. `clientIds` (1 a 20) são os `externalId` do tenant; um id que ainda
-não existe é aceito e vira `client_not_found` na execução. A hora da agenda é a de **São Paulo** (o
-Python usava UTC). A execução é assíncrona: o worker reserva 1 unidade da cota **por cliente**, roda
-os agentes, cobra o tipo de trabalho como o chat e audita no Watchtower. O disparo agendado é
-idempotente (`claimFire`); o disparo manual (`/run`, 1 por AOP por minuto, senão 409) nunca consome o
-disparo agendado. Limitações: sem edição nem remoção (só ligar e desligar), sem entrega externa dos
-resultados, sem tela na web, `client_not_found` não entra no histórico de execuções (só no log do
-worker) e a heurística é só a contingência do LLM, com detecção aproximada de dia da semana; detalhes em
+Criar compila a descrição (LLM, com a heurística como contingência) e **não cobra**; o freio da
+compilação é o limite global de requisições (no teto de 50 AOPs, o 422 vem antes do LLM).
+`clientIds` (1 a 20, sem repetição) são os `externalId` do tenant; um id que ainda não existe é
+aceito, volta em `unknownClientIds` e vira `client_not_found` na execução. Criar ou religar **não
+roda na hora**: o primeiro disparo é o próximo horário da agenda (para rodar já, use `/run`). A hora
+da agenda é a de **São Paulo** (o Python usava UTC). A execução é assíncrona: o worker reserva 1
+unidade da cota **por cliente**, roda os agentes, cobra o tipo de trabalho como o chat e audita no
+Watchtower. O disparo agendado é idempotente (`claimFire`); o disparo manual (`/run`, 1 por AOP por
+minuto, senão 409; desligado também é 409) nunca consome o disparo agendado. Limitações: sem edição
+nem remoção (só ligar e desligar), sem entrega externa dos resultados, sem tela na web,
+`client_not_found` não entra no histórico de execuções (só no log do worker) e a heurística é só a
+contingência do LLM, com detecção aproximada de dia da semana; detalhes em
 [ARQUITETURA](docs/ARCHITECTURE.md#18-procedimentos-agendados-aops) e
 [decisões](docs/DECISOES-E-GARANTIAS.md#procedimentos-agendados-aops-fase-2-entrega-5).
 

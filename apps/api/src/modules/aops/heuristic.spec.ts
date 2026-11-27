@@ -135,4 +135,28 @@ describe("heuristicCompile: dias da semana com limite de palavra", () => {
     expect(heuristicCompile("toda segunda-feira veja o risco").schedule.weekday).toBe(0);
     expect(heuristicCompile("toda quarta-feira veja o risco").schedule.weekday).toBe(2);
   });
+
+  it.each(["segunda etapa", "terça parte", "quinta parte", "segunda mão"])(
+    "'%s' (ordinal, sem contexto de dia) não muda o dia da semana",
+    (phrase) => {
+      const c = heuristicCompile(`analise o risco da ${phrase} da carteira`);
+      expect(c.schedule).toEqual({ frequency: "weekly", weekday: 4, day: 1, hour: 9 });
+    },
+  );
+
+  it.each([
+    ["toda segunda veja o risco", 0],
+    ["na quarta, veja o risco", 2],
+    ["sexta-feira veja o risco", 4],
+    ["às sextas veja o risco", 4],
+    ["todas as segundas veja o risco", 0],
+    ["toda a quinta veja o risco", 3],
+    ["nas terças veja o risco", 1],
+    ["as quintas veja o risco", 3],
+    ["de terca veja o risco", 1],
+    ["em quarta veja o risco", 2],
+    ["quinta-feiras veja o risco", 3],
+  ] as const)("'%s' → weekday %i", (text, weekday) => {
+    expect(heuristicCompile(text).schedule).toMatchObject({ frequency: "weekly", weekday });
+  });
 });

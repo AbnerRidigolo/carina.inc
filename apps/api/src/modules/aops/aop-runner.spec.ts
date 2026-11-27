@@ -176,6 +176,7 @@ function setup(opts: SetupOpts = {}) {
     rows,
     runs,
     contexts,
+    fakeTx,
     db,
     repo,
     agents,
@@ -390,6 +391,34 @@ describe("AopRunner.run", () => {
       (e: unknown) => e,
     );
     expect(result).toBeInstanceOf(Error);
+  });
+
+  it("erro transitório ao procurar o cliente k custa só o cliente k; os seguintes rodam", async () => {
+    const s = setup();
+    // Banco instável na busca do c2: só ele fica em erro (sem cota nem cobrança); c1 e c3 rodam.
+    s.fakeTx.client.findUnique.mockImplementationOnce(
+      s.fakeTx.client.findUnique.getMockImplementation() as never,
+    );
+    s.fakeTx.client.findUnique.mockImplementationOnce(() =>
+      Promise.reject(new Error("conexão caiu")),
+    );
+    const summary = await s.run(aopOf({ clientIds: ["c1", "c2", "c3"] }));
+
+    expect(summary).toMatchObject({ ok: 2, errors: 1, skipped: 0 });
+    expect(summary.clients).toEqual([
+      { clientId: "c1", status: "ok", failureCode: null },
+      { clientId: "c2", status: "error", failureCode: null },
+      { clientId: "c3", status: "ok", failureCode: null },
+    ]);
+    expect(s.rows.map((r) => r.clientId)).toEqual([CLIENTS["c1"], CLIENTS["c3"]]);
+    expect(s.quota.reserve).toHaveBeenCalledTimes(2);
+    expect(s.quota.refund).not.toHaveBeenCalled();
+    expect(s.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ msg: "Execução do AOP falhou para o cliente", aopId: AOP_ID }),
+    );
+    // Só ids: nem a mensagem do erro nem o externalId vão ao log.
+    expect(allLogs(s.logger)).not.toContain("conexão caiu");
+    expect(allLogs(s.logger)).not.toContain('"c2"');
   });
 
   it("falha na cobrança de um cliente → cota devolvida, sem linha, os outros seguem", async () => {

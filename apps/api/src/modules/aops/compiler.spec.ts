@@ -82,6 +82,30 @@ describe("AopCompiler", () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it("erro do modelo vai ao log só com nome e código (nunca a mensagem, que pode trazer a descrição)", async () => {
+    const marker = "MARCADOR-da-descricao-7c1e";
+    const { compiler, warn } = compilerWith(async () => {
+      // Como os erros de parse do LangChain: a mensagem embute a saída do modelo, derivada da descrição.
+      const err = new Error(`Failed to parse. Text: "${marker} toda sexta analise o risco"`);
+      (err as Error & { code?: string }).code = "OUTPUT_PARSING_FAILURE";
+      throw err;
+    });
+    const out = await compiler.compile(`${marker}: toda sexta analise o risco`);
+    expect(out.via).toBe("heuristic");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ errName: "Error", errCode: "OUTPUT_PARSING_FAILURE" }),
+    );
+    // Nada do que o logger recebeu carrega o marcador (nem um Error aninhado, que o pino serializaria).
+    const logged = warn.mock.calls.flat();
+    expect(JSON.stringify(logged)).not.toContain(marker);
+    for (const fields of logged) {
+      for (const value of Object.values(fields as Record<string, unknown>)) {
+        expect(value).not.toBeInstanceOf(Error);
+      }
+    }
+  });
+
   it("saída do modelo que não é o formato esperado: usa a heurística", async () => {
     const { compiler } = compilerWith(async () => "lixo");
     const out = await compiler.compile("verifique impostos");

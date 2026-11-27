@@ -586,15 +586,19 @@ POST /api/builder/strategies/:id/backtest?range=
 ## 18. Procedimentos agendados (`aops`)
 
 Procedimentos em linguagem natural, compilados em `{ agentes, agenda }` e executados pelo worker.
-Portados de `legacy/python/carina/aops/`. Desenho no [spec](superpowers/specs/2026-11-25-aops-design.md).
+Portados de `legacy/python/carina/b2b/aops.py`. Desenho no [spec](superpowers/specs/2026-11-25-aops-design.md).
 
 ```text
-POST  /api/aops              → AopCreateSchema → AopCompiler.compile (LLM → heurística)
-                               → repo.create(tx)                          (201; sem cobrança)
+POST  /api/aops              → AopCreateSchema → repo.count ≥ 50? 422 (antes do LLM)
+                               → AopCompiler.compile (LLM → heurística)
+                               → repo.create(tx, now) (last_fire_at = previousFire)
+                               → repo.unknownClientIds         (201 + unknownClientIds; sem cobrança)
 GET   /api/aops, /api/aops/:id → repo.list / repo.get                      (404 se não for do tenant)
-PATCH /api/aops/:id          → { enabled } → repo.setEnabled              (404 se não for do tenant)
-POST  /api/aops/:id/run      → repo.get (404) → desligado? 409
-                               → Redis SET aop:manual:<id> NX PX 60000 (409 + Retry-After)
+PATCH /api/aops/:id          → { enabled } → repo.setEnabled(now)         (404 se não for do tenant)
+                               (ligar: last_fire_at = GREATEST(last_fire_at, previousFire))
+POST  /api/aops/:id/run      → repo.get (404) → desligado? 409 aop_disabled
+                               → Redis SET aop:manual:<id> NX PX 60000
+                                 (409 manual_run_too_soon + Retry-After)
                                → publica aop.run_requested em `jobs`      (202 { fireAt })
 GET   /api/aops/:id/runs     → repo.get (404) → repo.listRuns (cursor, limit 1..50, padrão 20)
 
@@ -604,7 +608,7 @@ AopJob (worker; na api só com WORKERS_ENABLED) a cada AOP_TICK_MS
 aop.run_requested (grupo `aops` de `jobs`) → AopRunner.run com o fireAt do pedido, sem claimFire
 ```
 
-- **Escopo e guards.** As cinco rotas exigem `aops:manage`, com os guards globais na ordem das
+- **Escopo e guards.** As seis rotas exigem `aops:manage`, com os guards globais na ordem das
   demais. O [`AopsModule`](../apps/api/src/modules/aops/aops.module.ts) traz o controller e o
   compilador e importa o `AopsCoreModule` (repositório, runner e `AopJob`); o responder `aop_compiler`
   do modo mock entra no registry do `LlmModule` ao subir.
@@ -612,23 +616,33 @@ aop.run_requested (grupo `aops` de `jobs`) → AopRunner.run com o fireAt do ped
   lista (inclusive `executor` e `navigator`) são descartados, nomes do Python são mapeados,
   deduplica, ordena como o chat e corta em 3; agenda fora da faixa usa a da heurística. Qualquer falha
   do modelo cai na heurística; sem agente em nenhuma das duas → 422 com a lista de agentes. A
-  descrição vai numa mensagem `human` isolada, nunca no prompt de sistema.
+  descrição vai numa mensagem `human` isolada, nunca no prompt de sistema. O log da falha do modelo
+  leva só o nome e o código do erro (a mensagem de um erro de parse traz a saída do modelo).
 - **Dado.** Tabelas `aop` e `aop_run` (migração 0011) sob RLS com FORCE por tenant, com CHECKs que
-  espelham o schema; limite de 50 AOPs por tenant (conferido na transação, sob lock consultivo).
+  espelham o schema (inclusive `work_type` restrito ao `WorkTypeSchema`); limite de 50 AOPs por
+  tenant, conferido na transação sob lock consultivo e, antes, numa contagem barata da rota que
+  recusa sem chamar o LLM.
   `aop_run` tem único `(aop_id, client_id, fire_at)`, o que torna a execução idempotente.
 - **Agenda.** A hora é a de São Paulo (UTC-3 fixo, sem horário de verão); `previousFire` calcula o
-  último disparo e `claimFire` só deixa um worker ganhá-lo. É no máximo uma vez: se o worker cai
+  último disparo e `claimFire` só deixa um worker ganhá-lo. O AOP nasce com `last_fire_at` no último
+  horário agendado e religar o avança até ele (`GREATEST`), então o primeiro disparo é sempre o
+  PRÓXIMO horário: criar na terça um AOP de sexta não roda pela sexta anterior, e religar depois de
+  semanas não roda o horário perdido. É no máximo uma vez: se o worker cai
   depois do `claimFire`, aquele horário não roda de novo (sem cobrança dupla).
 - **Disparo manual.** Não usa `claimFire` nem mexe em `last_fire_at`, então não consome o disparo
   agendado pendente. O `fireAt` do evento (o instante do pedido) vira `aop_run.fire_at`; a reentrega
-  do evento cai no único de `aop_run` e não cobra de novo. O 409 do minuto é do Redis (`SET NX PX`
-  atômico) e só vale depois de o AOP existir e estar ligado; se a publicação falha, o guard é
-  desfeito.
+  do evento cai no único de `aop_run` e não cobra de novo. O `fireAt` que cai no `.000` de um minuto
+  cheio ganha +1 ms, para nunca ser igual a um horário agendado. O 409 do minuto
+  (`manual_run_too_soon`) é do Redis (`SET NX PX` atômico) e só vale depois de o AOP existir e estar
+  ligado (desligado → 409 `aop_disabled`); se a publicação falha, o guard é desfeito.
 - **Execução.** O `AopRunner` roda cada cliente em sequência: reserva 1 unidade da cota mensal por
   cliente (esgotada → `skipped/quota_exceeded` dele e dos seguintes), roda os agentes em paralelo
   (falha de um vira `{ failed: true }`; todos falham → `failed/agents_failed`, cota devolvida, sem
   cobrança), e grava numa transação `usage_record` (`classifyWork` dos agentes), `audit_event` no
   Watchtower e o `aop_run`. O Executor nunca é usado.
 - **`client_not_found`.** Cliente que sumiu entre a criação e a execução não gera `aop_run` (o
-  `client_id` é FK não nula para `client`): aparece só no log (contagens) e no resumo do worker.
+  `client_id` é FK não nula para `client`): aparece só no log (contagens) e no resumo do worker. Na
+  criação, o 201 já avisa em `unknownClientIds` os ids que não existem no tenant (aceitos assim mesmo).
+- **Falha por cliente.** Um erro inesperado num cliente (inclusive na busca dele) custa só aquele
+  cliente (`error` no resumo, cota devolvida); os seguintes rodam.
 - **LGPD.** Logs só com ids, agentes e contagens (nunca a descrição, o nome nem o externalId).

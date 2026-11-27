@@ -6,7 +6,8 @@
  *   `normalizeCompiled` descarta agentes fora da lista (inclusive `executor` e `navigator`), mapeia
  *   os nomes do Python (`tax_optimizer`→`tax`, `rebalancer`→`risk`), deduplica, põe na ordem fixa do
  *   chat e corta em 3. Agenda fora da faixa usa a da heurística.
- * - Qualquer falha do modelo (erro, formato inválido, nenhum agente válido) cai na heurística.
+ * - Qualquer falha do modelo (erro, formato inválido, nenhum agente válido) cai na heurística; o
+ *   log leva só o nome e o código do erro (`errorFields`), nunca a mensagem.
  * - A descrição vai numa mensagem `human` isolada (higienizada), nunca no prompt de sistema.
  * - Nenhum agente identificado, nem pelo modelo nem pela heurística → `ValidationError` (422) com a
  *   lista dos agentes disponíveis.
@@ -18,6 +19,7 @@ import { type AopAgent, AopAgentSchema, AOP_MAX_AGENTS, ScheduleSchema } from "@
 import type { Schedule } from "@carina/shared";
 import { ValidationError } from "../../core/errors/domain-errors.js";
 import { MAX_QUESTION_CHARS, QUESTION_MESSAGE_ID, contentText, scrub } from "../agents/agent.js";
+import { errorFields } from "../imports/import.worker.js";
 import { ModelFactory } from "../llm/model-factory.js";
 import type { MockResponder, MockResponderRegistry } from "../llm/mock-models.js";
 import { heuristicCompile } from "./heuristic.js";
@@ -132,7 +134,12 @@ export class AopCompiler {
         this.logger.warn({ msg: "Saída do compilador de AOP inválida; usando a heurística" });
       }
     } catch (err) {
-      this.logger.warn({ msg: "Compilador de AOP falhou; usando a heurística", err });
+      // Só nome e código: a mensagem de um erro de parse do LangChain embute a saída do modelo,
+      // derivada da descrição (texto livre do cliente, fora dos logs).
+      this.logger.warn({
+        msg: "Compilador de AOP falhou; usando a heurística",
+        ...errorFields(err),
+      });
     }
     if (compiled) return { ...compiled, via: "llm" };
     if (heuristic.agents.length === 0) {
